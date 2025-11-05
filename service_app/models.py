@@ -8,12 +8,28 @@ import uuid
 
 class User(AbstractUser):
     """Extended User model for admin authentication"""
+    ROLE_MANAGER = 'manager'
+    ROLE_SUPERVISOR = 'supervisor'
+    ROLE_WORKER = 'worker'
+
+    ROLE_CHOICES = [
+        (ROLE_MANAGER, 'Manager'),
+        (ROLE_SUPERVISOR, 'Supervisor'),
+        (ROLE_WORKER, 'Worker'),
+    ]
+    # id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     is_admin = models.BooleanField(default=False)
+    role = models.CharField(max_length=20, choices=ROLE_CHOICES, default=ROLE_WORKER)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:
         db_table = 'auth_user'
+
+    def save(self, *args, **kwargs):
+        # Auto-sync is_admin from role: Managers are admins; others are regular users
+        self.is_admin = self.role == self.ROLE_MANAGER
+        super().save(*args, **kwargs)
 
 
 class Location(models.Model):

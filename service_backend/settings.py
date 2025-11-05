@@ -53,6 +53,7 @@ INSTALLED_APPS = [
     'accounts',
     'user_app',
     'quote_app',
+    'jobtracker_app',
 ]
 
 MIDDLEWARE = [

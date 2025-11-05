@@ -1194,6 +1194,7 @@ class QuoteScheduleUpdateView(generics.UpdateAPIView):
 
 from django.utils.decorators import method_decorator
 from django.views.decorators.csrf import csrf_exempt
+from jobtracker_app.models import Job
 
 @method_decorator(csrf_exempt, name='dispatch')
 class ScheduleCalendarAppointmentView(APIView):
@@ -1237,6 +1238,33 @@ class ScheduleCalendarAppointmentView(APIView):
             quote_schedule.appointment_id=appointment_id
             quote_schedule.is_submitted = True
             quote_schedule.save(update_fields=["scheduled_date","is_submitted"])
+
+            # Create or update JobTracker Job entry
+            contact_email = None
+            if submission.contact:
+                contact_email = getattr(submission.contact, 'email', None)
+
+            services_list = []
+            try:
+                selected_services = submission.selected_services.all()
+                services_list = [
+                    {
+                        'id': str(svc.id),
+                        'name': svc.name
+                    } for svc in selected_services
+                ]
+            except Exception:
+                services_list = []
+
+            Job.objects.update_or_create(
+                submission=submission,
+                defaults={
+                    'appointment_date': scheduled_date,
+                    'services': services_list,
+                    'created_by_email': contact_email,
+                    'status': 'scheduled',
+                }
+            )
 
             return JsonResponse({
                 "status": "success",

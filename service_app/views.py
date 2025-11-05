@@ -57,6 +57,13 @@ class AdminTokenObtainPairView(TokenObtainPairView):
 class AdminTokenRefreshView(TokenRefreshView):
     permission_classes = [AllowAny]
 
+# Public user JWT login/refresh (no admin restriction)
+class UserTokenObtainPairView(TokenObtainPairView):
+    permission_classes = [AllowAny]
+
+class UserTokenRefreshView(TokenRefreshView):
+    permission_classes = [AllowAny]
+
 class AdminLogoutView(APIView):
     permission_classes = [AllowAny]
 
@@ -844,6 +851,14 @@ class ServiceSettingsView(APIView):
             serializer.save()
             return Response(serializer.data)
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+
+# Who am I (current user profile)
+class MeView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        return Response(UserSerializer(request.user).data)
     
 
 
@@ -939,3 +954,46 @@ class GlobalSettingsView(APIView):
             serializer.save()
             return Response(serializer.data)
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+
+# ============================
+# User CRUD (Admin managed)
+# ============================
+class UserListCreateView(generics.ListCreateAPIView):
+    queryset = User.objects.all().order_by('-date_joined')
+    serializer_class = UserSerializer
+    permission_classes = [IsAdminPermission]
+
+    def get_queryset(self):
+        qs = super().get_queryset()
+        search = self.request.query_params.get('search')
+        role = self.request.query_params.get('role')
+        if search:
+            qs = qs.filter(
+                models.Q(username__icontains=search) |
+                models.Q(email__icontains=search) |
+                models.Q(first_name__icontains=search) |
+                models.Q(last_name__icontains=search)
+            )
+        if role:
+            qs = qs.filter(role=role)
+        return qs
+
+
+class UserDetailView(generics.RetrieveUpdateDestroyAPIView):
+    queryset = User.objects.all()
+    serializer_class = UserSerializer
+
+    def get_permissions(self):
+        if self.request.method in ['PUT', 'PATCH', 'DELETE', 'POST']:
+            return [IsAdminPermission()]
+        return [permissions.IsAuthenticated()]
+
+    def get_object(self):
+        obj = super().get_object()
+        user = self.request.user
+        if self.request.method == 'GET':
+            if user.is_authenticated and (user.is_admin or user.id == obj.id):
+                return obj
+            raise permissions.PermissionDenied('Not allowed')
+        return obj

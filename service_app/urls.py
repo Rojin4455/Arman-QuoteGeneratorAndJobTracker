@@ -11,6 +11,10 @@ urlpatterns = [
     path('auth/login/', views.AdminTokenObtainPairView.as_view(), name='admin-login'),
     path('auth/logout/', views.AdminLogoutView.as_view(), name='admin-logout'),
     path('auth/refresh/', views.AdminTokenRefreshView.as_view(), name='token_refresh'),
+    # User (non-admin) auth
+    path('auth/user/login/', views.UserTokenObtainPairView.as_view(), name='user-login'),
+    path('auth/user/refresh/', views.UserTokenRefreshView.as_view(), name='user-token-refresh'),
+    path('auth/me/', views.MeView.as_view(), name='auth-me'),
 
     # ============================================================================
     # LOCATION MANAGEMENT (if you have these)
@@ -105,5 +109,11 @@ urlpatterns = [
     path('global-sizes/<str:id>/', views.GlobalSizePackageDetailView.as_view(), name='global-size-detail'),
 
     path("global-base-price/", views.GlobalSettingsView.as_view(), name="global-settings"),
+
+    # ============================
+    # USER MANAGEMENT
+    # ============================
+    path('users/', views.UserListCreateView.as_view(), name='user-list-create'),
+    path('users/<int:pk>/', views.UserDetailView.as_view(), name='user-detail'),
 
 ]
