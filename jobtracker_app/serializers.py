@@ -2,6 +2,7 @@ from rest_framework import serializers
 from .models import Job, JTService, JobServiceItem, JobAssignment, JobOccurrence
 from datetime import datetime, timedelta
 import calendar
+from service_app.models import User
 
 
 class JTServiceSerializer(serializers.ModelSerializer):
@@ -52,11 +53,26 @@ class OccurrenceEventSerializer(serializers.ModelSerializer):
         ]
 
 
+class CalendarEventSerializer(serializers.ModelSerializer):
+    """Serializer for calendar view - works with Job model directly (supports both one-time and recurring series instances)"""
+    job_id = serializers.UUIDField(source='id')
+
+    class Meta:
+        model = Job
+        fields = [
+            'job_id', 'title', 'scheduled_at', 'status', 'priority',
+            'duration_hours', 'total_price', 'customer_name',
+            'series_id', 'series_sequence'
+        ]
+
+
 class JobSerializer(serializers.ModelSerializer):
     items = JobServiceItemSerializer(many=True, required=False)
     assignments = JobAssignmentSerializer(many=True, required=False)
     occurrence_count = serializers.IntegerField(source='occurrences', read_only=True)
     occurrence_events = JobOccurrenceSerializer(many=True, read_only=True, source='schedule_occurrences')
+    series_id = serializers.UUIDField(read_only=True)
+    series_sequence = serializers.IntegerField(read_only=True)
 
     class Meta:
         model = Job
@@ -67,7 +83,7 @@ class JobSerializer(serializers.ModelSerializer):
             'quoted_by', 'created_by', 'created_by_email',
             'job_type', 'repeat_every', 'repeat_unit', 'occurrences',
             'status', 'notes', 'items', 'assignments',
-            'occurrence_count', 'occurrence_events',
+            'occurrence_count', 'occurrence_events', 'series_id', 'series_sequence',
             'created_at', 'updated_at'
         ]
         read_only_fields = ['id', 'created_at', 'updated_at']
@@ -158,3 +174,121 @@ class JobSerializer(serializers.ModelSerializer):
         return dt.replace(year=year, month=month, day=day)
 
 
+class JobSeriesCreateSerializer(serializers.Serializer):
+    # base job fields
+    title = serializers.CharField()
+    description = serializers.CharField(required=False, allow_blank=True)
+    priority = serializers.ChoiceField(choices=['low', 'medium', 'high'], default='low')
+    duration_hours = serializers.DecimalField(max_digits=5, decimal_places=2)
+    scheduled_at = serializers.DateTimeField()
+    total_price = serializers.DecimalField(max_digits=12, decimal_places=2)
+    customer_name = serializers.CharField(required=False, allow_blank=True)
+    customer_phone = serializers.CharField(required=False, allow_blank=True)
+    customer_email = serializers.EmailField(required=False, allow_blank=True)
+    customer_address = serializers.CharField(required=False, allow_blank=True)
+    ghl_contact_id = serializers.CharField(required=False, allow_blank=True)
+    # Accept either UUID string or omit. We'll map to quoted_by_id in create
+    quoted_by = serializers.CharField(required=False, allow_blank=True, allow_null=True)
+    notes = serializers.CharField(required=False, allow_blank=True)
+    # recurrence
+    repeat_every = serializers.IntegerField(min_value=1)
+    repeat_unit = serializers.ChoiceField(choices=['day', 'week', 'month', 'quarter', 'semi_annual', 'year'])
+    occurrences = serializers.IntegerField(min_value=1)
+    # nested
+    items = JobServiceItemSerializer(many=True, required=False)
+    assignments = JobAssignmentSerializer(many=True, required=False)
+
+    def create(self, validated):
+        from uuid import uuid4
+        base_dt = validated.pop('scheduled_at')
+        repeat_every = validated.pop('repeat_every')
+        repeat_unit = validated.pop('repeat_unit')
+        count = validated.pop('occurrences')
+        items = validated.pop('items', [])
+        assigns = validated.pop('assignments', [])
+        quoted_by_raw = validated.pop('quoted_by', None)
+
+        request = self.context.get('request')
+        creator = request.user if request and request.user.is_authenticated else None
+
+        # build dates using the existing helper
+        dates = JobSerializer._build_occurrence_datetimes(self, base_dt, repeat_every, repeat_unit, count)
+        series = uuid4()
+        created_ids = []
+
+        for idx, dt in enumerate(dates, start=1):
+            # normalize quoted_by: accept uuid/email/username
+            qb_id = None
+            if quoted_by_raw:
+                qb_id = self._resolve_user_id(quoted_by_raw)
+            job = Job.objects.create(
+                **validated,
+                scheduled_at=dt,
+                job_type='one_time',
+                status='scheduled',
+                created_by=creator,
+                created_by_email=getattr(creator, 'email', None),
+                series_id=series,
+                series_sequence=idx,
+                **({ 'quoted_by_id': qb_id } if qb_id else {})
+            )
+            for it in items:
+                # Accept either service UUID or a service name, or a pure custom item
+                service_ref = it.get('service')
+                service_id = None
+                if service_ref:
+                    ref_str = str(service_ref)
+                    # naive UUID check
+                    if len(ref_str) == 36 and ref_str.count('-') == 4:
+                        service_id = ref_str
+                    else:
+                        svc = JTService.objects.filter(name=ref_str).first()
+                        if svc:
+                            service_id = str(svc.id)
+
+                JobServiceItem.objects.create(
+                    job=job,
+                    service_id=service_id,
+                    custom_name=it.get('custom_name'),
+                    price=it.get('price', '0'),
+                    duration_hours=it.get('duration_hours', '0'),
+                )
+            for a in assigns:
+                user_ref = a.get('user')
+                user_id = self._resolve_user_id(user_ref) if user_ref is not None else None
+                JobAssignment.objects.create(
+                    job=job,
+                    user_id=user_id,
+                    role=a.get('role')
+                )
+            created_ids.append(str(job.id))
+
+        return {'series_id': str(series), 'job_ids': created_ids}
+
+    def _resolve_user_id(self, ref):
+        if ref is None:
+            return None
+        ref_str = str(ref).strip()
+        # UUID-like
+        if len(ref_str) == 36 and ref_str.count('-') == 4:
+            return ref_str
+        # Email
+        if '@' in ref_str:
+            u = User.objects.filter(email=ref_str).only('id').first()
+            return str(u.id) if u else None
+        # Username
+        u = User.objects.filter(username=ref_str).only('id').first()
+        return str(u.id) if u else None
+
+
+class LocationSummarySerializer(serializers.Serializer):
+    """Serializer for location summary card data"""
+    address = serializers.CharField()
+    job_count = serializers.IntegerField()
+    customer_names = serializers.ListField(child=serializers.CharField())
+    status_counts = serializers.DictField()
+    total_price = serializers.DecimalField(max_digits=12, decimal_places=2)
+    total_hours = serializers.DecimalField(max_digits=8, decimal_places=2)
+    next_scheduled = serializers.DateTimeField(allow_null=True)
+    service_names = serializers.ListField(child=serializers.CharField())
+    job_ids = serializers.ListField(child=serializers.UUIDField())

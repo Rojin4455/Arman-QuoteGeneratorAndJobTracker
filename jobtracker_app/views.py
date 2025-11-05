@@ -2,10 +2,12 @@ from rest_framework import viewsets, permissions
 from rest_framework.response import Response
 from rest_framework.decorators import action
 from django.shortcuts import get_object_or_404
-from django.db.models import Q
+from django.db.models import Count, Sum, Min, Q
+from django.db.models.functions import Coalesce
+from collections import defaultdict
 
 from .models import Job, JTService, JobOccurrence
-from .serializers import JobSerializer, JTServiceSerializer, OccurrenceEventSerializer
+from .serializers import JobSerializer, JTServiceSerializer, OccurrenceEventSerializer, JobSeriesCreateSerializer, CalendarEventSerializer,LocationSummarySerializer
 from service_app.models import User
 
 
@@ -88,8 +90,9 @@ from django.utils.dateparse import parse_datetime
 class OccurrenceListView(APIView):
     """Flattened calendar events for a date range.
     Query params: start (ISO), end (ISO)
-    - Admins: all occurrences
-    - Normal user: only occurrences for jobs assigned to them
+    Returns all jobs (one-time and recurring series instances) with scheduled_at in the range.
+    - Admins: all jobs
+    - Normal user: only jobs assigned to them
     """
     permission_classes = [IsAuthenticatedOrReadOnly]
 
@@ -104,18 +107,169 @@ class OccurrenceListView(APIView):
         if not start_dt or not end_dt:
             return Response({'detail': 'Invalid start/end datetime.'}, status=400)
 
-        qs = JobOccurrence.objects.select_related('job').filter(
+        # Query Job model directly (includes both one-time jobs and recurring series instances)
+        qs = Job.objects.filter(
             scheduled_at__gte=start_dt,
             scheduled_at__lte=end_dt,
-        )
+        ).exclude(scheduled_at__isnull=True)
 
         user = request.user
         if not user.is_authenticated:
             return Response([], status=200)
         if not getattr(user, 'is_admin', False):
-            qs = qs.filter(job__assignments__user=user).distinct()
+            qs = qs.filter(assignments__user=user).distinct()
 
-        data = OccurrenceEventSerializer(qs.order_by('scheduled_at', 'sequence'), many=True).data
+        data = CalendarEventSerializer(qs.order_by('scheduled_at', 'series_sequence'), many=True).data
         return Response(data)
 
 
+class JobSeriesCreateView(APIView):
+    permission_classes = [IsAuthenticatedOrReadOnly]
+
+    def post(self, request):
+        # Only admins can create series
+        if not (request.user.is_authenticated and getattr(request.user, 'is_admin', False)):
+            raise permissions.PermissionDenied('Admin only')
+        serializer = JobSeriesCreateSerializer(data=request.data, context={'request': request})
+        serializer.is_valid(raise_exception=True)
+        result = serializer.save()
+        return Response(result, status=201)
+
+
+class JobBySeriesView(APIView):
+    permission_classes = [IsAuthenticatedOrReadOnly]
+
+    def get(self, request, series_id):
+        qs = Job.objects.filter(series_id=series_id).select_related('submission').order_by('series_sequence')
+        user = request.user
+        if not user.is_authenticated:
+            return Response([], status=200)
+        if not getattr(user, 'is_admin', False):
+            qs = qs.filter(assignments__user=user).distinct()
+        data = JobSerializer(qs, many=True).data
+        return Response(data)
+
+
+
+class LocationJobListView(APIView):
+    """
+    Returns jobs grouped by location with summary statistics.
+    Each location includes:
+    - Address details
+    - Number of jobs
+    - Customer names
+    - Status counts
+    - Total price
+    - Total hours
+    - Next scheduled date
+    - Service names
+    """
+    permission_classes = [IsAuthenticatedOrReadOnly]
+
+    def get(self, request):
+        user = request.user
+        if not user.is_authenticated:
+            return Response([], status=200)
+
+        # Base queryset with permission filtering
+        qs = Job.objects.select_related('submission').prefetch_related(
+            'items__service', 'assignments__user'
+        )
+
+        if not getattr(user, 'is_admin', False):
+            qs = qs.filter(assignments__user=user).distinct()
+
+        # Filter out jobs without addresses
+        qs = qs.exclude(Q(customer_address__isnull=True) | Q(customer_address=''))
+
+        # Group jobs by address
+        location_map = defaultdict(list)
+        for job in qs:
+            address = job.customer_address.strip()
+            location_map[address].append(job)
+
+        # Build response data
+        result = []
+        for address, jobs in location_map.items():
+            # Status counts
+            status_counts = defaultdict(int)
+            for job in jobs:
+                status_counts[job.status] += 1
+
+            # Customer names (unique)
+            customer_names = list(set(
+                job.customer_name for job in jobs 
+                if job.customer_name
+            ))
+
+            # Total price and hours
+            total_price = sum(job.total_price for job in jobs)
+            total_hours = sum(job.duration_hours for job in jobs)
+
+            # Next scheduled job
+            next_scheduled = None
+            scheduled_jobs = [j for j in jobs if j.scheduled_at]
+            if scheduled_jobs:
+                next_job = min(scheduled_jobs, key=lambda j: j.scheduled_at)
+                next_scheduled = next_job.scheduled_at
+
+            # Service names (unique)
+            service_names = set()
+            for job in jobs:
+                for item in job.items.all():
+                    if item.service and item.service.name:
+                        service_names.add(item.service.name)
+                    elif item.custom_name:
+                        service_names.add(item.custom_name)
+
+            result.append({
+                'address': address,
+                'job_count': len(jobs),
+                'customer_names': customer_names,
+                'status_counts': {
+                    'pending': status_counts.get('pending', 0),
+                    'confirmed': status_counts.get('confirmed', 0),
+                    'service_due': status_counts.get('service_due', 0),
+                    'on_the_way': status_counts.get('on_the_way', 0),
+                    'in_progress': status_counts.get('in_progress', 0),
+                    'completed': status_counts.get('completed', 0),
+                    'cancelled': status_counts.get('cancelled', 0),
+                },
+                'total_price': float(total_price),
+                'total_hours': float(total_hours),
+                'next_scheduled': next_scheduled.isoformat() if next_scheduled else None,
+                'service_names': sorted(list(service_names)),
+                'job_ids': [str(job.id) for job in jobs],
+            })
+
+        # Sort by next scheduled date (nulls last)
+        result.sort(key=lambda x: (x['next_scheduled'] is None, x['next_scheduled']))
+
+        return Response(result)
+
+
+class LocationJobDetailView(APIView):
+    """
+    Returns detailed job information for a specific location.
+    Query param: address (exact match)
+    """
+    permission_classes = [IsAuthenticatedOrReadOnly]
+
+    def get(self, request):
+        address = request.query_params.get('address')
+        if not address:
+            return Response({'detail': 'address query parameter is required.'}, status=400)
+
+        user = request.user
+        if not user.is_authenticated:
+            return Response([], status=200)
+
+        # Base queryset with permission filtering
+        qs = Job.objects.filter(customer_address=address).select_related('submission')
+
+        if not getattr(user, 'is_admin', False):
+            qs = qs.filter(assignments__user=user).distinct()
+
+        # Serialize and return
+        data = JobSerializer(qs.order_by('scheduled_at', '-created_at'), many=True).data
+        return Response(data)
