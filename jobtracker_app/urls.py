@@ -1,10 +1,9 @@
 from django.urls import path, include
 from rest_framework.routers import DefaultRouter
-from .views import JobViewSet, JTServiceViewSet, OccurrenceListView, JobSeriesCreateView, JobBySeriesView,LocationJobListView,LocationJobDetailView
+from .views import JobViewSet, OccurrenceListView, JobSeriesCreateView, JobBySeriesView,LocationJobListView,LocationJobDetailView
 
 router = DefaultRouter()
 router.register(r'jobs', JobViewSet, basename='job')
-router.register(r'services-templates', JTServiceViewSet, basename='jtservice')
 
 urlpatterns = [
     path('', include(router.urls)),

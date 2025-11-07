@@ -80,6 +80,8 @@ class Service(models.Model):
     name = models.CharField(max_length=255)
     description = models.TextField()
     # base_price=models.DecimalField(max_digits=10,decimal_places=2,default=Decimal('0.00'))
+    price = models.DecimalField(max_digits=10, decimal_places=2, default=Decimal('0.00'))
+    hours = models.DecimalField(max_digits=5, decimal_places=2, default=Decimal('0.00'))
     is_active = models.BooleanField(default=True)
     order = models.PositiveIntegerField(default=0)
     created_at = models.DateTimeField(auto_now_add=True)

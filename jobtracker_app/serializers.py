@@ -1,15 +1,8 @@
 from rest_framework import serializers
-from .models import Job, JTService, JobServiceItem, JobAssignment, JobOccurrence
+from .models import Job, JobServiceItem, JobAssignment, JobOccurrence
 from datetime import datetime, timedelta
 import calendar
-from service_app.models import User
-
-
-class JTServiceSerializer(serializers.ModelSerializer):
-    class Meta:
-        model = JTService
-        fields = ['id', 'name', 'description', 'default_duration_hours', 'default_price', 'is_active', 'created_at', 'updated_at']
-        read_only_fields = ['id', 'created_at', 'updated_at']
+from service_app.models import User, Service
 
 
 class JobServiceItemSerializer(serializers.ModelSerializer):
@@ -81,7 +74,7 @@ class JobSerializer(serializers.ModelSerializer):
             'total_price',
             'customer_name', 'customer_phone', 'customer_email', 'customer_address', 'ghl_contact_id',
             'quoted_by', 'created_by', 'created_by_email',
-            'job_type', 'repeat_every', 'repeat_unit', 'occurrences',
+            'job_type', 'repeat_every', 'repeat_unit', 'occurrences', 'day_of_week',
             'status', 'notes', 'items', 'assignments',
             'occurrence_count', 'occurrence_events', 'series_id', 'series_sequence',
             'created_at', 'updated_at'
@@ -119,11 +112,29 @@ class JobSerializer(serializers.ModelSerializer):
                 JobAssignment.objects.create(job=instance, **assign)
 
         # Rebuild occurrences if any scheduling fields changed
-        scheduling_fields = ['job_type', 'repeat_every', 'repeat_unit', 'occurrences', 'scheduled_at']
+        scheduling_fields = ['job_type', 'repeat_every', 'repeat_unit', 'occurrences', 'day_of_week', 'scheduled_at']
         if any(f in self.initial_data for f in scheduling_fields):
             self._rebuild_occurrences(instance)
 
         return instance
+
+    def validate(self, data):
+        repeat_unit = data.get('repeat_unit')
+        day_of_week = data.get('day_of_week')
+        
+        # If repeat_unit is 'week', day_of_week should be provided
+        if repeat_unit == 'week' and day_of_week is None:
+            raise serializers.ValidationError({
+                'day_of_week': 'day_of_week is required when repeat_unit is "week"'
+            })
+        
+        # If repeat_unit is not 'week', day_of_week should be None
+        if repeat_unit and repeat_unit != 'week' and day_of_week is not None:
+            raise serializers.ValidationError({
+                'day_of_week': 'day_of_week should only be provided when repeat_unit is "week"'
+            })
+        
+        return data
 
     # ===== recurrence helpers =====
     def _rebuild_occurrences(self, job: Job):
@@ -137,21 +148,44 @@ class JobSerializer(serializers.ModelSerializer):
             return
         if not job.repeat_every or not job.repeat_unit or not job.occurrences:
             return
-        dates = self._build_occurrence_datetimes(job.scheduled_at, job.repeat_every, job.repeat_unit, job.occurrences)
+        dates = self._build_occurrence_datetimes(
+            job.scheduled_at, 
+            job.repeat_every, 
+            job.repeat_unit, 
+            job.occurrences,
+            day_of_week=job.day_of_week
+        )
         for idx, dt in enumerate(dates, start=1):
             JobOccurrence.objects.create(job=job, scheduled_at=dt, sequence=idx)
 
-    def _build_occurrence_datetimes(self, start_dt, repeat_every, repeat_unit, occurrences):
+    def _build_occurrence_datetimes(self, start_dt, repeat_every, repeat_unit, occurrences, day_of_week=None):
         result = []
         current = start_dt
+        
         for i in range(occurrences):
             if i == 0:
+                # For the first occurrence, if it's weekly and day_of_week is specified,
+                # adjust to the correct day of week
+                if repeat_unit == 'week' and day_of_week is not None:
+                    # Get the current weekday (Python's weekday() is 0=Monday, 6=Sunday)
+                    current_weekday = current.weekday()  # 0=Monday, 6=Sunday
+                    days_to_add = (day_of_week - current_weekday) % 7
+                    if days_to_add > 0:
+                        current = current + timedelta(days=days_to_add)
                 result.append(current)
                 continue
+                
             if repeat_unit == 'day':
                 current = current + timedelta(days=repeat_every)
             elif repeat_unit == 'week':
+                # For weekly, add the number of weeks
                 current = current + timedelta(weeks=repeat_every)
+                # Ensure it's on the correct day of week
+                if day_of_week is not None:
+                    current_weekday = current.weekday()
+                    days_to_add = (day_of_week - current_weekday) % 7
+                    if days_to_add > 0:
+                        current = current + timedelta(days=days_to_add)
             elif repeat_unit in ['month', 'quarter', 'semi_annual', 'year']:
                 months_to_add = repeat_every
                 if repeat_unit == 'quarter':
@@ -194,6 +228,7 @@ class JobSeriesCreateSerializer(serializers.Serializer):
     repeat_every = serializers.IntegerField(min_value=1)
     repeat_unit = serializers.ChoiceField(choices=['day', 'week', 'month', 'quarter', 'semi_annual', 'year'])
     occurrences = serializers.IntegerField(min_value=1)
+    day_of_week = serializers.IntegerField(min_value=0, max_value=6, required=False, allow_null=True)
     # nested
     items = JobServiceItemSerializer(many=True, required=False)
     assignments = JobAssignmentSerializer(many=True, required=False)
@@ -204,6 +239,7 @@ class JobSeriesCreateSerializer(serializers.Serializer):
         repeat_every = validated.pop('repeat_every')
         repeat_unit = validated.pop('repeat_unit')
         count = validated.pop('occurrences')
+        day_of_week = validated.pop('day_of_week', None)
         items = validated.pop('items', [])
         assigns = validated.pop('assignments', [])
         quoted_by_raw = validated.pop('quoted_by', None)
@@ -211,8 +247,10 @@ class JobSeriesCreateSerializer(serializers.Serializer):
         request = self.context.get('request')
         creator = request.user if request and request.user.is_authenticated else None
 
-        # build dates using the existing helper
-        dates = JobSerializer._build_occurrence_datetimes(self, base_dt, repeat_every, repeat_unit, count)
+        # build dates using the existing helper, passing day_of_week
+        dates = JobSerializer._build_occurrence_datetimes(
+            self, base_dt, repeat_every, repeat_unit, count, day_of_week=day_of_week
+        )
         series = uuid4()
         created_ids = []
 
@@ -242,7 +280,7 @@ class JobSeriesCreateSerializer(serializers.Serializer):
                     if len(ref_str) == 36 and ref_str.count('-') == 4:
                         service_id = ref_str
                     else:
-                        svc = JTService.objects.filter(name=ref_str).first()
+                        svc = Service.objects.filter(name=ref_str).first()
                         if svc:
                             service_id = str(svc.id)
 
@@ -264,6 +302,24 @@ class JobSeriesCreateSerializer(serializers.Serializer):
             created_ids.append(str(job.id))
 
         return {'series_id': str(series), 'job_ids': created_ids}
+
+    def validate(self, data):
+        repeat_unit = data.get('repeat_unit')
+        day_of_week = data.get('day_of_week')
+        
+        # If repeat_unit is 'week', day_of_week should be provided
+        if repeat_unit == 'week' and day_of_week is None:
+            raise serializers.ValidationError({
+                'day_of_week': 'day_of_week is required when repeat_unit is "week"'
+            })
+        
+        # If repeat_unit is not 'week', day_of_week should be None
+        if repeat_unit and repeat_unit != 'week' and day_of_week is not None:
+            raise serializers.ValidationError({
+                'day_of_week': 'day_of_week should only be provided when repeat_unit is "week"'
+            })
+        
+        return data
 
     def _resolve_user_id(self, ref):
         if ref is None:

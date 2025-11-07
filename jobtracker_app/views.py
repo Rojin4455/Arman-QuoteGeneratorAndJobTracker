@@ -5,10 +5,95 @@ from django.shortcuts import get_object_or_404
 from django.db.models import Count, Sum, Min, Q
 from django.db.models.functions import Coalesce
 from collections import defaultdict
+from django.utils.dateparse import parse_datetime
+import uuid
 
-from .models import Job, JTService, JobOccurrence
-from .serializers import JobSerializer, JTServiceSerializer, OccurrenceEventSerializer, JobSeriesCreateSerializer, CalendarEventSerializer,LocationSummarySerializer
+from .models import Job, JobOccurrence
+from .serializers import JobSerializer, OccurrenceEventSerializer, JobSeriesCreateSerializer, CalendarEventSerializer,LocationSummarySerializer
 from service_app.models import User
+
+
+def apply_job_filters(queryset, request):
+    """
+    Apply common filters to job queryset based on query parameters.
+    Supports:
+    - status: comma-separated list of statuses (e.g., 'pending,confirmed')
+    - job_ids: comma-separated list of job UUIDs
+    - assignee_ids: comma-separated list of user UUIDs or emails
+    - start_date: ISO datetime string (filters scheduled_at >= start_date)
+    - end_date: ISO datetime string (filters scheduled_at <= end_date)
+    - search: search in title, description, customer_name, customer_email, customer_phone
+    """
+    params = request.query_params
+    
+    # Filter by status (supports multiple statuses)
+    status = params.get('status')
+    if status:
+        status_list = [s.strip() for s in status.split(',') if s.strip()]
+        if status_list:
+            queryset = queryset.filter(status__in=status_list)
+    
+    # Filter by specific job IDs
+    job_ids = params.get('job_ids')
+    if job_ids:
+        try:
+            id_list = [uuid.UUID(jid.strip()) for jid in job_ids.split(',') if jid.strip()]
+            if id_list:
+                queryset = queryset.filter(id__in=id_list)
+        except (ValueError, AttributeError):
+            pass  # Invalid UUID format, skip this filter
+    
+    # Filter by assignees (user IDs or emails)
+    assignee_ids = params.get('assignee_ids')
+    if assignee_ids:
+        assignee_list = [a.strip() for a in assignee_ids.split(',') if a.strip()]
+        if assignee_list:
+            # Try to resolve each assignee (could be UUID, email, or username)
+            user_ids = []
+            for assignee in assignee_list:
+                try:
+                    # Try as UUID first
+                    user_id = uuid.UUID(assignee)
+                    user_ids.append(user_id)
+                except (ValueError, AttributeError):
+                    # Try as email or username
+                    user = User.objects.filter(
+                        Q(email=assignee) | Q(username=assignee)
+                    ).first()
+                    if user:
+                        user_ids.append(user.id)
+            
+            if user_ids:
+                queryset = queryset.filter(assignments__user_id__in=user_ids).distinct()
+    
+    # Filter by date range
+    start_date = params.get('start_date')
+    if start_date:
+        start_dt = parse_datetime(start_date)
+        if start_dt:
+            queryset = queryset.filter(scheduled_at__gte=start_dt)
+    
+    end_date = params.get('end_date')
+    if end_date:
+        end_dt = parse_datetime(end_date)
+        if end_dt:
+            queryset = queryset.filter(scheduled_at__lte=end_dt)
+    
+    # Search filter (searches in multiple fields)
+    search = params.get('search')
+    if search:
+        search_query = Q(
+            Q(title__icontains=search) |
+            Q(description__icontains=search) |
+            Q(customer_name__icontains=search) |
+            Q(customer_email__icontains=search) |
+            Q(customer_phone__icontains=search) |
+            Q(customer_address__icontains=search) |
+            Q(notes__icontains=search)
+        )
+        queryset = queryset.filter(search_query)
+    
+    return queryset
 
 
 class IsAuthenticatedOrReadOnly(permissions.BasePermission):
@@ -35,10 +120,15 @@ class JobViewSet(viewsets.ModelViewSet):
             return queryset.none()
 
         if getattr(user, 'is_admin', False):
+            # Apply filters for admins
+            queryset = apply_job_filters(queryset, self.request)
             return queryset
 
         # Normal users: only jobs assigned to them
-        return queryset.filter(assignments__user=user).distinct()
+        queryset = queryset.filter(assignments__user=user).distinct()
+        # Apply filters for normal users
+        queryset = apply_job_filters(queryset, self.request)
+        return queryset
 
     def get_permissions(self):
         # Only admins can create/update/delete jobs
@@ -59,37 +149,21 @@ class JobViewSet(viewsets.ModelViewSet):
         serializer.save(created_by=self.request.user, created_by_email=getattr(self.request.user, 'email', None))
 
 
-class JTServiceViewSet(viewsets.ModelViewSet):
-    queryset = JTService.objects.all().order_by('name')
-    serializer_class = JTServiceSerializer
-    permission_classes = [IsAuthenticatedOrReadOnly]
-
-    def get_queryset(self):
-        qs = super().get_queryset()
-        user = self.request.user
-        if not user.is_authenticated:
-            return qs.none()
-        if getattr(user, 'is_admin', False):
-            return qs
-        # Normal users only see their own templates
-        return qs.filter(created_by=user)
-
-    def perform_create(self, serializer):
-        creator = self.request.user if self.request.user.is_authenticated else None
-        serializer.save(created_by=creator)
-
-
 class _IsAdminOnly(permissions.BasePermission):
     def has_permission(self, request, view):
         return request.user.is_authenticated and getattr(request.user, 'is_admin', False)
 
 
 from rest_framework.views import APIView
-from django.utils.dateparse import parse_datetime
 
 class OccurrenceListView(APIView):
     """Flattened calendar events for a date range.
-    Query params: start (ISO), end (ISO)
+    Query params: 
+    - start (ISO), end (ISO) - required for date range
+    - status: comma-separated list of statuses
+    - job_ids: comma-separated list of job UUIDs
+    - assignee_ids: comma-separated list of user UUIDs or emails
+    - search: search in title, description, customer fields
     Returns all jobs (one-time and recurring series instances) with scheduled_at in the range.
     - Admins: all jobs
     - Normal user: only jobs assigned to them
@@ -118,6 +192,9 @@ class OccurrenceListView(APIView):
             return Response([], status=200)
         if not getattr(user, 'is_admin', False):
             qs = qs.filter(assignments__user=user).distinct()
+
+        # Apply additional filters
+        qs = apply_job_filters(qs, request)
 
         data = CalendarEventSerializer(qs.order_by('scheduled_at', 'series_sequence'), many=True).data
         return Response(data)
@@ -154,6 +231,14 @@ class JobBySeriesView(APIView):
 class LocationJobListView(APIView):
     """
     Returns jobs grouped by location with summary statistics.
+    Query params:
+    - status: comma-separated list of statuses
+    - job_ids: comma-separated list of job UUIDs
+    - assignee_ids: comma-separated list of user UUIDs or emails
+    - start_date: ISO datetime string (filters scheduled_at >= start_date)
+    - end_date: ISO datetime string (filters scheduled_at <= end_date)
+    - search: search in title, description, customer fields
+    
     Each location includes:
     - Address details
     - Number of jobs
@@ -178,6 +263,9 @@ class LocationJobListView(APIView):
 
         if not getattr(user, 'is_admin', False):
             qs = qs.filter(assignments__user=user).distinct()
+
+        # Apply filters
+        qs = apply_job_filters(qs, request)
 
         # Filter out jobs without addresses
         qs = qs.exclude(Q(customer_address__isnull=True) | Q(customer_address=''))
@@ -251,7 +339,14 @@ class LocationJobListView(APIView):
 class LocationJobDetailView(APIView):
     """
     Returns detailed job information for a specific location.
-    Query param: address (exact match)
+    Query params:
+    - address (required): exact match for customer address
+    - status: comma-separated list of statuses
+    - job_ids: comma-separated list of job UUIDs
+    - assignee_ids: comma-separated list of user UUIDs or emails
+    - start_date: ISO datetime string (filters scheduled_at >= start_date)
+    - end_date: ISO datetime string (filters scheduled_at <= end_date)
+    - search: search in title, description, customer fields
     """
     permission_classes = [IsAuthenticatedOrReadOnly]
 
@@ -269,6 +364,9 @@ class LocationJobDetailView(APIView):
 
         if not getattr(user, 'is_admin', False):
             qs = qs.filter(assignments__user=user).distinct()
+
+        # Apply filters
+        qs = apply_job_filters(qs, request)
 
         # Serialize and return
         data = JobSerializer(qs.order_by('scheduled_at', '-created_at'), many=True).data

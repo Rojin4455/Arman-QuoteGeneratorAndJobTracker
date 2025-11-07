@@ -2,26 +2,7 @@ from django.db import models
 import uuid
 from decimal import Decimal
 from quote_app.models import CustomerSubmission
-from service_app.models import User
-
-
-class JTService(models.Model):
-    """User-defined service template used when creating jobs directly."""
-    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
-    name = models.CharField(max_length=255)
-    description = models.TextField(blank=True, null=True)
-    default_duration_hours = models.DecimalField(max_digits=5, decimal_places=2, default=Decimal('0.00'))
-    default_price = models.DecimalField(max_digits=10, decimal_places=2, default=Decimal('0.00'))
-    is_active = models.BooleanField(default=True)
-    created_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True)
-    created_at = models.DateTimeField(auto_now_add=True)
-    updated_at = models.DateTimeField(auto_now=True)
-
-    class Meta:
-        ordering = ['name']
-
-    def __str__(self):
-        return self.name
+from service_app.models import User, Service
 
 
 class Job(models.Model):
@@ -42,6 +23,15 @@ class Job(models.Model):
         ('quarter', 'Quarter'),
         ('semi_annual', 'Semi-Annual'),
         ('year', 'Year'),
+    ]
+    DAY_OF_WEEK_CHOICES = [
+        (0, 'Monday'),
+        (1, 'Tuesday'),
+        (2, 'Wednesday'),
+        (3, 'Thursday'),
+        (4, 'Friday'),
+        (5, 'Saturday'),
+        (6, 'Sunday'),
     ]
     STATUS_CHOICES = [
         ('pending', 'Pending'),
@@ -86,6 +76,12 @@ class Job(models.Model):
     repeat_every = models.PositiveIntegerField(null=True, blank=True)
     repeat_unit = models.CharField(max_length=20, choices=REPEAT_UNIT_CHOICES, null=True, blank=True)
     occurrences = models.PositiveIntegerField(null=True, blank=True)
+    day_of_week = models.IntegerField(
+        choices=DAY_OF_WEEK_CHOICES,
+        null=True,
+        blank=True,
+        help_text="Day of week for weekly recurring jobs (0=Monday, 6=Sunday)"
+    )
 
     status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='scheduled')
     notes = models.TextField(blank=True, null=True)
@@ -107,7 +103,7 @@ class Job(models.Model):
 class JobServiceItem(models.Model):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     job = models.ForeignKey(Job, on_delete=models.CASCADE, related_name='items')
-    service = models.ForeignKey(JTService, on_delete=models.SET_NULL, null=True, blank=True)
+    service = models.ForeignKey(Service, on_delete=models.SET_NULL, null=True, blank=True)
     custom_name = models.CharField(max_length=255, blank=True, null=True)
     price = models.DecimalField(max_digits=10, decimal_places=2, default=Decimal('0.00'))
     duration_hours = models.DecimalField(max_digits=5, decimal_places=2, default=Decimal('0.00'))
