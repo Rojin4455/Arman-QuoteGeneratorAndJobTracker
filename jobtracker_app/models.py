@@ -34,6 +34,7 @@ class Job(models.Model):
         (6, 'Sunday'),
     ]
     STATUS_CHOICES = [
+        ('to_convert', 'Needs Conversion'),
         ('pending', 'Pending'),
         ('confirmed', 'Confirmed'),
         ('service_due', 'Service Due'),
@@ -83,7 +84,7 @@ class Job(models.Model):
         help_text="Day of week for weekly recurring jobs (0=Monday, 6=Sunday)"
     )
 
-    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='scheduled')
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='pending')
     notes = models.TextField(blank=True, null=True)
 
     # Series grouping for recurring jobs when creating independent jobs per date

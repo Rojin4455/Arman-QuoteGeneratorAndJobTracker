@@ -15,7 +15,7 @@ class UserSerializer(serializers.ModelSerializer):
     password = serializers.CharField(write_only=True, required=False, allow_blank=False, style={'input_type': 'password'})
     class Meta:
         model = User
-        fields = ['id', 'username', 'email', 'first_name', 'last_name', 'role', 'is_admin', 'created_at', 'password']
+        fields = ['id', 'username', 'email', 'first_name', 'last_name', 'role', 'is_admin', 'created_at', 'password', 'is_active']
         read_only_fields = ['id', 'created_at', 'is_admin']
 
     def create(self, validated_data):

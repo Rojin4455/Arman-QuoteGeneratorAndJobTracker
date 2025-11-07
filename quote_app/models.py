@@ -16,6 +16,7 @@ class CustomerSubmission(models.Model):
         ('responses_completed', 'Responses Completed'),
         ('packages_selected', 'Packages Selected'),
         ('submitted', 'Submitted'),
+        ('accepted', 'Accepted'),
         ('expired', 'Expired'),
     ]
     

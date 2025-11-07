@@ -32,6 +32,10 @@ def apply_job_filters(queryset, request):
         status_list = [s.strip() for s in status.split(',') if s.strip()]
         if status_list:
             queryset = queryset.filter(status__in=status_list)
+    else:
+        queryset = queryset.exclude(
+            Q(status__isnull=True) | Q(status="") | Q(status="to_convert")
+        )
     
     # Filter by specific job IDs
     job_ids = params.get('job_ids')
