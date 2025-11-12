@@ -1,6 +1,7 @@
 from rest_framework import viewsets, permissions
 from rest_framework.response import Response
 from rest_framework.decorators import action
+from rest_framework.pagination import PageNumberPagination
 from django.shortcuts import get_object_or_404
 from django.db.models import Count, Sum, Min, Q
 from django.db.models.functions import Coalesce
@@ -218,6 +219,12 @@ class JobSeriesCreateView(APIView):
 
 
 class JobBySeriesView(APIView):
+    """
+    Returns jobs for a specific series.
+    Query params:
+    - page: page number (default: 1)
+    - page_size: number of items per page (default: 20, max: 100)
+    """
     permission_classes = [IsAuthenticatedOrReadOnly]
 
     def get(self, request, series_id):
@@ -227,8 +234,16 @@ class JobBySeriesView(APIView):
             return Response([], status=200)
         if not getattr(user, 'is_admin', False):
             qs = qs.filter(assignments__user=user).distinct()
-        data = JobSerializer(qs, many=True).data
-        return Response(data)
+        
+        # Apply pagination
+        paginator = PageNumberPagination()
+        paginator.page_size = 20
+        paginator.page_size_query_param = 'page_size'
+        paginator.max_page_size = 100
+        
+        paginated_qs = paginator.paginate_queryset(qs, request)
+        serializer = JobSerializer(paginated_qs, many=True)
+        return paginator.get_paginated_response(serializer.data)
 
 
 
@@ -242,6 +257,8 @@ class LocationJobListView(APIView):
     - start_date: ISO datetime string (filters scheduled_at >= start_date)
     - end_date: ISO datetime string (filters scheduled_at <= end_date)
     - search: search in title, description, customer fields
+    - page: page number (default: 1)
+    - page_size: number of items per page (default: 20, max: 100)
     
     Each location includes:
     - Address details
@@ -337,7 +354,14 @@ class LocationJobListView(APIView):
         # Sort by next scheduled date (nulls last)
         result.sort(key=lambda x: (x['next_scheduled'] is None, x['next_scheduled']))
 
-        return Response(result)
+        # Apply pagination
+        paginator = PageNumberPagination()
+        paginator.page_size = 20
+        paginator.page_size_query_param = 'page_size'
+        paginator.max_page_size = 100
+        
+        paginated_result = paginator.paginate_queryset(result, request)
+        return paginator.get_paginated_response(paginated_result)
 
 
 class LocationJobDetailView(APIView):
@@ -351,6 +375,8 @@ class LocationJobDetailView(APIView):
     - start_date: ISO datetime string (filters scheduled_at >= start_date)
     - end_date: ISO datetime string (filters scheduled_at <= end_date)
     - search: search in title, description, customer fields
+    - page: page number (default: 1)
+    - page_size: number of items per page (default: 20, max: 100)
     """
     permission_classes = [IsAuthenticatedOrReadOnly]
 
@@ -372,6 +398,15 @@ class LocationJobDetailView(APIView):
         # Apply filters
         qs = apply_job_filters(qs, request)
 
-        # Serialize and return
-        data = JobSerializer(qs.order_by('scheduled_at', '-created_at'), many=True).data
-        return Response(data)
+        # Order queryset
+        qs = qs.order_by('scheduled_at', '-created_at')
+
+        # Apply pagination
+        paginator = PageNumberPagination()
+        paginator.page_size = 20
+        paginator.page_size_query_param = 'page_size'
+        paginator.max_page_size = 100
+        
+        paginated_qs = paginator.paginate_queryset(qs, request)
+        serializer = JobSerializer(paginated_qs, many=True)
+        return paginator.get_paginated_response(serializer.data)

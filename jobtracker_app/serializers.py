@@ -262,7 +262,11 @@ class JobSeriesCreateSerializer(serializers.Serializer):
             job = Job.objects.create(
                 **validated,
                 scheduled_at=dt,
-                job_type='one_time',
+                job_type='recurring',
+                repeat_every=repeat_every,
+                repeat_unit=repeat_unit,
+                occurrences=count,
+                day_of_week=day_of_week,
                 status='scheduled',
                 created_by=creator,
                 created_by_email=getattr(creator, 'email', None),
