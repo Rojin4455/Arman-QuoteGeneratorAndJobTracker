@@ -411,6 +411,15 @@ class ServiceListSerializer(serializers.ModelSerializer):
         ]
 
 
+class ServiceBasicSerializer(serializers.ModelSerializer):
+    """Minimal serializer for basic service details"""
+    class Meta:
+        model = Service
+        fields = [
+            'id', 'name', 'description', 'price', 'hours', 'is_active', 'order'
+        ]
+
+
 # Nested serializers for complex operations
 class QuestionCreateSerializer(serializers.ModelSerializer):
     """Serializer for creating questions with nested data"""

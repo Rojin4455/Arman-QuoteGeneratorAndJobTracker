@@ -26,6 +26,7 @@ urlpatterns = [
     # SERVICE MANAGEMENT
     # ============================================================================
     path('services/', views.ServiceListCreateView.as_view(), name='service-list-create'),
+    path('services/basic/', views.ServiceBasicListView.as_view(), name='service-basic-list'),
     path('services/<uuid:pk>/', views.ServiceDetailView.as_view(), name='service-detail'),
     path('services/<uuid:service_id>/settings/', views.ServiceSettingsView.as_view(), name='service-settings'),
     path('services/<uuid:service_id>/question-tree/', views.QuestionTreeView.as_view(), name='service-question-tree'),

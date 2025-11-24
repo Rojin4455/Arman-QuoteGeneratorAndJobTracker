@@ -54,6 +54,7 @@ INSTALLED_APPS = [
     'user_app',
     'quote_app',
     'jobtracker_app',
+    'payroll_app',
 ]
 
 MIDDLEWARE = [
@@ -223,5 +224,9 @@ CELERY_BEAT_SCHEDULE = {
     'make-api-call-every-minute': {
         'task': 'accounts.tasks.make_api_call',
         'schedule': timedelta(hours=15),
+    },
+    'update-jobs-to-service-due': {
+        'task': 'jobtracker_app.tasks.update_jobs_to_service_due',
+        'schedule': timedelta(hours=5),  # Run every 5 hours
     },
 }

@@ -134,6 +134,15 @@ class JobSerializer(serializers.ModelSerializer):
                 'day_of_week': 'day_of_week should only be provided when repeat_unit is "week"'
             })
         
+        # Prevent status changes after completion
+        if self.instance and self.instance.status == 'completed':
+            new_status = data.get('status')
+            if new_status and new_status != 'completed':
+                raise serializers.ValidationError({
+                    'status': 'Cannot change status of a completed job. '
+                             'Once a job is completed, its status cannot be modified.'
+                })
+        
         return data
 
     # ===== recurrence helpers =====

@@ -24,7 +24,7 @@ from .models import (
 )
 from .serializers import (
     UserSerializer, LoginSerializer, LocationSerializer, ServiceSerializer,
-    ServiceListSerializer, PackageSerializer, FeatureSerializer,
+    ServiceListSerializer, ServiceBasicSerializer, PackageSerializer, FeatureSerializer,
     PackageFeatureSerializer, QuestionSerializer, QuestionCreateSerializer,
     QuestionOptionSerializer, QuestionPricingSerializer, OptionPricingSerializer,
     PackageWithFeaturesSerializer, BulkPricingUpdateSerializer,
@@ -51,8 +51,48 @@ class IsAdminPermission(permissions.BasePermission):
 
 class AdminTokenObtainPairView(TokenObtainPairView):
     permission_classes = [AllowAny]
-    print('here')
-    # permission_classes = [IsAdminUser]
+    
+    def post(self, request, *args, **kwargs):
+        serializer = self.get_serializer(data=request.data)
+        try:
+            serializer.is_valid(raise_exception=True)
+        except Exception as e:
+            return Response({'detail': str(e)}, status=status.HTTP_400_BAD_REQUEST)
+        
+        # Get the user from validated data
+        user = serializer.user
+        
+        # Get tokens
+        refresh = RefreshToken.for_user(user)
+        access_token = refresh.access_token
+        
+        # Serialize user data
+        user_data = UserSerializer(user).data
+        
+        # Check if user has employee profile
+        employee_profile = None
+        try:
+            from payroll_app.models import EmployeeProfile
+            from payroll_app.serializers import EmployeeProfileSerializer
+            profile = user.employee_profile
+            employee_profile = EmployeeProfileSerializer(profile).data
+        except (AttributeError, ImportError):
+            pass
+        except Exception:
+            # Handle DoesNotExist or other exceptions
+            pass
+        
+        # Build response with tokens and user data
+        response_data = {
+            'access': str(access_token),
+            'refresh': str(refresh),
+            'user': user_data
+        }
+        
+        if employee_profile:
+            response_data['employee_profile'] = employee_profile
+        
+        return Response(response_data, status=status.HTTP_200_OK)
 
 class AdminTokenRefreshView(TokenRefreshView):
     permission_classes = [AllowAny]
@@ -60,6 +100,48 @@ class AdminTokenRefreshView(TokenRefreshView):
 # Public user JWT login/refresh (no admin restriction)
 class UserTokenObtainPairView(TokenObtainPairView):
     permission_classes = [AllowAny]
+    
+    def post(self, request, *args, **kwargs):
+        serializer = self.get_serializer(data=request.data)
+        try:
+            serializer.is_valid(raise_exception=True)
+        except Exception as e:
+            return Response({'detail': str(e)}, status=status.HTTP_400_BAD_REQUEST)
+        
+        # Get the user from validated data
+        user = serializer.user
+        
+        # Get tokens
+        refresh = RefreshToken.for_user(user)
+        access_token = refresh.access_token
+        
+        # Serialize user data
+        user_data = UserSerializer(user).data
+        
+        # Check if user has employee profile
+        employee_profile = None
+        try:
+            from payroll_app.models import EmployeeProfile
+            from payroll_app.serializers import EmployeeProfileSerializer
+            profile = user.employee_profile
+            employee_profile = EmployeeProfileSerializer(profile).data
+        except (AttributeError, ImportError):
+            pass
+        except Exception:
+            # Handle DoesNotExist or other exceptions
+            pass
+        
+        # Build response with tokens and user data
+        response_data = {
+            'access': str(access_token),
+            'refresh': str(refresh),
+            'user': user_data
+        }
+        
+        if employee_profile:
+            response_data['employee_profile'] = employee_profile
+        
+        return Response(response_data, status=status.HTTP_200_OK)
 
 class UserTokenRefreshView(TokenRefreshView):
     permission_classes = [AllowAny]
@@ -162,6 +244,21 @@ class ServiceListCreateView(generics.ListCreateAPIView):
         if self.request.method == 'GET':
             return ServiceListSerializer
         return ServiceSerializer
+
+class ServiceBasicListView(generics.ListAPIView):
+    """Simple endpoint to list all services with basic details only"""
+    queryset = Service.objects.filter(is_active=True).order_by('order', 'name')
+    serializer_class = ServiceBasicSerializer
+    permission_classes = [AllowAny]  # Public endpoint, can be changed to IsAuthenticated if needed
+    
+    def get_queryset(self):
+        queryset = super().get_queryset()
+        # Optional: filter by is_active if not already filtered
+        is_active = self.request.query_params.get('is_active', None)
+        if is_active is not None:
+            is_active_bool = is_active.lower() == 'true'
+            queryset = queryset.filter(is_active=is_active_bool)
+        return queryset
 
 class ServiceDetailView(generics.RetrieveUpdateDestroyAPIView):
     """Retrieve, update or delete a service"""

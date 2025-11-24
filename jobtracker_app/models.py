@@ -97,6 +97,20 @@ class Job(models.Model):
     class Meta:
         ordering = ['-created_at']
 
+    def clean(self):
+        """Prevent status changes after completion"""
+        if self.pk:  # Only for existing instances
+            try:
+                old_instance = Job.objects.get(pk=self.pk)
+                if old_instance.status == 'completed' and self.status != 'completed':
+                    from django.core.exceptions import ValidationError
+                    raise ValidationError({
+                        'status': "Cannot change status of a completed job. "
+                                "Once a job is completed, its status cannot be modified."
+                    })
+            except Job.DoesNotExist:
+                pass
+
     def __str__(self):
         return self.title or f"Job {self.id}"
 
