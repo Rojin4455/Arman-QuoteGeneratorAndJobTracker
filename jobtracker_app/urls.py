@@ -1,6 +1,6 @@
 from django.urls import path, include
 from rest_framework.routers import DefaultRouter
-from .views import JobViewSet, OccurrenceListView, JobSeriesCreateView, JobBySeriesView,LocationJobListView,LocationJobDetailView
+from .views import JobViewSet, OccurrenceListView, JobSeriesCreateView, JobBySeriesView,LocationJobListView,LocationJobDetailView,webhook_handler
 
 router = DefaultRouter()
 router.register(r'jobs', JobViewSet, basename='job')
@@ -11,5 +11,6 @@ urlpatterns = [
     path('jobs-series/', JobSeriesCreateView.as_view(), name='job-series-create'),
     path('jobs-series/<uuid:series_id>/', JobBySeriesView.as_view(), name='job-by-series'),
     path('locations/',LocationJobListView.as_view(), name='locations'),
-    path('locations/jobs/',LocationJobDetailView.as_view(),name='locations-view')
+    path('locations/jobs/',LocationJobDetailView.as_view(),name='locations-view'),
+    path("webhook/", webhook_handler)
 ]

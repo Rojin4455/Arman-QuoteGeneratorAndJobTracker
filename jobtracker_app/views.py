@@ -1,17 +1,29 @@
-from rest_framework import viewsets, permissions
-from rest_framework.response import Response
-from rest_framework.decorators import action
-from rest_framework.pagination import PageNumberPagination
-from django.shortcuts import get_object_or_404
+import json
+import uuid
+from collections import defaultdict
+
 from django.db.models import Count, Sum, Min, Q
 from django.db.models.functions import Coalesce
-from collections import defaultdict
+from django.http import JsonResponse
+from django.shortcuts import get_object_or_404
 from django.utils.dateparse import parse_datetime
-import uuid
+from django.views.decorators.csrf import csrf_exempt
+from rest_framework import permissions, viewsets
+from rest_framework.decorators import action
+from rest_framework.pagination import PageNumberPagination
+from rest_framework.response import Response
 
-from .models import Job, JobOccurrence
-from .serializers import JobSerializer, OccurrenceEventSerializer, JobSeriesCreateSerializer, CalendarEventSerializer,LocationSummarySerializer
+from accounts.models import Webhook
 from service_app.models import User
+from .models import Job, JobOccurrence
+from .serializers import (
+    CalendarEventSerializer,
+    JobSeriesCreateSerializer,
+    JobSerializer,
+    LocationSummarySerializer,
+    OccurrenceEventSerializer,
+)
+from .tasks import handle_webhook_event
 
 
 def apply_job_filters(queryset, request):
@@ -410,3 +422,24 @@ class LocationJobDetailView(APIView):
         paginated_qs = paginator.paginate_queryset(qs, request)
         serializer = JobSerializer(paginated_qs, many=True)
         return paginator.get_paginated_response(serializer.data)
+
+
+
+
+@csrf_exempt
+def webhook_handler(request):
+    if request.method != "POST":
+        return JsonResponse({"message": "Method not allowed"}, status=405)
+
+    try:
+        data = json.loads(request.body)
+        print("date:----- ", data)
+        Webhook.objects.create(
+            event=data.get("event") or "jobtracker.invoice",
+            company_id=str(data.get("company_id") or data.get("location_id") or "unknown"),
+            payload=data,
+        )
+        handle_webhook_event.delay(data)
+        return JsonResponse({"message": "Webhook received"}, status=200)
+    except Exception as e:
+        return JsonResponse({"error": str(e)}, status=500)

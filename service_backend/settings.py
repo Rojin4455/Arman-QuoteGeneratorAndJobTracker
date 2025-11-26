@@ -55,6 +55,7 @@ INSTALLED_APPS = [
     'quote_app',
     'jobtracker_app',
     'payroll_app',
+    'dashboard_app',
 ]
 
 MIDDLEWARE = [

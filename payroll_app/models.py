@@ -102,8 +102,8 @@ class TimeEntry(models.Model):
     check_out_time = models.DateTimeField(null=True, blank=True)
     total_hours = models.DecimalField(
         max_digits=5, 
-        decimal_places=2, 
-        null=True, 
+        decimal_places=2,
+        null=True,
         blank=True,
         help_text="Calculated automatically on check-out"
     )

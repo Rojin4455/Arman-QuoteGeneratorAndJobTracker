@@ -52,7 +52,8 @@ class EmployeeProfileViewSet(viewsets.ModelViewSet):
                 Q(user__email__icontains=search) |
                 Q(phone__icontains=search) |
                 Q(department__icontains=search) |
-                Q(position__icontains=search)
+                Q(position__icontains=search) |
+                Q(pay_scale_type__icontains=search)
             )
         
         # Filter by status
@@ -283,111 +284,333 @@ class PayoutViewSet(viewsets.ReadOnlyModelViewSet):
 
 
 class CalculatorView(APIView):
-    """Manual calculator for creating payouts"""
+    """
+    Manual calculator for creating payouts.
+    Works the same way as automatic payroll creation for project payouts,
+    and also supports hourly payouts.
+    
+    Common payload:
+    - type: 'project' (default) or 'hourly'
+    - project_title: Optional text label used in payout records
+    
+    Project payload:
+    - quoted_by_user_id: User ID who created the quote
+    - assignee_user_ids: List of assignee user IDs (required)
+    - job_date_time: Job date and time (ISO format, optional)
+    - is_first_time: Boolean indicating if it's a first-time project (optional)
+    - project_value: Project value (decimal, required)
+    
+    Hourly payload:
+    - employee_ids: List of hourly employee IDs (required)
+    - job_date: Date of the job (YYYY-MM-DD, required)
+    - start_time: HH:MM or HH:MM:SS (required)
+    - end_time: HH:MM or HH:MM:SS (required)
+    """
     permission_classes = [IsAdminOrEmployeePermission]
     
     def post(self, request):
-        """Create manual payout entry"""
-        payout_type = request.data.get('payout_type')  # 'hourly' or 'project'
-        employee_id = request.data.get('employee')
-        amount = request.data.get('amount')
-        notes = request.data.get('notes', '')
+        """Create manual payouts using the same logic as automatic payroll"""
+        calculation_type = (request.data.get('type') or 'project').lower()
+        if calculation_type not in ('project', 'hourly'):
+            return Response(
+                {'error': "type must be either 'project' or 'hourly'"},
+                status=status.HTTP_400_BAD_REQUEST
+            )
         
-        if not all([payout_type, employee_id, amount]):
+        if calculation_type == 'hourly':
+            return self._create_hourly_payouts(request)
+        return self._create_project_payouts(request)
+    
+    def _create_project_payouts(self, request):
+        quoted_by_user_id = request.data.get('quoted_by_user_id')
+        assignee_user_ids = request.data.get('assignee_user_ids', [])
+        job_date_time = request.data.get('job_date_time')
+        project_title = request.data.get('project_title', '')
+        is_first_time = request.data.get('is_first_time', False)
+        project_value = request.data.get('project_value')
+        
+        # Validate required fields
+        if not project_value:
             return Response({
-                'error': 'payout_type, employee, and amount are required'
+                'error': 'project_value is required'
             }, status=status.HTTP_400_BAD_REQUEST)
         
+        if not assignee_user_ids:
+            return Response({
+                'error': 'assignee_user_ids is required (at least one assignee)'
+            }, status=status.HTTP_400_BAD_REQUEST)
+        
+        # Parse project value
         try:
-            employee = User.objects.get(pk=employee_id)
-        except User.DoesNotExist:
+            project_value = Decimal(str(project_value))
+            if project_value <= 0:
+                return Response({
+                    'error': 'project_value must be greater than 0'
+                }, status=status.HTTP_400_BAD_REQUEST)
+        except (ValueError, TypeError):
             return Response({
-                'error': 'Employee not found'
-            }, status=status.HTTP_404_NOT_FOUND)
+                'error': 'project_value must be a valid number'
+            }, status=status.HTTP_400_BAD_REQUEST)
         
-        # Verify ownership (unless admin)
-        user = request.user
-        if not getattr(user, 'is_admin', False) and employee != user:
+        # Parse job date/time if provided
+        job_datetime_note = ''
+        if job_date_time:
+            try:
+                from django.utils.dateparse import parse_datetime
+                job_datetime = parse_datetime(job_date_time)
+                if not job_datetime:
+                    job_datetime = datetime.strptime(job_date_time, '%Y-%m-%d')
+                job_datetime_note = job_datetime.strftime('%Y-%m-%d %H:%M')
+            except (ValueError, TypeError):
+                return Response({
+                    'error': 'job_date_time must be a valid ISO datetime or date string'
+                }, status=status.HTTP_400_BAD_REQUEST)
+        
+        # Get assignees
+        assignees = []
+        for assignee_id in assignee_user_ids:
+            try:
+                assignee = User.objects.get(pk=assignee_id)
+                assignees.append(assignee)
+            except User.DoesNotExist:
+                return Response({
+                    'error': f'Assignee with ID {assignee_id} not found'
+                }, status=status.HTTP_404_NOT_FOUND)
+        
+        if not assignees:
             return Response({
-                'error': 'You can only create payouts for yourself.'
-            }, status=status.HTTP_403_FORBIDDEN)
+                'error': 'No valid assignees found'
+            }, status=status.HTTP_400_BAD_REQUEST)
         
-        payout_data = {
-            'employee': employee,
-            'payout_type': payout_type,
-            'amount': Decimal(str(amount)),
-            'notes': notes
+        # Get quoted_by user if provided
+        quoted_by_user = None
+        if quoted_by_user_id:
+            try:
+                quoted_by_user = User.objects.get(pk=quoted_by_user_id)
+            except User.DoesNotExist:
+                return Response({
+                    'error': f'Quoted by user with ID {quoted_by_user_id} not found'
+                }, status=status.HTTP_404_NOT_FOUND)
+        
+        # Get payroll settings
+        settings = PayrollSettings.get_settings()
+        
+        # Get number of assigned employees
+        employee_count = len(assignees)
+        
+        created_payouts = []
+        errors = []
+        
+        # Step 1: Create payouts for each assigned employee (based on their collaboration rates)
+        for assignee in assignees:
+            # Check if employee has profile and is project-based
+            try:
+                profile = assignee.employee_profile
+                if profile.pay_scale_type != 'project':
+                    errors.append(f'{assignee.get_full_name() or assignee.username} is not configured for project payouts (hourly employee)')
+                    continue  # Skip hourly employees
+            except EmployeeProfile.DoesNotExist:
+                errors.append(f'{assignee.get_full_name() or assignee.username} does not have an employee profile')
+                continue  # Skip employees without profile
+            
+            # Get collaboration rate for this team size
+            try:
+                collaboration_rate = CollaborationRate.objects.get(
+                    employee=assignee,
+                    member_count=employee_count
+                )
+                rate_percentage = collaboration_rate.percentage
+            except CollaborationRate.DoesNotExist:
+                errors.append(f'{assignee.get_full_name() or assignee.username} does not have a collaboration rate configured for {employee_count} member(s)')
+                continue  # Skip if no rate found
+            
+            # Calculate payout amount based on employee's individual rate
+            amount = (project_value * rate_percentage) / Decimal('100')
+            amount = amount.quantize(Decimal('0.01'))
+            
+            schedule_note = f" | Scheduled: {job_datetime_note}" if job_datetime_note else ''
+            # Create project payout for this assignee
+            payout = Payout.objects.create(
+                employee=assignee,
+                payout_type='project',
+                amount=amount,
+                project_value=project_value,
+                rate_percentage=rate_percentage,
+                project_title=project_title,
+                notes=f"Manual project payout: {project_title} (Rate: {rate_percentage}% for {employee_count} member(s)){schedule_note}"
+            )
+            created_payouts.append(payout)
+        
+        # Step 2: Create bonus payout for quoted_by person (separate from assignee payouts)
+        if quoted_by_user:
+            # Determine bonus type
+            bonus_type = 'bonus_first_time' if is_first_time else 'bonus_quoted_by'
+            
+            # Get bonus percentage from settings
+            if is_first_time:
+                bonus_percentage = settings.first_time_bonus_percentage
+            else:
+                bonus_percentage = settings.quoted_by_bonus_percentage
+            
+            # Calculate bonus amount
+            bonus_amount = (project_value * bonus_percentage) / Decimal('100')
+            bonus_amount = bonus_amount.quantize(Decimal('0.01'))
+            
+            bonus_note = f" | Scheduled: {job_datetime_note}" if job_datetime_note else ''
+            # Create bonus payout for quoted_by person
+            # Note: If quoted_by is also an assignee, they will have TWO payouts:
+            # 1. Their assignee payout (created above)
+            # 2. This bonus payout
+            bonus_payout = Payout.objects.create(
+                employee=quoted_by_user,
+                payout_type=bonus_type,
+                amount=bonus_amount,
+                project_value=project_value,
+                rate_percentage=bonus_percentage,
+                project_title=project_title,
+                notes=f"Manual {bonus_type} bonus: {project_title}{bonus_note}"
+            )
+            created_payouts.append(bonus_payout)
+        
+        # Serialize created payouts
+        serializer = PayoutSerializer(created_payouts, many=True)
+        
+        response_data = {
+            'message': f'Successfully created {len(created_payouts)} payout(s)',
+            'payouts': serializer.data,
         }
         
-        if payout_type == 'hourly':
-            hours = request.data.get('hours')
-            if not hours:
-                return Response({
-                    'error': 'hours is required for hourly payout'
-                }, status=status.HTTP_400_BAD_REQUEST)
+        if errors:
+            response_data['warnings'] = errors
+        
+        status_code = status.HTTP_201_CREATED if created_payouts else status.HTTP_400_BAD_REQUEST
+        if not created_payouts:
+            response_data['error'] = 'No payouts were created. Please review the warnings.'
+        return Response(response_data, status=status_code)
+    
+    def _create_hourly_payouts(self, request):
+        project_title = request.data.get('project_title', '')
+        job_date = request.data.get('job_date')
+        start_time = request.data.get('start_time')
+        end_time = request.data.get('end_time')
+        employee_ids = request.data.get('employee_ids', [])
+        
+        if not employee_ids:
+            return Response({
+                'error': 'employee_ids is required (at least one employee)'
+            }, status=status.HTTP_400_BAD_REQUEST)
+        
+        if not all([job_date, start_time, end_time]):
+            return Response({
+                'error': 'job_date, start_time, and end_time are required for hourly payouts'
+            }, status=status.HTTP_400_BAD_REQUEST)
+        
+        # Parse date and time inputs
+        try:
+            job_date_value = datetime.strptime(job_date, '%Y-%m-%d').date()
+        except (ValueError, TypeError):
+            return Response({
+                'error': 'job_date must be in YYYY-MM-DD format'
+            }, status=status.HTTP_400_BAD_REQUEST)
+        
+        time_formats = ['%H:%M:%S', '%H:%M']
+        start_dt = None
+        end_dt = None
+        for fmt in time_formats:
+            if start_dt is None:
+                try:
+                    start_dt = datetime.strptime(start_time, fmt).time()
+                except ValueError:
+                    start_dt = None
+            if end_dt is None:
+                try:
+                    end_dt = datetime.strptime(end_time, fmt).time()
+                except ValueError:
+                    end_dt = None
+        if start_dt is None or end_dt is None:
+            return Response({
+                'error': 'start_time and end_time must be in HH:MM or HH:MM:SS format'
+            }, status=status.HTTP_400_BAD_REQUEST)
+        
+        start_datetime = datetime.combine(job_date_value, start_dt)
+        end_datetime = datetime.combine(job_date_value, end_dt)
+        duration_seconds = (end_datetime - start_datetime).total_seconds()
+        if duration_seconds <= 0:
+            return Response({
+                'error': 'end_time must be later than start_time'
+            }, status=status.HTTP_400_BAD_REQUEST)
+        
+        hours_decimal = (Decimal(duration_seconds) / Decimal('3600')).quantize(Decimal('0.01'))
+        
+        # Convert to timezone-aware datetimes (UTC)
+        if timezone.is_naive(start_datetime):
+            start_datetime = timezone.make_aware(start_datetime)
+        else:
+            start_datetime = start_datetime.astimezone(timezone.utc)
+        
+        if timezone.is_naive(end_datetime):
+            end_datetime = timezone.make_aware(end_datetime)
+        else:
+            end_datetime = end_datetime.astimezone(timezone.utc)
+        
+        # Prepare employees
+        created_payouts = []
+        errors = []
+        for employee_id in employee_ids:
+            try:
+                employee = User.objects.get(pk=employee_id)
+            except User.DoesNotExist:
+                errors.append(f'Employee with ID {employee_id} not found')
+                continue
             
-            # Get hourly rate from profile
             try:
                 profile = employee.employee_profile
-                if profile.pay_scale_type != 'hourly' or not profile.hourly_rate:
-                    return Response({
-                        'error': 'Employee is not configured for hourly payouts'
-                    }, status=status.HTTP_400_BAD_REQUEST)
-                
-                calculated_amount = (Decimal(str(hours)) * profile.hourly_rate).quantize(Decimal('0.01'))
-                payout_data['amount'] = calculated_amount
-                payout_data['notes'] = f"Manual hourly entry: {hours} hours × ${profile.hourly_rate} = ${calculated_amount}"
             except EmployeeProfile.DoesNotExist:
-                return Response({
-                    'error': 'Employee profile not found'
-                }, status=status.HTTP_400_BAD_REQUEST)
-        
-        elif payout_type == 'project':
-            project_value = request.data.get('project_value')
-            project_title = request.data.get('project_title', '')
+                errors.append(f'{employee.get_full_name() or employee.username} does not have an employee profile')
+                continue
             
-            if not project_value:
-                return Response({
-                    'error': 'project_value is required for project payout'
-                }, status=status.HTTP_400_BAD_REQUEST)
+            if profile.pay_scale_type != 'hourly' or not profile.hourly_rate:
+                errors.append(f'{employee.get_full_name() or employee.username} is not configured for hourly payouts')
+                continue
             
-            # Get rate from profile
-            try:
-                profile = employee.employee_profile
-                if profile.pay_scale_type != 'project':
-                    return Response({
-                        'error': 'Employee is not configured for project payouts'
-                    }, status=status.HTTP_400_BAD_REQUEST)
-                
-                # For manual entries, use the provided amount or calculate from rate
-                if not amount:
-                    # Try to get rate from collaboration rates (default to solo)
-                    try:
-                        rate = CollaborationRate.objects.get(
-                            employee=employee,
-                            member_count=1
-                        ).percentage
-                    except CollaborationRate.DoesNotExist:
-                        return Response({
-                            'error': 'Employee does not have a rate configured'
-                        }, status=status.HTTP_400_BAD_REQUEST)
-                    
-                    calculated_amount = (Decimal(str(project_value)) * rate / Decimal('100')).quantize(Decimal('0.01'))
-                    payout_data['amount'] = calculated_amount
-                    payout_data['rate_percentage'] = rate
-                else:
-                    payout_data['amount'] = Decimal(str(amount))
-                
-                payout_data['project_value'] = Decimal(str(project_value))
-                payout_data['project_title'] = project_title
-            except EmployeeProfile.DoesNotExist:
-                return Response({
-                    'error': 'Employee profile not found'
-                }, status=status.HTTP_400_BAD_REQUEST)
+            # Create TimeEntry record first
+            time_entry = TimeEntry.objects.create(
+                employee=employee,
+                check_in_time=start_datetime,
+                check_out_time=end_datetime,
+                total_hours=hours_decimal,
+                status='checked_out',
+                notes=f"Manual entry: {project_title or 'job'} on {job_date}"
+            )
+            
+            # Calculate payout amount
+            amount = (hours_decimal * profile.hourly_rate).quantize(Decimal('0.01'))
+            
+            # Create payout linked to TimeEntry
+            payout = Payout.objects.create(
+                employee=employee,
+                payout_type='hourly',
+                amount=amount,
+                time_entry=time_entry,
+                project_title=project_title,
+                notes=f"Manual hourly payout: {hours_decimal} hours @ ${profile.hourly_rate} = ${amount}"
+            )
+            created_payouts.append(payout)
         
-        payout = Payout.objects.create(**payout_data)
-        serializer = PayoutSerializer(payout)
-        return Response(serializer.data, status=status.HTTP_201_CREATED)
+        serializer = PayoutSerializer(created_payouts, many=True)
+        response_data = {
+            'message': f'Successfully created {len(created_payouts)} hourly payout(s)',
+            'hours': float(hours_decimal),
+            'payouts': serializer.data
+        }
+        if errors:
+            response_data['warnings'] = errors
+        
+        if not created_payouts:
+            response_data['error'] = 'No payouts were created. Please review the warnings.'
+            return Response(response_data, status=status.HTTP_400_BAD_REQUEST)
+        
+        return Response(response_data, status=status.HTTP_201_CREATED)
 
 
 class ReportsView(APIView):

@@ -37,9 +37,18 @@ def create_project_payouts_on_completion(sender, instance, **kwargs):
 
 
 def _create_project_payouts(job):
-    """Helper function to create payouts for all assigned employees"""
-    from service_app.models import User
+    """
+    Create payouts for all assigned employees and quoted_by person.
     
+    Logic:
+    1. For each assigned employee (project-based only):
+       - Get their collaboration rate for the team size
+       - Create a 'project' payout based on their individual rate
+    2. For the quoted_by person:
+       - Create a bonus payout (first_time or quoted_by bonus)
+       - This is separate from assignee payouts, so if quoted_by is also
+         an assignee, they get BOTH payouts
+    """
     # Get assigned employees
     assignments = job.assignments.all().select_related('user')
     
@@ -61,7 +70,7 @@ def _create_project_payouts(job):
     # Get number of assigned employees
     employee_count = assignments.count()
     
-    # Create payouts for each assigned employee
+    # Step 1: Create payouts for each assigned employee (based on their collaboration rates)
     for assignment in assignments:
         employee = assignment.user
         
@@ -69,7 +78,7 @@ def _create_project_payouts(job):
         try:
             profile = employee.employee_profile
             if profile.pay_scale_type != 'project':
-                continue  # Skip hourly employees
+                continue  # Skip hourly employees (they don't get project payouts)
         except EmployeeProfile.DoesNotExist:
             continue  # Skip employees without profile
         
@@ -94,11 +103,12 @@ def _create_project_payouts(job):
             # If no rate found for this team size, skip this employee
             continue
         
-        # Calculate payout amount (per person, not divided)
+        # Calculate payout amount based on employee's individual rate
+        # Each employee gets their own percentage of the project value
         amount = (project_value * rate_percentage) / Decimal('100')
         amount = amount.quantize(Decimal('0.01'))
         
-        # Create project payout
+        # Create project payout for this assignee
         Payout.objects.create(
             employee=employee,
             payout_type='project',
@@ -106,15 +116,17 @@ def _create_project_payouts(job):
             job=job,
             project_value=project_value,
             rate_percentage=rate_percentage,
-            notes=f"Automated payout for job: {job.title or job.id}"
+            notes=f"Automated project payout for assignee: {job.title or job.id} (Rate: {rate_percentage}% for {employee_count} members)"
         )
     
-    # Create bonus payout for quoted_by person if exists
+    # Step 2: Create bonus payout for quoted_by person (separate from assignee payouts)
     if job.quoted_by:
         quoted_by_employee = job.quoted_by
         
-        # Check if bonus payout already exists
+        # Determine bonus type
         bonus_type = 'bonus_first_time' if is_first_time else 'bonus_quoted_by'
+        
+        # Check if bonus payout already exists (duplicate prevention)
         existing_bonus = Payout.objects.filter(
             job=job,
             employee=quoted_by_employee,
@@ -122,7 +134,7 @@ def _create_project_payouts(job):
         ).first()
         
         if not existing_bonus:
-            # Get bonus percentage
+            # Get bonus percentage from settings
             if is_first_time:
                 bonus_percentage = settings.first_time_bonus_percentage
             else:
@@ -132,7 +144,10 @@ def _create_project_payouts(job):
             bonus_amount = (project_value * bonus_percentage) / Decimal('100')
             bonus_amount = bonus_amount.quantize(Decimal('0.01'))
             
-            # Create bonus payout
+            # Create bonus payout for quoted_by person
+            # Note: If quoted_by is also an assignee, they will have TWO payouts:
+            # 1. Their assignee payout (created above)
+            # 2. This bonus payout
             Payout.objects.create(
                 employee=quoted_by_employee,
                 payout_type=bonus_type,
@@ -140,7 +155,7 @@ def _create_project_payouts(job):
                 job=job,
                 project_value=project_value,
                 rate_percentage=bonus_percentage,
-                notes=f"Automated {bonus_type} bonus for job: {job.title or job.id}"
+                notes=f"Automated {bonus_type} bonus for quoted_by: {job.title or job.id}"
             )
 
 

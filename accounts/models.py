@@ -10,7 +10,7 @@ class GHLAuthCredentials(models.Model):
     access_token = models.TextField()
     refresh_token = models.TextField()
     expires_in = models.IntegerField()
-    scope = models.CharField(max_length=500, null=True, blank=True)
+    scope = models.TextField(null=True, blank=True)
     user_type = models.CharField(max_length=50, null=True, blank=True)
     company_id = models.CharField(max_length=255, null=True, blank=True)
     location_id = models.CharField(max_length=255, null=True, blank=True)

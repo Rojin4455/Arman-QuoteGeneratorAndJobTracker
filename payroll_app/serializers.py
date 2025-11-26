@@ -1,9 +1,12 @@
 from rest_framework import serializers
 from decimal import Decimal
+import pytz
+from django.utils import timezone as django_timezone
 from service_app.models import User
 from .models import (
     EmployeeProfile, CollaborationRate, TimeEntry, Payout, PayrollSettings
 )
+from .utils import get_user_timezone, convert_utc_to_user_timezone
 
 
 class CollaborationRateSerializer(serializers.ModelSerializer):
@@ -155,39 +158,132 @@ class CollaborationRateCreateSerializer(serializers.ModelSerializer):
 class TimeEntrySerializer(serializers.ModelSerializer):
     employee_name = serializers.CharField(source='employee.get_full_name', read_only=True)
     employee_email = serializers.EmailField(source='employee.email', read_only=True)
+    employee_timezone = serializers.SerializerMethodField()
+    check_in_time_local = serializers.SerializerMethodField()
+    check_out_time_local = serializers.SerializerMethodField()
     
     class Meta:
         model = TimeEntry
         fields = [
-            'id', 'employee', 'employee_name', 'employee_email',
-            'check_in_time', 'check_out_time', 'total_hours',
-            'notes', 'status', 'created_at', 'updated_at'
+            'id', 'employee', 'employee_name', 'employee_email', 'employee_timezone',
+            'check_in_time', 'check_in_time_local', 'check_out_time', 'check_out_time_local',
+            'total_hours', 'notes', 'status', 'created_at', 'updated_at'
         ]
         read_only_fields = ['id', 'total_hours', 'status', 'created_at', 'updated_at']
     
+    def get_employee_timezone(self, obj):
+        """Get employee's timezone"""
+        return get_user_timezone(obj.employee)
+    
+    def get_check_in_time_local(self, obj):
+        """Convert check_in_time to employee's local timezone"""
+        if not obj.check_in_time:
+            return None
+        return self._convert_to_user_timezone(obj.check_in_time, obj.employee)
+    
+    def get_check_out_time_local(self, obj):
+        """Convert check_out_time to employee's local timezone"""
+        if not obj.check_out_time:
+            return None
+        return self._convert_to_user_timezone(obj.check_out_time, obj.employee)
+    
+    def _convert_to_user_timezone(self, utc_datetime, user):
+        """Convert UTC datetime to user's timezone"""
+        try:
+            local_time = convert_utc_to_user_timezone(utc_datetime, user)
+            return local_time.isoformat()
+        except Exception:
+            # Fallback to UTC if timezone conversion fails
+            if django_timezone.is_naive(utc_datetime):
+                utc_datetime = django_timezone.make_aware(utc_datetime, pytz.UTC)
+            return utc_datetime.isoformat()
+    
     def validate(self, data):
         if 'check_out_time' in data and 'check_in_time' in data:
-            if data['check_out_time'] <= data['check_in_time']:
-                raise serializers.ValidationError({
-                    'check_out_time': 'Check-out time must be after check-in time'
-                })
+            # Ensure both datetimes are timezone-aware
+            check_in = data.get('check_in_time')
+            check_out = data.get('check_out_time')
+            
+            if check_in and check_out:
+                # Convert to UTC if they're naive or in different timezone
+                if django_timezone.is_naive(check_in):
+                    check_in = django_timezone.make_aware(check_in, pytz.UTC)
+                else:
+                    check_in = check_in.astimezone(pytz.UTC)
+                
+                if django_timezone.is_naive(check_out):
+                    check_out = django_timezone.make_aware(check_out, pytz.UTC)
+                else:
+                    check_out = check_out.astimezone(pytz.UTC)
+                
+                if check_out <= check_in:
+                    raise serializers.ValidationError({
+                        'check_out_time': 'Check-out time must be after check-in time'
+                    })
         return data
+    
+    def create(self, validated_data):
+        """Create time entry ensuring all times are in UTC"""
+        # Ensure check_in_time is in UTC
+        if 'check_in_time' in validated_data:
+            check_in = validated_data['check_in_time']
+            if django_timezone.is_naive(check_in):
+                validated_data['check_in_time'] = django_timezone.make_aware(check_in, pytz.UTC)
+            else:
+                validated_data['check_in_time'] = check_in.astimezone(pytz.UTC)
+        
+        # Ensure check_out_time is in UTC
+        if 'check_out_time' in validated_data:
+            check_out = validated_data['check_out_time']
+            if django_timezone.is_naive(check_out):
+                validated_data['check_out_time'] = django_timezone.make_aware(check_out, pytz.UTC)
+            else:
+                validated_data['check_out_time'] = check_out.astimezone(pytz.UTC)
+        
+        return super().create(validated_data)
+    
+    def update(self, instance, validated_data):
+        """Update time entry ensuring all times are in UTC"""
+        # Ensure check_in_time is in UTC
+        if 'check_in_time' in validated_data:
+            check_in = validated_data['check_in_time']
+            if django_timezone.is_naive(check_in):
+                validated_data['check_in_time'] = django_timezone.make_aware(check_in, pytz.UTC)
+            else:
+                validated_data['check_in_time'] = check_in.astimezone(pytz.UTC)
+        
+        # Ensure check_out_time is in UTC
+        if 'check_out_time' in validated_data:
+            check_out = validated_data['check_out_time']
+            if django_timezone.is_naive(check_out):
+                validated_data['check_out_time'] = django_timezone.make_aware(check_out, pytz.UTC)
+            else:
+                validated_data['check_out_time'] = check_out.astimezone(pytz.UTC)
+        
+        return super().update(instance, validated_data)
 
 
 class PayoutSerializer(serializers.ModelSerializer):
     employee_name = serializers.CharField(source='employee.get_full_name', read_only=True)
     employee_email = serializers.EmailField(source='employee.email', read_only=True)
     job_title = serializers.CharField(source='job.title', read_only=True)
+    time_entry_details = serializers.SerializerMethodField()
     
     class Meta:
         model = Payout
         fields = [
             'id', 'employee', 'employee_name', 'employee_email',
-            'payout_type', 'amount', 'time_entry', 'job', 'job_title',
+            'payout_type', 'amount', 'time_entry', 'time_entry_details', 'job', 'job_title',
             'project_value', 'rate_percentage', 'project_title', 'notes',
             'created_at'
         ]
         read_only_fields = ['id', 'created_at']
+    
+    def get_time_entry_details(self, obj):
+        """Include TimeEntry details for hourly payouts"""
+        if obj.payout_type == 'hourly' and obj.time_entry:
+            return TimeEntrySerializer(obj.time_entry).data
+        return None
 
 
 class PayrollSettingsSerializer(serializers.ModelSerializer):
