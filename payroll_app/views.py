@@ -1,5 +1,6 @@
 from rest_framework import viewsets, permissions, status
 from rest_framework.decorators import action
+from rest_framework.exceptions import PermissionDenied
 from rest_framework.response import Response
 from rest_framework.views import APIView
 from django.shortcuts import get_object_or_404
@@ -38,12 +39,25 @@ class EmployeeProfileViewSet(viewsets.ModelViewSet):
     """ViewSet for managing employee profiles"""
     queryset = EmployeeProfile.objects.all().select_related('user').prefetch_related('user__collaboration_rates')
     serializer_class = EmployeeProfileSerializer
-    permission_classes = [IsAdminOnlyPermission]
+    permission_classes = [IsAdminOrEmployeePermission]
+    
+    def get_permissions(self):
+        # Only admins can create/update/delete profiles
+        # Normal users can read their own profile
+        if self.request.method in ['POST', 'PUT', 'PATCH', 'DELETE']:
+            return [IsAdminOnlyPermission()]
+        return super().get_permissions()
     
     def get_queryset(self):
         queryset = super().get_queryset()
+        user = self.request.user
         
-        # Search functionality
+        # Normal users can only see their own profile
+        if not getattr(user, 'is_admin', False):
+            # Filter to only show the user's own profile if it exists
+            queryset = queryset.filter(user=user)
+        
+        # Search functionality (admin only)
         search = self.request.query_params.get('search', None)
         if search:
             queryset = queryset.filter(
@@ -67,6 +81,21 @@ class EmployeeProfileViewSet(viewsets.ModelViewSet):
             queryset = queryset.filter(pay_scale_type=pay_scale)
         
         return queryset
+    
+    def get_object(self):
+        """Override to ensure users can only access their own profile."""
+        obj = super().get_object()
+        user = self.request.user
+        
+        # Admins can access any profile
+        if getattr(user, 'is_admin', False):
+            return obj
+        
+        # Normal users can only access their own profile
+        if obj.user != user:
+            raise PermissionDenied("You do not have permission to access this employee profile.")
+        
+        return obj
     
     @action(detail=True, methods=['post'], url_path='collaboration-rates')
     def update_collaboration_rates(self, request, pk=None):
@@ -129,23 +158,57 @@ class TimeEntryViewSet(viewsets.ModelViewSet):
     
     @action(detail=False, methods=['post'], url_path='check-in')
     def check_in(self, request):
-        """Check in for hourly employees"""
-        user = request.user
+        """
+        Check in for hourly employees.
         
-        # Check if user has active session
+        Normal users: Check in themselves (no employee_id needed)
+        Admin users: Can check in any employee by providing employee_id in payload
+        
+        Payload (normal user):
+        {
+            "notes": "Optional notes"
+        }
+        
+        Payload (admin user):
+        {
+            "employee_id": 123,  // Required: User ID to check in
+            "notes": "Optional notes"
+        }
+        """
+        user = request.user
+        is_admin = getattr(user, 'is_admin', False)
+        
+        # Determine which employee to check in
+        if is_admin:
+            employee_id = request.data.get('employee_id')
+            if not employee_id:
+                return Response({
+                    'error': 'employee_id is required for admin users'
+                }, status=status.HTTP_400_BAD_REQUEST)
+            
+            try:
+                target_employee = User.objects.get(pk=employee_id)
+            except User.DoesNotExist:
+                return Response({
+                    'error': f'Employee with ID {employee_id} not found'
+                }, status=status.HTTP_404_NOT_FOUND)
+        else:
+            target_employee = user
+        
+        # Check if employee has active session
         active_entry = TimeEntry.objects.filter(
-            employee=user,
+            employee=target_employee,
             status='checked_in'
         ).first()
         
         if active_entry:
             return Response({
-                'error': 'You already have an active session. Please check out first.'
+                'error': f'{target_employee.get_full_name() or target_employee.username} already has an active session. Please check out first.'
             }, status=status.HTTP_400_BAD_REQUEST)
         
         # Create new time entry
         entry = TimeEntry.objects.create(
-            employee=user,
+            employee=target_employee,
             check_in_time=timezone.now(),
             notes=request.data.get('notes', '')
         )
@@ -155,12 +218,98 @@ class TimeEntryViewSet(viewsets.ModelViewSet):
     
     @action(detail=False, methods=['get'], url_path='active-session')
     def active_session(self, request):
-        """Get active check-in session for current user"""
+        """
+        Get active check-in session.
+        
+        Normal users: Get their own active session (no employee_id needed)
+        Admin users: Can query any employee's active session or all active sessions
+        
+        Query params (normal user): None
+        
+        Query params (admin user):
+        - employee_id: Optional - Get specific employee's active session
+        - all: Optional - Set to 'true' to get all active sessions
+        
+        Examples:
+        - GET /api/payroll/time-entries/active-session/ (normal user - their own)
+        - GET /api/payroll/time-entries/active-session/?employee_id=123 (admin - specific employee)
+        - GET /api/payroll/time-entries/active-session/?all=true (admin - all active sessions)
+        """
         user = request.user
-        active_entry = TimeEntry.objects.filter(
-            employee=user,
-            status='checked_in'
-        ).first()
+        is_admin = getattr(user, 'is_admin', False)
+        
+        if is_admin:
+            # Admin can query all active sessions or a specific employee's
+            get_all = request.query_params.get('all', '').lower() == 'true'
+            employee_id = request.query_params.get('employee_id')
+            
+            if get_all:
+                # Return all active sessions
+                active_entries = TimeEntry.objects.filter(
+                    status='checked_in'
+                ).select_related('employee').order_by('-check_in_time')
+                
+                result = []
+                for entry in active_entries:
+                    elapsed_time = None
+                    if entry.check_in_time:
+                        delta = timezone.now() - entry.check_in_time
+                        elapsed_time = Decimal(str(delta.total_seconds() / 3600)).quantize(Decimal('0.01'))
+                    
+                    serializer = self.get_serializer(entry)
+                    result.append({
+                        'active': True,
+                        'entry': serializer.data,
+                        'elapsed_hours': float(elapsed_time) if elapsed_time else 0
+                    })
+                
+                return Response({
+                    'active_sessions': result,
+                    'count': len(result)
+                })
+            elif employee_id:
+                # Get specific employee's active session
+                try:
+                    target_employee = User.objects.get(pk=employee_id)
+                except User.DoesNotExist:
+                    return Response({
+                        'error': f'Employee with ID {employee_id} not found'
+                    }, status=status.HTTP_404_NOT_FOUND)
+                
+                active_entry = TimeEntry.objects.filter(
+                    employee=target_employee,
+                    status='checked_in'
+                ).first()
+            else:
+                # Default: return all active sessions (same as all=true)
+                active_entries = TimeEntry.objects.filter(
+                    status='checked_in'
+                ).select_related('employee').order_by('-check_in_time')
+                
+                result = []
+                for entry in active_entries:
+                    elapsed_time = None
+                    if entry.check_in_time:
+                        delta = timezone.now() - entry.check_in_time
+                        elapsed_time = Decimal(str(delta.total_seconds() / 3600)).quantize(Decimal('0.01'))
+                    
+                    serializer = self.get_serializer(entry)
+                    result.append({
+                        'active': True,
+                        'entry': serializer.data,
+                        'elapsed_hours': float(elapsed_time) if elapsed_time else 0
+                    })
+                
+                return Response({
+                    'active_sessions': result,
+                    'count': len(result)
+                })
+        else:
+            # Normal user: get their own active session
+            active_entry = TimeEntry.objects.filter(
+                employee=user,
+                status='checked_in'
+            ).first()
         
         if not active_entry:
             return Response({'active': False})
@@ -222,17 +371,58 @@ class TimeEntryViewSet(viewsets.ModelViewSet):
     
     @action(detail=False, methods=['get'], url_path='today')
     def today_entries(self, request):
-        """Get today's time entries for current user"""
+        """
+        Get today's time entries.
+        
+        Normal users: Get their own today's entries (no employee_id needed)
+        Admin users: Can view all today's entries or filter by specific employee
+        
+        Query params (normal user): None
+        
+        Query params (admin user):
+        - employee_id: Optional - Filter by specific employee ID
+        - all: Optional - Set to 'true' to get all employees' entries (default for admin)
+        
+        Examples:
+        - GET /api/payroll/time-entries/today/ (normal user - their own)
+        - GET /api/payroll/time-entries/today/?employee_id=123 (admin - specific employee)
+        - GET /api/payroll/time-entries/today/?all=true (admin - all employees)
+        """
         user = request.user
+        is_admin = getattr(user, 'is_admin', False)
         today = timezone.now().date()
         
-        queryset = self.get_queryset().filter(
-            employee=user,
-            check_in_time__date=today
-        )
+        if is_admin:
+            # Admin can see all entries or filter by employee
+            employee_id = request.query_params.get('employee_id')
+            get_all = request.query_params.get('all', 'true').lower() == 'true'
+            
+            queryset = TimeEntry.objects.filter(
+                check_in_time__date=today
+            ).select_related('employee').order_by('-check_in_time')
+            
+            if employee_id:
+                try:
+                    target_employee = User.objects.get(pk=employee_id)
+                    queryset = queryset.filter(employee=target_employee)
+                except User.DoesNotExist:
+                    return Response({
+                        'error': f'Employee with ID {employee_id} not found'
+                    }, status=status.HTTP_404_NOT_FOUND)
+            # If get_all is true (default), show all entries (no additional filter)
+        else:
+            # Normal user: only their own entries
+            queryset = TimeEntry.objects.filter(
+                employee=user,
+                check_in_time__date=today
+            ).select_related('employee').order_by('-check_in_time')
         
         serializer = self.get_serializer(queryset, many=True)
-        return Response(serializer.data)
+        return Response({
+            'entries': serializer.data,
+            'count': queryset.count(),
+            'date': today.isoformat()
+        })
 
 
 class PayoutViewSet(viewsets.ReadOnlyModelViewSet):

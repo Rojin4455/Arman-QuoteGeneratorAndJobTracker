@@ -276,7 +276,7 @@ class JobSeriesCreateSerializer(serializers.Serializer):
                 repeat_unit=repeat_unit,
                 occurrences=count,
                 day_of_week=day_of_week,
-                status='scheduled',
+                status='pending',
                 created_by=creator,
                 created_by_email=getattr(creator, 'email', None),
                 series_id=series,

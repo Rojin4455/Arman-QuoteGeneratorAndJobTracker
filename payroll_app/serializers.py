@@ -50,13 +50,14 @@ class EmployeeProfileSerializer(serializers.ModelSerializer):
     first_name = serializers.CharField(source='user.first_name', read_only=True)
     last_name = serializers.CharField(source='user.last_name', read_only=True)
     full_name = serializers.SerializerMethodField()
-    
+    is_active = serializers.BooleanField(source='user.is_active',read_only=True)
+
     class Meta:
         model = EmployeeProfile
         fields = [
             'id', 'user', 'user_id', 'username', 'email', 'first_name', 'last_name', 'full_name',
             'phone', 'department', 'position', 'timezone',
-            'pay_scale_type', 'hourly_rate', 'is_administrator', 'status',
+            'pay_scale_type', 'hourly_rate', 'is_administrator', 'status','is_active',
             'collaboration_rates', 'collaboration_rates_read', 'created_at', 'updated_at'
         ]
         read_only_fields = ['id', 'created_at', 'updated_at']
@@ -92,6 +93,14 @@ class EmployeeProfileSerializer(serializers.ModelSerializer):
         collaboration_rates_data = validated_data.pop('collaboration_rates', [])
         employee_profile = EmployeeProfile.objects.create(**validated_data)
         
+        # Sync User.is_active with EmployeeProfile.status
+        user = employee_profile.user
+        if employee_profile.status == 'inactive':
+            user.is_active = False
+        elif employee_profile.status == 'active':
+            user.is_active = True
+        user.save()
+        
         # Create collaboration rates if provided
         if collaboration_rates_data:
             for rate_data in collaboration_rates_data:
@@ -107,10 +116,24 @@ class EmployeeProfileSerializer(serializers.ModelSerializer):
         """Update employee profile and collaboration rates"""
         collaboration_rates_data = validated_data.pop('collaboration_rates', None)
         
+        # Track if status is being changed
+        status_changed = 'status' in validated_data
+        old_status = instance.status
+        new_status = validated_data.get('status') if status_changed else None
+        
         # Update employee profile fields
         for attr, value in validated_data.items():
             setattr(instance, attr, value)
         instance.save()
+        
+        # Sync User.is_active with EmployeeProfile.status
+        if status_changed and new_status != old_status:
+            user = instance.user
+            if new_status == 'inactive':
+                user.is_active = False
+            elif new_status == 'active':
+                user.is_active = True
+            user.save()
         
         # Update collaboration rates if provided
         if collaboration_rates_data is not None:

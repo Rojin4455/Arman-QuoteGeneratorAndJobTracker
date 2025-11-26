@@ -10,6 +10,7 @@ from django.utils.dateparse import parse_datetime
 from django.views.decorators.csrf import csrf_exempt
 from rest_framework import permissions, viewsets
 from rest_framework.decorators import action
+from rest_framework.exceptions import PermissionDenied
 from rest_framework.pagination import PageNumberPagination
 from rest_framework.response import Response
 
@@ -148,10 +149,28 @@ class JobViewSet(viewsets.ModelViewSet):
         return queryset
 
     def get_permissions(self):
-        # Only admins can create/update/delete jobs
-        if self.request.method in ['POST', 'PUT', 'PATCH', 'DELETE']:
+        # Only admins can create jobs
+        # Normal users can update/delete their own jobs
+        if self.request.method == 'POST':
             return [permissions.IsAuthenticated(), _IsAdminOnly()]  # type: ignore
+        elif self.request.method in ['PUT', 'PATCH', 'DELETE']:
+            return [permissions.IsAuthenticated()]  # Allow authenticated users to update/delete
         return super().get_permissions()
+
+    def get_object(self):
+        """Override to ensure users can only access jobs assigned to them."""
+        obj = super().get_object()
+        user = self.request.user
+        
+        # Admins can access any job
+        if getattr(user, 'is_admin', False):
+            return obj
+        
+        # Normal users can only access jobs assigned to them
+        if not obj.assignments.filter(user=user).exists():
+            raise PermissionDenied("You do not have permission to access this job.")
+        
+        return obj
 
     @action(detail=False, methods=['get'], url_path='mine')
     def mine(self, request):
