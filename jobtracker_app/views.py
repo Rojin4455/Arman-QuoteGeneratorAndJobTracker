@@ -32,6 +32,7 @@ def apply_job_filters(queryset, request):
     Apply common filters to job queryset based on query parameters.
     Supports:
     - status: comma-separated list of statuses (e.g., 'pending,confirmed')
+    - job_type: comma-separated list of job types (e.g., 'one_time,recurring')
     - job_ids: comma-separated list of job UUIDs
     - assignee_ids: comma-separated list of user UUIDs or emails
     - start_date: ISO datetime string (filters scheduled_at >= start_date)
@@ -50,6 +51,16 @@ def apply_job_filters(queryset, request):
         queryset = queryset.exclude(
             Q(status__isnull=True) | Q(status="") | Q(status="to_convert")
         )
+    
+    # Filter by job_type (supports multiple job types)
+    job_type = params.get('job_type')
+    if job_type:
+        job_type_list = [jt.strip() for jt in job_type.split(',') if jt.strip()]
+        # Validate against valid choices
+        valid_types = ['one_time', 'recurring']
+        job_type_list = [jt for jt in job_type_list if jt in valid_types]
+        if job_type_list:
+            queryset = queryset.filter(job_type__in=job_type_list)
     
     # Filter by specific job IDs
     job_ids = params.get('job_ids')
