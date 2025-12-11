@@ -10,6 +10,7 @@ from django.views import View
 from django.utils.decorators import method_decorator
 import traceback
 from accounts.tasks import fetch_all_contacts_task,handle_webhook_event
+from accounts.utils import sync_all_users_to_db
 
 
 
@@ -78,7 +79,7 @@ def tokens(request):
 
             }
         )
-        fetch_all_contacts_task.delay(response_data.get("locationId"), response_data.get("access_token"))
+        # fetch_all_contacts_task.delay(response_data.get("locationId"), response_data.get("access_token"))
         return JsonResponse({
             "message": "Authentication successful",
             "access_token": response_data.get('access_token'),
@@ -136,5 +137,41 @@ def webhook_handler(request):
     except Exception as e:
         print(f"Webhook error: {str(e)}")
         return JsonResponse({"error": str(e)}, status=500)
+
+
+def sync_all_users(request):
+    """
+    Manually sync all users from GHL API to local database.
+    Fetches all users for the authenticated location and creates/updates them.
+    """
+    try:
+        # Get the first available GHL credentials
+        credentials = GHLAuthCredentials.objects.first()
+        
+        if not credentials:
+            return JsonResponse({
+                "error": "No GHL credentials found. Please authenticate first."
+            }, status=400)
+        
+        if not credentials.location_id or not credentials.access_token:
+            return JsonResponse({
+                "error": "Invalid GHL credentials. Missing location_id or access_token."
+            }, status=400)
+        
+        # Sync all users
+        result = sync_all_users_to_db(credentials.location_id, credentials.access_token)
+        
+        return JsonResponse({
+            "message": "Users synced successfully",
+            "created": result["created"],
+            "updated": result["updated"],
+            "total": result["total"]
+        }, status=200)
+        
+    except Exception as e:
+        logger.error(f"Error syncing users: {str(e)}")
+        return JsonResponse({
+            "error": f"Failed to sync users: {str(e)}"
+        }, status=500)
 
     

@@ -86,6 +86,9 @@ class Job(models.Model):
 
     status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='pending')
     notes = models.TextField(blank=True, null=True)
+    
+    # Track if completion webhook/invoice was already sent
+    completion_processed = models.BooleanField(default=False, help_text="True if webhook/invoice was already sent when job was completed")
 
     # Series grouping for recurring jobs when creating independent jobs per date
     series_id = models.UUIDField(null=True, blank=True, db_index=True)

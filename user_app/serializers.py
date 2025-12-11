@@ -1,10 +1,11 @@
 # serializers.py
 from rest_framework import serializers
 from .models import (
-    Contact, Service, Package, 
+    Service, Package, 
     Question, QuestionOption, Quote, QuoteQuestionAnswer,
     Location
 )
+from accounts.models import Contact
 from service_app.models import Feature, Package, PackageFeature, OptionPricing, QuestionPricing
 from decimal import Decimal
 from geopy.distance import geodesic

@@ -18,6 +18,7 @@ class User(AbstractUser):
         (ROLE_WORKER, 'Worker'),
     ]
     # id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    ghl_user_id = models.CharField(max_length=255, unique=True, null=True, blank=True)
     is_admin = models.BooleanField(default=False)
     role = models.CharField(max_length=20, choices=ROLE_CHOICES, default=ROLE_WORKER)
     created_at = models.DateTimeField(auto_now_add=True)
@@ -512,3 +513,84 @@ class ServicePackageSizeMapping(models.Model):
 
     def __str__(self):
         return f"{self.service_package} ({self.global_size}) - ₹{self.price}"
+
+
+class Appointment(models.Model):
+    """Appointment model for GHL appointments"""
+    
+    APPOINTMENT_STATUS_CHOICES = [
+        ('new', 'New'),  # Maps to 'unconfirmed' in UI
+        ('confirmed', 'Confirmed'),
+        ('cancelled', 'Cancelled'),
+        ('showed', 'Showed'),
+        ('noshow', 'No Show'),
+        ('invalid', 'Invalid'),
+    ]
+    
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    ghl_appointment_id = models.CharField(max_length=255, unique=True, db_index=True)
+    location_id = models.CharField(max_length=255, db_index=True)
+    
+    # Basic appointment info
+    title = models.CharField(max_length=255, blank=True, null=True)
+    address = models.URLField(max_length=500, blank=True, null=True, help_text="Meeting URL or address")
+    calendar_id = models.CharField(max_length=255, blank=True, null=True)
+    appointment_status = models.CharField(max_length=50, choices=APPOINTMENT_STATUS_CHOICES, blank=True, null=True)
+    source = models.CharField(max_length=100, blank=True, null=True)
+    notes = models.TextField(blank=True, null=True)
+    
+    # Relationships
+    contact = models.ForeignKey(
+        'accounts.Contact',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='appointments',
+        to_field='contact_id'
+    )
+    ghl_contact_id = models.CharField(max_length=255, blank=True, null=True, help_text="GHL contact ID")
+    group_id = models.CharField(max_length=255, blank=True, null=True)
+    
+    # User assignments - using ghl_user_id to map
+    assigned_user = models.ForeignKey(
+        User,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='assigned_appointments',
+        to_field='ghl_user_id'
+    )
+    ghl_assigned_user_id = models.CharField(max_length=255, blank=True, null=True, help_text="GHL assigned user ID")
+    
+    # Many-to-many for users array
+    users = models.ManyToManyField(
+        User,
+        related_name='appointments',
+        blank=True
+    )
+    users_ghl_ids = models.JSONField(
+        default=list,
+        blank=True,
+        help_text="Store GHL user IDs from users array"
+    )
+    
+    # Timestamps
+    start_time = models.DateTimeField(blank=True, null=True)
+    end_time = models.DateTimeField(blank=True, null=True)
+    date_added = models.DateTimeField(blank=True, null=True)
+    date_updated = models.DateTimeField(blank=True, null=True)
+    
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+    
+    class Meta:
+        db_table = 'appointments'
+        ordering = ['-start_time', '-created_at']
+        indexes = [
+            models.Index(fields=['ghl_appointment_id']),
+            models.Index(fields=['location_id']),
+            models.Index(fields=['start_time']),
+        ]
+    
+    def __str__(self):
+        return f"{self.title or 'Appointment'} - {self.ghl_appointment_id}"

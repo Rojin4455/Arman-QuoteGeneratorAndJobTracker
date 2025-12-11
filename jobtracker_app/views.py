@@ -15,7 +15,7 @@ from rest_framework.pagination import PageNumberPagination
 from rest_framework.response import Response
 
 from accounts.models import Webhook
-from service_app.models import User
+from service_app.models import User, Appointment
 from .models import Job, JobOccurrence
 from .serializers import (
     CalendarEventSerializer,
@@ -23,6 +23,8 @@ from .serializers import (
     JobSerializer,
     LocationSummarySerializer,
     OccurrenceEventSerializer,
+    AppointmentCalendarSerializer,
+    AppointmentSerializer,
 )
 from .tasks import handle_webhook_event
 
@@ -245,6 +247,154 @@ class OccurrenceListView(APIView):
 
         data = CalendarEventSerializer(qs.order_by('scheduled_at', 'series_sequence'), many=True).data
         return Response(data)
+
+
+class AppointmentCalendarView(APIView):
+    """Calendar view for appointments in a date range.
+    Query params: 
+    - start (ISO), end (ISO) - required for date range
+    - status: comma-separated list of appointment statuses
+    - assigned_user_ids: comma-separated list of user UUIDs or emails
+    - search: search in title, notes
+    Returns all appointments with start_time in the range.
+    - Admins: all appointments
+    - Normal user: only appointments assigned to them or where they are in users list
+    """
+    permission_classes = [IsAuthenticatedOrReadOnly]
+
+    def get(self, request):
+        start = request.query_params.get('start')
+        end = request.query_params.get('end')
+        if not start or not end:
+            return Response({'detail': 'start and end are required (ISO strings).'}, status=400)
+
+        start_dt = parse_datetime(start)
+        end_dt = parse_datetime(end)
+        if not start_dt or not end_dt:
+            return Response({'detail': 'Invalid start/end datetime.'}, status=400)
+
+        # Query Appointment model
+        qs = Appointment.objects.filter(
+            start_time__gte=start_dt,
+            start_time__lte=end_dt,
+        ).exclude(start_time__isnull=True).select_related('assigned_user', 'contact').prefetch_related('users')
+
+        user = request.user
+        if not user.is_authenticated:
+            return Response([], status=200)
+        
+        # Permission filtering
+        if not getattr(user, 'is_admin', False):
+            # Normal users: only appointments assigned to them or where they are in users list
+            qs = qs.filter(
+                Q(assigned_user=user) | Q(users=user)
+            ).distinct()
+
+        # Filter by status
+        status = request.query_params.get('status')
+        if status:
+            status_list = [s.strip() for s in status.split(',') if s.strip()]
+            if status_list:
+                qs = qs.filter(appointment_status__in=status_list)
+
+        # Filter by assigned users
+        assigned_user_ids = request.query_params.get('assigned_user_ids')
+        if assigned_user_ids:
+            assigned_list = [a.strip() for a in assigned_user_ids.split(',') if a.strip()]
+            if assigned_list:
+                user_ids = []
+                for assignee in assigned_list:
+                    try:
+                        user_id = uuid.UUID(assignee)
+                        user_ids.append(user_id)
+                    except (ValueError, AttributeError):
+                        user = User.objects.filter(
+                            Q(email=assignee) | Q(username=assignee)
+                        ).first()
+                        if user:
+                            user_ids.append(user.id)
+                if user_ids:
+                    qs = qs.filter(assigned_user__id__in=user_ids)
+
+        # Search filter
+        search = request.query_params.get('search')
+        if search:
+            qs = qs.filter(
+                Q(title__icontains=search) |
+                Q(notes__icontains=search)
+            )
+
+        data = AppointmentCalendarSerializer(qs.order_by('start_time'), many=True).data
+        return Response(data)
+
+
+class AppointmentViewSet(viewsets.ModelViewSet):
+    """
+    ViewSet for CRUD operations on appointments.
+    
+    List/Create: GET/POST /api/jobtracker/appointments/
+    Retrieve/Update/Delete: GET/PUT/PATCH/DELETE /api/jobtracker/appointments/{id}/
+    
+    Permissions:
+    - Admins: Full access to all appointments
+    - Normal users: Can only access appointments assigned to them or where they are in users list
+    """
+    serializer_class = AppointmentSerializer
+    permission_classes = [IsAuthenticatedOrReadOnly]
+    lookup_field = 'id'
+
+    def get_queryset(self):
+        """Filter queryset based on user permissions"""
+        user = self.request.user
+        
+        if not user.is_authenticated:
+            return Appointment.objects.none()
+        
+        qs = Appointment.objects.select_related(
+            'assigned_user', 'contact'
+        ).prefetch_related('users').all()
+        
+        # Admins can see all appointments
+        if getattr(user, 'is_admin', False):
+            return qs
+        
+        # Normal users: only appointments assigned to them or where they are in users list
+        return qs.filter(
+            Q(assigned_user=user) | Q(users=user)
+        ).distinct()
+
+    def get_object(self):
+        """Override to check permissions on individual object"""
+        obj = super().get_object()
+        user = self.request.user
+        
+        # Admins can access any appointment
+        if getattr(user, 'is_admin', False):
+            return obj
+        
+        # Normal users: only if assigned to them or in users list
+        if obj.assigned_user != user and user not in obj.users.all():
+            raise PermissionDenied("You don't have permission to access this appointment.")
+        
+        return obj
+
+    def perform_create(self, serializer):
+        """Set location_id from credentials if not provided"""
+        if 'location_id' not in serializer.validated_data or not serializer.validated_data.get('location_id'):
+            from accounts.models import GHLAuthCredentials
+            credentials = GHLAuthCredentials.objects.first()
+            if credentials and credentials.location_id:
+                serializer.save(location_id=credentials.location_id)
+            else:
+                serializer.save()
+        else:
+            serializer.save()
+
+    def destroy(self, request, *args, **kwargs):
+        """Delete appointment"""
+        instance = self.get_object()
+        self.perform_destroy(instance)
+        return Response({'detail': 'Appointment deleted successfully'}, status=204)
 
 
 class JobSeriesCreateView(APIView):

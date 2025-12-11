@@ -2,7 +2,7 @@ from rest_framework import serializers
 from .models import Job, JobServiceItem, JobAssignment, JobOccurrence
 from datetime import datetime, timedelta
 import calendar
-from service_app.models import User, Service
+from service_app.models import User, Service, Appointment
 
 
 class JobServiceItemSerializer(serializers.ModelSerializer):
@@ -57,6 +57,186 @@ class CalendarEventSerializer(serializers.ModelSerializer):
             'duration_hours', 'total_price', 'customer_name',
             'series_id', 'series_sequence'
         ]
+
+
+class AppointmentCalendarSerializer(serializers.ModelSerializer):
+    """Serializer for appointment calendar view"""
+    appointment_id = serializers.UUIDField(source='id')
+    assigned_user_name = serializers.SerializerMethodField()
+    contact_name = serializers.SerializerMethodField()
+    users_count = serializers.SerializerMethodField()
+
+    class Meta:
+        model = Appointment
+        fields = [
+            'appointment_id', 'title', 'start_time', 'end_time', 
+            'appointment_status', 'assigned_user_name', 'contact_name',
+            'address', 'notes', 'source', 'users_count'
+        ]
+
+    def get_assigned_user_name(self, obj):
+        if obj.assigned_user:
+            return obj.assigned_user.get_full_name() or obj.assigned_user.username
+        return None
+
+    def get_contact_name(self, obj):
+        if obj.contact:
+            return f"{obj.contact.first_name or ''} {obj.contact.last_name or ''}".strip() or None
+        return None
+
+    def get_users_count(self, obj):
+        return obj.users.count()
+
+
+class AppointmentSerializer(serializers.ModelSerializer):
+    """Full serializer for CRUD operations on appointments"""
+    appointment_id = serializers.UUIDField(source='id', read_only=True)
+    assigned_user_id = serializers.UUIDField(source='assigned_user.id', read_only=True)
+    assigned_user_name = serializers.SerializerMethodField()
+    assigned_user_email = serializers.EmailField(source='assigned_user.email', read_only=True)
+    assigned_user_uuid = serializers.UUIDField(
+        write_only=True,
+        required=False,
+        help_text="UUID of the user to assign as the primary assigned user (users can view appointments they're assigned to)"
+    )
+    contact_id = serializers.CharField(source='contact.contact_id', read_only=True)
+    contact_name = serializers.SerializerMethodField()
+    contact_email = serializers.EmailField(source='contact.email', read_only=True)
+    users = serializers.SerializerMethodField()
+    users_list = serializers.ListField(
+        child=serializers.UUIDField(),
+        write_only=True,
+        required=False,
+        help_text="List of user UUIDs to assign to this appointment (users can view appointments they're assigned to)"
+    )
+
+    class Meta:
+        model = Appointment
+        fields = [
+            'appointment_id', 'ghl_appointment_id', 'location_id', 'title',
+            'address', 'calendar_id', 'appointment_status', 'source', 'notes',
+            'start_time', 'end_time', 'date_added', 'date_updated',
+            'ghl_contact_id', 'group_id',
+            'assigned_user_id', 'assigned_user_name', 'assigned_user_email', 'assigned_user_uuid',
+            'ghl_assigned_user_id',
+            'contact_id', 'contact_name', 'contact_email',
+            'users', 'users_list', 'users_ghl_ids',
+            'created_at', 'updated_at'
+        ]
+        read_only_fields = [
+            'appointment_id', 'ghl_appointment_id', 'date_added', 'date_updated',
+            'created_at', 'updated_at'
+        ]
+
+    def get_assigned_user_name(self, obj):
+        if obj.assigned_user:
+            return obj.assigned_user.get_full_name() or obj.assigned_user.username
+        return None
+
+    def get_contact_name(self, obj):
+        if obj.contact:
+            return f"{obj.contact.first_name or ''} {obj.contact.last_name or ''}".strip() or None
+        return None
+
+    def get_users(self, obj):
+        """Return list of user details for the appointment"""
+        return [
+            {
+                'id': str(user.id),
+                'email': user.email,
+                'name': user.get_full_name() or user.username,
+                'ghl_user_id': user.ghl_user_id
+            }
+            for user in obj.users.all()
+        ]
+
+    def validate_appointment_status(self, value):
+        """Validate appointment status"""
+        valid_statuses = [choice[0] for choice in Appointment.APPOINTMENT_STATUS_CHOICES]
+        if value and value not in valid_statuses:
+            raise serializers.ValidationError(
+                f"Invalid status. Must be one of: {', '.join(valid_statuses)}"
+            )
+        return value
+
+    def validate(self, data):
+        """Validate appointment data"""
+        start_time = data.get('start_time')
+        end_time = data.get('end_time')
+        
+        if start_time and end_time and start_time >= end_time:
+            raise serializers.ValidationError({
+                'end_time': 'End time must be after start time'
+            })
+        
+        return data
+
+    def create(self, validated_data):
+        """Create a new appointment"""
+        users_list = validated_data.pop('users_list', [])
+        assigned_user_uuid = validated_data.pop('assigned_user_uuid', None)
+        
+        # Handle assigned_user if provided
+        if assigned_user_uuid:
+            try:
+                assigned_user = User.objects.get(id=assigned_user_uuid)
+                validated_data['assigned_user'] = assigned_user
+                # Also set ghl_assigned_user_id if available
+                if assigned_user.ghl_user_id:
+                    validated_data['ghl_assigned_user_id'] = assigned_user.ghl_user_id
+            except User.DoesNotExist:
+                raise serializers.ValidationError({
+                    'assigned_user_uuid': f'User with ID {assigned_user_uuid} does not exist'
+                })
+        
+        # Generate ghl_appointment_id if not provided (for local appointments)
+        if 'ghl_appointment_id' not in validated_data or not validated_data.get('ghl_appointment_id'):
+            import uuid
+            validated_data['ghl_appointment_id'] = f"local_{uuid.uuid4()}"
+        
+        appointment = Appointment.objects.create(**validated_data)
+        
+        # Handle users assignment (many-to-many)
+        if users_list:
+            users = User.objects.filter(id__in=users_list)
+            appointment.users.set(users)
+        
+        return appointment
+
+    def update(self, instance, validated_data):
+        """Update an existing appointment"""
+        users_list = validated_data.pop('users_list', None)
+        assigned_user_uuid = validated_data.pop('assigned_user_uuid', None)
+        
+        # Handle assigned_user if provided
+        if assigned_user_uuid is not None:
+            if assigned_user_uuid:
+                try:
+                    assigned_user = User.objects.get(id=assigned_user_uuid)
+                    instance.assigned_user = assigned_user
+                    # Also set ghl_assigned_user_id if available
+                    if assigned_user.ghl_user_id:
+                        instance.ghl_assigned_user_id = assigned_user.ghl_user_id
+                except User.DoesNotExist:
+                    raise serializers.ValidationError({
+                        'assigned_user_uuid': f'User with ID {assigned_user_uuid} does not exist'
+                    })
+            else:
+                # Clear assigned_user if None is passed
+                instance.assigned_user = None
+                instance.ghl_assigned_user_id = None
+        
+        # Update other fields
+        for attr, value in validated_data.items():
+            setattr(instance, attr, value)
+        instance.save()
+        
+        # Handle users assignment (many-to-many)
+        if users_list is not None:
+            users = User.objects.filter(id__in=users_list)
+            instance.users.set(users)
+        
+        return instance
 
 
 class JobSerializer(serializers.ModelSerializer):

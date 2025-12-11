@@ -7,7 +7,7 @@ from django.shortcuts import get_object_or_404
 from decimal import Decimal
 
 from .models import (
-    Contact, Service, Package, Question, Quote, 
+    Service, Package, Question, Quote, 
     QuoteQuestionAnswer, QuestionOption,
 )
 from .serializers import (
@@ -19,6 +19,7 @@ from service_app.serializers import PackageSerializer
 from .utils import create_ghl_contact_and_note
 from service_app.models import QuestionPricing, OptionPricing
 from rest_framework.views import APIView
+from accounts.models import Contact
 
 
 

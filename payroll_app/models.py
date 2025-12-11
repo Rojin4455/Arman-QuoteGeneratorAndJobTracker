@@ -24,8 +24,8 @@ class EmployeeProfile(models.Model):
     # Pay Scale Settings
     pay_scale_type = models.CharField(max_length=20, choices=PAY_SCALE_CHOICES)
     hourly_rate = models.DecimalField(
-        max_digits=10, 
-        decimal_places=2, 
+        max_digits=10,
+        decimal_places=2,
         null=True, 
         blank=True,
         help_text="Required if pay_scale_type is 'hourly'"

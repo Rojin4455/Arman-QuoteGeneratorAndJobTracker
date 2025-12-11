@@ -31,6 +31,16 @@ def create_project_payouts_on_completion(sender, instance, **kwargs):
             old_instance = Job.objects.get(pk=instance.pk)
             # Check if status changed to 'completed'
             if old_instance.status != 'completed' and instance.status == 'completed':
+                # Check if completion was already processed (prevent duplicate calls)
+                if old_instance.completion_processed:
+                    print(f"⚠️ Job {instance.id} completion was already processed. Skipping payout creation.")
+                    return
+                
+                # Additional check: if payouts already exist, skip (prevent duplicate calls)
+                if Payout.objects.filter(job=instance).exists():
+                    print(f"⚠️ Job {instance.id} payouts already exist. Skipping payout creation.")
+                    return
+                
                 _create_project_payouts(instance)
         except Job.DoesNotExist:
             pass

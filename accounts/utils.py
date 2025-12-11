@@ -9,6 +9,7 @@ import re
 import requests
 from accounts.models import GHLAuthCredentials
 from accounts.models import Contact, Address
+from service_app.models import User, Appointment
 
 
 def fetch_all_contacts(location_id: str, access_token: str = None) -> List[Dict[str, Any]]:
@@ -457,3 +458,312 @@ def delete_contact(data):
         print("Contact and related addresses deleted:", contact_id)
     except Contact.DoesNotExist:
         print("Contact not found for deletion:", contact_id)
+
+
+def create_or_update_user_from_ghl(user_data: Dict[str, Any]) -> User:
+    """
+    Create or update a User from GHL user data.
+    If user exists (by ghl_user_id or email), update it. Otherwise, create new.
+    Sets user as worker initially and saves GHL user ID.
+    
+    Args:
+        user_data (dict): User data from GHL API or webhook payload with fields:
+            - id: GHL user ID
+            - name: Full name
+            - firstName: First name
+            - lastName: Last name
+            - email: Email address
+            - phone: Phone number
+            Or nested structure with 'user' key containing the user data
+    
+    Returns:
+        User: The created or updated User instance
+    """
+    # Handle nested webhook payload structure (if user data is nested)
+    if "user" in user_data:
+        user_data = user_data["user"]
+    
+    ghl_user_id = user_data.get("id")
+    email = user_data.get("email")
+    first_name = user_data.get("firstName", "")
+    last_name = user_data.get("lastName", "")
+    phone = user_data.get("phone", "")
+    full_name = user_data.get("name", "")
+    
+    # Generate username from email or use a default
+    # Use email as username, or generate from GHL user ID
+    base_username = email if email else f"user_{ghl_user_id}"
+    username = base_username
+    
+    # Try to find existing user by ghl_user_id first, then by email
+    user = None
+    if ghl_user_id:
+        try:
+            user = User.objects.get(ghl_user_id=ghl_user_id)
+        except User.DoesNotExist:
+            pass
+    
+    if not user and email:
+        try:
+            user = User.objects.get(email=email)
+        except User.DoesNotExist:
+            pass
+    
+    # If creating new user, ensure username is unique
+    if not user:
+        counter = 1
+        while User.objects.filter(username=username).exists():
+            if email:
+                # If email exists, append counter
+                local_part, domain = email.split('@', 1)
+                username = f"{local_part}_{counter}@{domain}"
+            else:
+                username = f"user_{ghl_user_id}_{counter}"
+            counter += 1
+    
+    # Prepare update/create defaults
+    defaults = {
+        "ghl_user_id": ghl_user_id,
+        "email": email,
+        "first_name": first_name,
+        "last_name": last_name,
+        "role": User.ROLE_WORKER,  # Set as worker initially
+    }
+    
+    if user:
+        # Update existing user
+        # If no username is set, use the generated one
+        if not user.username:
+            defaults["username"] = username
+        for key, value in defaults.items():
+            setattr(user, key, value)
+        user.save()
+        print(f"User updated: {email or ghl_user_id}")
+    else:
+        # Create new user - username is passed separately, not in defaults
+        user = User.objects.create(
+            username=username,
+            **defaults
+        )
+        # Set password as email address
+        if email:
+            user.set_password(email)
+        else:
+            # If no email, set password as GHL user ID
+            user.set_password(ghl_user_id or username)
+        user.save()
+        print(f"User created: {email or ghl_user_id}")
+    
+    return user
+
+
+def fetch_all_users_from_ghl(location_id: str, access_token: str) -> List[Dict[str, Any]]:
+    """
+    Fetch all users from GoHighLevel API for a given location.
+    
+    Args:
+        location_id (str): The location ID for the subaccount
+        access_token (str): Bearer token for authentication
+        
+    Returns:
+        List[Dict]: List of all users from GHL API
+    """
+    url = "https://services.leadconnectorhq.com/users/"
+    headers = {
+        "Accept": "application/json",
+        "Authorization": f"Bearer {access_token}",
+        "Version": "2021-07-28"
+    }
+    
+    params = {
+        "locationId": location_id
+    }
+    
+    try:
+        response = requests.get(url, headers=headers, params=params)
+        response.raise_for_status()
+        data = response.json()
+        users = data.get("users", [])
+        print(f"Fetched {len(users)} users from GHL")
+        return users
+    except requests.exceptions.RequestException as e:
+        print(f"Error fetching users from GHL: {e}")
+        raise Exception(f"Failed to fetch users: {e}")
+
+
+def sync_all_users_to_db(location_id: str, access_token: str) -> Dict[str, int]:
+    """
+    Fetch all users from GHL API and sync them to the local User database.
+    
+    Args:
+        location_id (str): The location ID for the subaccount
+        access_token (str): Bearer token for authentication
+        
+    Returns:
+        Dict: Summary with counts of created and updated users
+    """
+    users_data = fetch_all_users_from_ghl(location_id, access_token)
+    
+    created_count = 0
+    updated_count = 0
+    
+    for user_data in users_data:
+        # Check if user exists before creating/updating
+        ghl_user_id = user_data.get("id")
+        email = user_data.get("email")
+        
+        user_exists = False
+        if ghl_user_id:
+            user_exists = User.objects.filter(ghl_user_id=ghl_user_id).exists()
+        if not user_exists and email:
+            user_exists = User.objects.filter(email=email).exists()
+        
+        user = create_or_update_user_from_ghl(user_data)
+        
+        if user_exists:
+            updated_count += 1
+        else:
+            created_count += 1
+    
+    print(f"User sync completed: {created_count} created, {updated_count} updated")
+    return {
+        "created": created_count,
+        "updated": updated_count,
+        "total": len(users_data)
+    }
+
+
+def update_all_users_password(password: str = "adminuser@246!") -> Dict[str, int]:
+    """
+    Update password for all existing users in the database.
+    
+    Args:
+        password (str): The password to set for all users. Defaults to "adminuser@246!"
+        
+    Returns:
+        Dict: Summary with count of updated users
+    """
+    users = User.objects.all()
+    updated_count = 0
+    
+    for user in users:
+        user.set_password(password)
+        user.save(update_fields=['password'])
+        updated_count += 1
+        print(f"Password updated for user: {user.username} ({user.email or 'no email'})")
+    
+    print(f"Password update completed: {updated_count} users updated")
+    return {
+        "updated": updated_count,
+        "total": users.count()
+    }
+
+
+def create_or_update_appointment_from_ghl(appointment_data: Dict[str, Any], location_id: str = None) -> Appointment:
+    """
+    Create or update an Appointment from GHL appointment data.
+    Maps assignedUserId and users array to User model using ghl_user_id.
+    
+    Args:
+        appointment_data (dict): Appointment data from GHL webhook with fields:
+            - id: GHL appointment ID
+            - title: Appointment title
+            - address: Meeting URL or address
+            - calendarId: Calendar ID
+            - contactId: GHL contact ID
+            - groupId: Group ID
+            - appointmentStatus: Status of appointment
+            - assignedUserId: GHL user ID of assigned user
+            - users: Array of GHL user IDs
+            - notes: Appointment notes
+            - source: Source of appointment
+            - startTime: Start time (ISO format)
+            - endTime: End time (ISO format)
+            - dateAdded: Date added (ISO format)
+            - dateUpdated: Date updated (ISO format)
+        location_id (str): Location ID from webhook payload (optional, can be in appointment_data)
+    
+    Returns:
+        Appointment: The created or updated Appointment instance
+    """
+    # Handle nested webhook payload structure
+    if "appointment" in appointment_data:
+        appointment_data = appointment_data["appointment"]
+        if not location_id:
+            location_id = appointment_data.get("locationId")
+    
+    ghl_appointment_id = appointment_data.get("id")
+    if not ghl_appointment_id:
+        raise ValueError("Appointment ID is required")
+    
+    # Parse datetime fields
+    start_time = parse_datetime(appointment_data.get("startTime")) if appointment_data.get("startTime") else None
+    end_time = parse_datetime(appointment_data.get("endTime")) if appointment_data.get("endTime") else None
+    date_added = parse_datetime(appointment_data.get("dateAdded")) if appointment_data.get("dateAdded") else None
+    date_updated = parse_datetime(appointment_data.get("dateUpdated")) if appointment_data.get("dateUpdated") else None
+    
+    # Get or create appointment
+    appointment, created = Appointment.objects.update_or_create(
+        ghl_appointment_id=ghl_appointment_id,
+        defaults={
+            "location_id": location_id or appointment_data.get("locationId", ""),
+            "title": appointment_data.get("title"),
+            "address": appointment_data.get("address"),
+            "calendar_id": appointment_data.get("calendarId"),
+            "appointment_status": appointment_data.get("appointmentStatus"),
+            "source": appointment_data.get("source"),
+            "notes": appointment_data.get("notes"),
+            "ghl_contact_id": appointment_data.get("contactId"),
+            "group_id": appointment_data.get("groupId"),
+            "ghl_assigned_user_id": appointment_data.get("assignedUserId"),
+            "start_time": start_time,
+            "end_time": end_time,
+            "date_added": date_added,
+            "date_updated": date_updated,
+            "users_ghl_ids": appointment_data.get("users", []),
+        }
+    )
+    
+    # Set flag to prevent sync back to GHL (this is from GHL webhook)
+    appointment._skip_ghl_sync = True
+    
+    # Link contact if ghl_contact_id exists
+    if appointment.ghl_contact_id:
+        try:
+            contact = Contact.objects.get(contact_id=appointment.ghl_contact_id)
+            appointment.contact = contact
+            # Keep flag set to prevent sync
+            appointment._skip_ghl_sync = True
+            appointment.save(update_fields=['contact'])
+        except Contact.DoesNotExist:
+            print(f"Contact with ID {appointment.ghl_contact_id} not found")
+    
+    # Link assigned user if ghl_assigned_user_id exists
+    if appointment.ghl_assigned_user_id:
+        try:
+            assigned_user = User.objects.get(ghl_user_id=appointment.ghl_assigned_user_id)
+            appointment.assigned_user = assigned_user
+            # Keep flag set to prevent sync
+            appointment._skip_ghl_sync = True
+            appointment.save(update_fields=['assigned_user'])
+        except User.DoesNotExist:
+            print(f"User with GHL ID {appointment.ghl_assigned_user_id} not found")
+    
+    # Link users from users array
+    users_ghl_ids = appointment_data.get("users", [])
+    if users_ghl_ids:
+        users_to_add = []
+        for ghl_user_id in users_ghl_ids:
+            try:
+                user = User.objects.get(ghl_user_id=ghl_user_id)
+                users_to_add.append(user)
+            except User.DoesNotExist:
+                print(f"User with GHL ID {ghl_user_id} not found")
+        
+        # Clear existing users and add new ones
+        appointment.users.clear()
+        if users_to_add:
+            appointment.users.add(*users_to_add)
+    
+    print(f"Appointment {'created' if created else 'updated'}: {ghl_appointment_id}")
+    return appointment
