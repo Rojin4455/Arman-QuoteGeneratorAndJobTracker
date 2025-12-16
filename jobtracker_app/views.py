@@ -30,6 +30,46 @@ from .serializers import (
 from .tasks import handle_webhook_event
 
 
+def resolve_user_identifier(identifier):
+    """
+    Resolve a user identifier to a user ID.
+    Tries in order: UUID, integer ID, email, username.
+    Returns the user ID if found, None otherwise.
+    """
+    if not identifier:
+        return None
+    
+    identifier = identifier.strip()
+    
+    # Try as UUID first (for backward compatibility)
+    try:
+        user_id = uuid.UUID(identifier)
+        # Check if user exists with this UUID (in case UUIDs are used in future)
+        user = User.objects.filter(id=user_id).first()
+        if user:
+            return user.id
+    except (ValueError, AttributeError, TypeError):
+        pass
+    
+    # Try as integer ID (current actual ID type)
+    try:
+        user_id = int(identifier)
+        user = User.objects.filter(id=user_id).first()
+        if user:
+            return user.id
+    except (ValueError, TypeError):
+        pass
+    
+    # Try as email or username
+    user = User.objects.filter(
+        Q(email=identifier) | Q(username=identifier)
+    ).first()
+    if user:
+        return user.id
+    
+    return None
+
+
 def apply_job_filters(queryset, request):
     """
     Apply common filters to job queryset based on query parameters.
@@ -37,7 +77,7 @@ def apply_job_filters(queryset, request):
     - status: comma-separated list of statuses (e.g., 'pending,confirmed')
     - job_type: comma-separated list of job types (e.g., 'one_time,recurring')
     - job_ids: comma-separated list of job UUIDs
-    - assignee_ids: comma-separated list of user UUIDs or emails
+    - assignee_ids: comma-separated list of user IDs (integer), UUIDs, or emails
     - start_date: ISO datetime string (filters scheduled_at >= start_date)
     - end_date: ISO datetime string (filters scheduled_at <= end_date)
     - search: search in title, description, customer_name, customer_email, customer_phone
@@ -75,25 +115,17 @@ def apply_job_filters(queryset, request):
         except (ValueError, AttributeError):
             pass  # Invalid UUID format, skip this filter
     
-    # Filter by assignees (user IDs or emails)
+    # Filter by assignees (user IDs, UUIDs, or emails)
     assignee_ids = params.get('assignee_ids')
     if assignee_ids:
         assignee_list = [a.strip() for a in assignee_ids.split(',') if a.strip()]
         if assignee_list:
-            # Try to resolve each assignee (could be UUID, email, or username)
+            # Resolve each assignee identifier to user ID
             user_ids = []
             for assignee in assignee_list:
-                try:
-                    # Try as UUID first
-                    user_id = uuid.UUID(assignee)
+                user_id = resolve_user_identifier(assignee)
+                if user_id:
                     user_ids.append(user_id)
-                except (ValueError, AttributeError):
-                    # Try as email or username
-                    user = User.objects.filter(
-                        Q(email=assignee) | Q(username=assignee)
-                    ).first()
-                    if user:
-                        user_ids.append(user.id)
             
             if user_ids:
                 queryset = queryset.filter(assignments__user_id__in=user_ids).distinct()
@@ -255,7 +287,7 @@ class AppointmentCalendarView(APIView):
     Query params: 
     - start (ISO), end (ISO) - required for date range
     - status: comma-separated list of appointment statuses
-    - assigned_user_ids: comma-separated list of user UUIDs or emails
+    - assigned_user_ids: comma-separated list of user IDs (integer), UUIDs, or emails
     - search: search in title, notes
     Returns all appointments with start_time in the range.
     - Admins: all appointments
@@ -303,15 +335,9 @@ class AppointmentCalendarView(APIView):
             
             user_ids = []
             for assignee in assigned_list:
-                try:
-                    user_id = uuid.UUID(assignee)
+                user_id = resolve_user_identifier(assignee)
+                if user_id:
                     user_ids.append(user_id)
-                except (ValueError, AttributeError):
-                    user_obj = User.objects.filter(
-                        Q(email=assignee) | Q(username=assignee)
-                    ).first()
-                    if user_obj:
-                        user_ids.append(user_obj.id)
             
             if user_ids:
                 qs = qs.filter(assigned_user__id__in=user_ids)
@@ -330,15 +356,9 @@ class AppointmentCalendarView(APIView):
                 if assigned_list:
                     user_ids = []
                     for assignee in assigned_list:
-                        try:
-                            user_id = uuid.UUID(assignee)
+                        user_id = resolve_user_identifier(assignee)
+                        if user_id:
                             user_ids.append(user_id)
-                        except (ValueError, AttributeError):
-                            user_obj = User.objects.filter(
-                                Q(email=assignee) | Q(username=assignee)
-                            ).first()
-                            if user_obj:
-                                user_ids.append(user_obj.id)
                     if user_ids:
                         qs = qs.filter(assigned_user__id__in=user_ids)
 
@@ -374,9 +394,9 @@ class AppointmentViewSet(viewsets.ModelViewSet):
     
     Query Parameters (filters):
     - status: comma-separated list of appointment statuses (e.g., 'new,confirmed,cancelled')
-    - assigned_user_ids: comma-separated list of user UUIDs or emails
-    - assigned_user_id: single user UUID or email
-    - users: comma-separated list of user UUIDs (filter by users in many-to-many)
+    - assigned_user_ids: comma-separated list of user IDs (integer), UUIDs, or emails
+    - assigned_user_id: single user ID (integer), UUID, or email
+    - users: comma-separated list of user IDs (integer), UUIDs, or emails (filter by users in many-to-many)
     - contact_id: filter by contact ID
     - location_id: filter by location ID
     - calendar_id: filter by calendar ID
@@ -416,54 +436,36 @@ class AppointmentViewSet(viewsets.ModelViewSet):
             if status_list:
                 qs = qs.filter(appointment_status__in=status_list)
         
-        # Filter by assigned_user_ids (comma-separated list of UUIDs or emails)
+        # Filter by assigned_user_ids (comma-separated list of IDs, UUIDs, or emails)
         assigned_user_ids = self.request.query_params.get('assigned_user_ids')
         if assigned_user_ids:
             assigned_list = [a.strip() for a in assigned_user_ids.split(',') if a.strip()]
             if assigned_list:
                 user_ids = []
                 for assignee in assigned_list:
-                    try:
-                        user_id = uuid.UUID(assignee)
+                    user_id = resolve_user_identifier(assignee)
+                    if user_id:
                         user_ids.append(user_id)
-                    except (ValueError, AttributeError):
-                        user_obj = User.objects.filter(
-                            Q(email=assignee) | Q(username=assignee)
-                        ).first()
-                        if user_obj:
-                            user_ids.append(user_obj.id)
                 if user_ids:
                     qs = qs.filter(assigned_user__id__in=user_ids)
         
-        # Filter by assigned_user_id (single UUID or email)
+        # Filter by assigned_user_id (single ID, UUID, or email)
         assigned_user_id = self.request.query_params.get('assigned_user_id')
         if assigned_user_id:
-            try:
-                user_id = uuid.UUID(assigned_user_id.strip())
+            user_id = resolve_user_identifier(assigned_user_id)
+            if user_id:
                 qs = qs.filter(assigned_user__id=user_id)
-            except (ValueError, AttributeError):
-                user_obj = User.objects.filter(
-                    Q(email=assigned_user_id.strip()) | Q(username=assigned_user_id.strip())
-                ).first()
-                if user_obj:
-                    qs = qs.filter(assigned_user=user_obj)
         
-        # Filter by users (comma-separated list of UUIDs in many-to-many)
+        # Filter by users (comma-separated list of IDs, UUIDs, or emails in many-to-many)
         users_param = self.request.query_params.get('users')
         if users_param:
             users_list = [u.strip() for u in users_param.split(',') if u.strip()]
             if users_list:
                 user_ids = []
                 for user_identifier in users_list:
-                    try:
-                        user_id = uuid.UUID(user_identifier)
+                    user_id = resolve_user_identifier(user_identifier)
+                    if user_id:
                         user_ids.append(user_id)
-                    except (ValueError, AttributeError):
-                        user_obj = User.objects.filter(
-                            Q(email=user_identifier) | Q(username=user_identifier)
-                        ).first()
-                        if user_obj:
-                            user_ids.append(user_obj.id)
                 if user_ids:
                     qs = qs.filter(users__id__in=user_ids).distinct()
         

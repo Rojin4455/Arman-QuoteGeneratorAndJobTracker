@@ -138,6 +138,11 @@ class Payout(models.Model):
         ('bonus_quoted_by', 'Quoted By Bonus'),
     ]
     
+    SOURCE_CHOICES = [
+        ('auto', 'Auto'),
+        ('manual', 'Manual'),
+    ]
+    
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     employee = models.ForeignKey(User, on_delete=models.CASCADE, related_name='payouts')
     payout_type = models.CharField(max_length=20, choices=PAYOUT_TYPE_CHOICES)
@@ -176,6 +181,9 @@ class Payout(models.Model):
     # For manual calculator entries
     project_title = models.CharField(max_length=255, blank=True, null=True)
     notes = models.TextField(blank=True, null=True)
+    
+    # Source of payout (auto or manual)
+    source = models.CharField(max_length=10, choices=SOURCE_CHOICES, default='auto', blank=True, null=True)
     
     created_at = models.DateTimeField(auto_now_add=True)
     

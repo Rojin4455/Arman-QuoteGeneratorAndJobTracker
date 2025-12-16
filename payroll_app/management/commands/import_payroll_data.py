@@ -459,6 +459,7 @@ class Command(BaseCommand):
                 try:
                     payout_id = row.get('id', '').strip()
                     employee_id = row.get('employee_id', '').strip()
+                    employee_name = row.get('employee_name', '').strip()
                     calculation_type = row.get('calculation_type', 'project').strip()
                     amount = row.get('amount', '').strip()
                     rate = row.get('rate', '').strip()
@@ -467,6 +468,7 @@ class Command(BaseCommand):
                     is_first_time = row.get('is_first_time', 'false').lower() == 'true'
                     job_id = row.get('job_id', '').strip()
                     created_at = row.get('created_at', '').strip()
+                    source = row.get('source', 'auto').strip().lower()
                     
                     if not payout_id or not employee_id or not amount:
                         continue
@@ -506,14 +508,18 @@ class Command(BaseCommand):
                         except (InvalidOperation, ValueError):
                             pass
                     
-                    # Determine payout type
+                    # Determine payout type - check employee_name first (contains bonus info)
                     payout_type = 'project'
-                    if 'First Time Bonus' in project_title or is_first_time:
+                    if 'First Time Bonus' in employee_name or 'First Time Bonus' in project_title or is_first_time:
                         payout_type = 'bonus_first_time'
-                    elif 'Quoted By Bonus' in project_title:
+                    elif 'Quoted By Bonus' in employee_name or 'Quoted By Bonus' in project_title:
                         payout_type = 'bonus_quoted_by'
                     elif calculation_type == 'hourly':
                         payout_type = 'hourly'
+                    
+                    # Validate source
+                    if source not in ['auto', 'manual']:
+                        source = 'auto'
                     
                     # Get job if available
                     job = None
@@ -542,6 +548,7 @@ class Command(BaseCommand):
                             project_value=project_value_decimal,
                             rate_percentage=rate_decimal,
                             project_title=project_title or None,  # Store service names here
+                            source=source,
                         )
                         payouts_to_create.append(payout)
                     
