@@ -1,6 +1,7 @@
 import json
 import uuid
 from collections import defaultdict
+from datetime import datetime, timedelta
 
 from django.db.models import Count, Sum, Min, Q
 from django.db.models.functions import Coalesce
@@ -283,12 +284,63 @@ class AppointmentCalendarView(APIView):
         if not user.is_authenticated:
             return Response([], status=200)
         
-        # Permission filtering
-        if not getattr(user, 'is_admin', False):
+        is_admin = getattr(user, 'is_admin', False)
+        
+        # Filter by assigned users (check this first for admin users)
+        assigned_user_ids = request.query_params.get('assigned_user_ids')
+        
+        # For admin users: require assigned_user_ids to be provided, otherwise return empty
+        if is_admin:
+            if not assigned_user_ids:
+                # Return empty appointments if assigned_user_ids is not provided
+                return Response([], status=200)
+            
+            # Parse assigned_user_ids for admin
+            assigned_list = [a.strip() for a in assigned_user_ids.split(',') if a.strip()]
+            if not assigned_list:
+                # Return empty if assigned_user_ids is empty after parsing
+                return Response([], status=200)
+            
+            user_ids = []
+            for assignee in assigned_list:
+                try:
+                    user_id = uuid.UUID(assignee)
+                    user_ids.append(user_id)
+                except (ValueError, AttributeError):
+                    user_obj = User.objects.filter(
+                        Q(email=assignee) | Q(username=assignee)
+                    ).first()
+                    if user_obj:
+                        user_ids.append(user_obj.id)
+            
+            if user_ids:
+                qs = qs.filter(assigned_user__id__in=user_ids)
+            else:
+                # No valid user IDs found, return empty
+                return Response([], status=200)
+        else:
             # Normal users: only appointments assigned to them or where they are in users list
             qs = qs.filter(
                 Q(assigned_user=user) | Q(users=user)
             ).distinct()
+            
+            # Filter by assigned users (optional for normal users)
+            if assigned_user_ids:
+                assigned_list = [a.strip() for a in assigned_user_ids.split(',') if a.strip()]
+                if assigned_list:
+                    user_ids = []
+                    for assignee in assigned_list:
+                        try:
+                            user_id = uuid.UUID(assignee)
+                            user_ids.append(user_id)
+                        except (ValueError, AttributeError):
+                            user_obj = User.objects.filter(
+                                Q(email=assignee) | Q(username=assignee)
+                            ).first()
+                            if user_obj:
+                                user_ids.append(user_obj.id)
+                    if user_ids:
+                        qs = qs.filter(assigned_user__id__in=user_ids)
 
         # Filter by status
         status = request.query_params.get('status')
@@ -296,25 +348,6 @@ class AppointmentCalendarView(APIView):
             status_list = [s.strip() for s in status.split(',') if s.strip()]
             if status_list:
                 qs = qs.filter(appointment_status__in=status_list)
-
-        # Filter by assigned users
-        assigned_user_ids = request.query_params.get('assigned_user_ids')
-        if assigned_user_ids:
-            assigned_list = [a.strip() for a in assigned_user_ids.split(',') if a.strip()]
-            if assigned_list:
-                user_ids = []
-                for assignee in assigned_list:
-                    try:
-                        user_id = uuid.UUID(assignee)
-                        user_ids.append(user_id)
-                    except (ValueError, AttributeError):
-                        user = User.objects.filter(
-                            Q(email=assignee) | Q(username=assignee)
-                        ).first()
-                        if user:
-                            user_ids.append(user.id)
-                if user_ids:
-                    qs = qs.filter(assigned_user__id__in=user_ids)
 
         # Search filter
         search = request.query_params.get('search')
@@ -338,13 +371,26 @@ class AppointmentViewSet(viewsets.ModelViewSet):
     Permissions:
     - Admins: Full access to all appointments
     - Normal users: Can only access appointments assigned to them or where they are in users list
+    
+    Query Parameters (filters):
+    - status: comma-separated list of appointment statuses (e.g., 'new,confirmed,cancelled')
+    - assigned_user_ids: comma-separated list of user UUIDs or emails
+    - assigned_user_id: single user UUID or email
+    - users: comma-separated list of user UUIDs (filter by users in many-to-many)
+    - contact_id: filter by contact ID
+    - location_id: filter by location ID
+    - calendar_id: filter by calendar ID
+    - source: filter by source
+    - start_date: filter by start_time >= date (YYYY-MM-DD format)
+    - end_date: filter by start_time <= date (YYYY-MM-DD format)
+    - search: search in title and notes (case-insensitive)
     """
     serializer_class = AppointmentSerializer
     permission_classes = [IsAuthenticatedOrReadOnly]
     lookup_field = 'id'
 
     def get_queryset(self):
-        """Filter queryset based on user permissions"""
+        """Filter queryset based on user permissions and query parameters"""
         user = self.request.user
         
         if not user.is_authenticated:
@@ -354,14 +400,119 @@ class AppointmentViewSet(viewsets.ModelViewSet):
             'assigned_user', 'contact'
         ).prefetch_related('users').all()
         
-        # Admins can see all appointments
-        if getattr(user, 'is_admin', False):
-            return qs
+        is_admin = getattr(user, 'is_admin', False)
         
-        # Normal users: only appointments assigned to them or where they are in users list
-        return qs.filter(
-            Q(assigned_user=user) | Q(users=user)
-        ).distinct()
+        # Permission filtering
+        if not is_admin:
+            # Normal users: only appointments assigned to them or where they are in users list
+            qs = qs.filter(
+                Q(assigned_user=user) | Q(users=user)
+            ).distinct()
+        
+        # Filter by status (comma-separated list)
+        status = self.request.query_params.get('status')
+        if status:
+            status_list = [s.strip() for s in status.split(',') if s.strip()]
+            if status_list:
+                qs = qs.filter(appointment_status__in=status_list)
+        
+        # Filter by assigned_user_ids (comma-separated list of UUIDs or emails)
+        assigned_user_ids = self.request.query_params.get('assigned_user_ids')
+        if assigned_user_ids:
+            assigned_list = [a.strip() for a in assigned_user_ids.split(',') if a.strip()]
+            if assigned_list:
+                user_ids = []
+                for assignee in assigned_list:
+                    try:
+                        user_id = uuid.UUID(assignee)
+                        user_ids.append(user_id)
+                    except (ValueError, AttributeError):
+                        user_obj = User.objects.filter(
+                            Q(email=assignee) | Q(username=assignee)
+                        ).first()
+                        if user_obj:
+                            user_ids.append(user_obj.id)
+                if user_ids:
+                    qs = qs.filter(assigned_user__id__in=user_ids)
+        
+        # Filter by assigned_user_id (single UUID or email)
+        assigned_user_id = self.request.query_params.get('assigned_user_id')
+        if assigned_user_id:
+            try:
+                user_id = uuid.UUID(assigned_user_id.strip())
+                qs = qs.filter(assigned_user__id=user_id)
+            except (ValueError, AttributeError):
+                user_obj = User.objects.filter(
+                    Q(email=assigned_user_id.strip()) | Q(username=assigned_user_id.strip())
+                ).first()
+                if user_obj:
+                    qs = qs.filter(assigned_user=user_obj)
+        
+        # Filter by users (comma-separated list of UUIDs in many-to-many)
+        users_param = self.request.query_params.get('users')
+        if users_param:
+            users_list = [u.strip() for u in users_param.split(',') if u.strip()]
+            if users_list:
+                user_ids = []
+                for user_identifier in users_list:
+                    try:
+                        user_id = uuid.UUID(user_identifier)
+                        user_ids.append(user_id)
+                    except (ValueError, AttributeError):
+                        user_obj = User.objects.filter(
+                            Q(email=user_identifier) | Q(username=user_identifier)
+                        ).first()
+                        if user_obj:
+                            user_ids.append(user_obj.id)
+                if user_ids:
+                    qs = qs.filter(users__id__in=user_ids).distinct()
+        
+        # Filter by contact_id
+        contact_id = self.request.query_params.get('contact_id')
+        if contact_id:
+            qs = qs.filter(contact__contact_id=contact_id)
+        
+        # Filter by location_id
+        location_id = self.request.query_params.get('location_id')
+        if location_id:
+            qs = qs.filter(location_id=location_id)
+        
+        # Filter by calendar_id
+        calendar_id = self.request.query_params.get('calendar_id')
+        if calendar_id:
+            qs = qs.filter(calendar_id=calendar_id)
+        
+        # Filter by source
+        source = self.request.query_params.get('source')
+        if source:
+            qs = qs.filter(source=source)
+        
+        # Filter by date range (start_date and end_date)
+        start_date = self.request.query_params.get('start_date')
+        if start_date:
+            try:
+                start_dt = datetime.strptime(start_date, '%Y-%m-%d')
+                qs = qs.filter(start_time__gte=start_dt)
+            except ValueError:
+                pass
+        
+        end_date = self.request.query_params.get('end_date')
+        if end_date:
+            try:
+                end_dt = datetime.strptime(end_date, '%Y-%m-%d') + timedelta(days=1)
+                qs = qs.filter(start_time__lt=end_dt)
+            except ValueError:
+                pass
+        
+        # Search filter (title and notes)
+        search = self.request.query_params.get('search')
+        if search:
+            qs = qs.filter(
+                Q(title__icontains=search) |
+                Q(notes__icontains=search)
+            )
+        
+        return qs.order_by('-start_time', '-created_at')
 
     def get_object(self):
         """Override to check permissions on individual object"""

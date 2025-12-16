@@ -1,0 +1,3 @@
+id,setting_key,setting_value,setting_type,created_at,updated_at
+95af7ece-590a-4cde-86e1-df413712b8b7,first_time_bonus_percentage,15,number,2025-08-21 13:42:53.36793+00,2025-11-01 18:50:30.898119+00
+cae70ab8-7c75-41b0-959e-0d982f6cad20,quoted_by_bonus_percentage,2,number,2025-08-21 13:45:36.47704+00,2025-11-01 18:50:32.794601+00
