@@ -70,7 +70,7 @@ def resolve_user_identifier(identifier):
     return None
 
 
-def apply_job_filters(queryset, request):
+def apply_job_filters(queryset, request, skip_assignee_ids=False):
     """
     Apply common filters to job queryset based on query parameters.
     Supports:
@@ -81,6 +81,11 @@ def apply_job_filters(queryset, request):
     - start_date: ISO datetime string (filters scheduled_at >= start_date)
     - end_date: ISO datetime string (filters scheduled_at <= end_date)
     - search: search in title, description, customer_name, customer_email, customer_phone
+    
+    Args:
+        queryset: The job queryset to filter
+        request: The request object with query parameters
+        skip_assignee_ids: If True, skip filtering by assignee_ids (useful when handled separately)
     """
     params = request.query_params
     
@@ -116,19 +121,20 @@ def apply_job_filters(queryset, request):
             pass  # Invalid UUID format, skip this filter
     
     # Filter by assignees (user IDs, UUIDs, or emails)
-    assignee_ids = params.get('assignee_ids')
-    if assignee_ids:
-        assignee_list = [a.strip() for a in assignee_ids.split(',') if a.strip()]
-        if assignee_list:
-            # Resolve each assignee identifier to user ID
-            user_ids = []
-            for assignee in assignee_list:
-                user_id = resolve_user_identifier(assignee)
-                if user_id:
-                    user_ids.append(user_id)
-            
-            if user_ids:
-                queryset = queryset.filter(assignments__user_id__in=user_ids).distinct()
+    if not skip_assignee_ids:
+        assignee_ids = params.get('assignee_ids')
+        if assignee_ids:
+            assignee_list = [a.strip() for a in assignee_ids.split(',') if a.strip()]
+            if assignee_list:
+                # Resolve each assignee identifier to user ID
+                user_ids = []
+                for assignee in assignee_list:
+                    user_id = resolve_user_identifier(assignee)
+                    if user_id:
+                        user_ids.append(user_id)
+                
+                if user_ids:
+                    queryset = queryset.filter(assignments__user_id__in=user_ids).distinct()
     
     # Filter by date range
     start_date = params.get('start_date')
@@ -244,11 +250,11 @@ class OccurrenceListView(APIView):
     - start (ISO), end (ISO) - required for date range
     - status: comma-separated list of statuses
     - job_ids: comma-separated list of job UUIDs
-    - assignee_ids: comma-separated list of user UUIDs or emails
+    - assignee_ids: comma-separated list of user IDs (integer), UUIDs, or emails (admin only)
     - search: search in title, description, customer fields
     Returns all jobs (one-time and recurring series instances) with scheduled_at in the range.
-    - Admins: all jobs
-    - Normal user: only jobs assigned to them
+    - Admins: if assignee_ids provided, only jobs for those assignees; otherwise all jobs
+    - Normal user: only jobs assigned to them (assignee_ids parameter is ignored)
     """
     permission_classes = [IsAuthenticatedOrReadOnly]
 
@@ -272,11 +278,35 @@ class OccurrenceListView(APIView):
         user = request.user
         if not user.is_authenticated:
             return Response([], status=200)
-        if not getattr(user, 'is_admin', False):
+        
+        is_admin = getattr(user, 'is_admin', False)
+        assignee_ids_param = request.query_params.get('assignee_ids')
+        
+        # Handle assignee_ids filtering based on user role
+        skip_assignee_ids_in_filter = False
+        if is_admin:
+            # Admin: if assignee_ids provided, filter by those assignees only
+            # Otherwise, show all jobs (no filtering by assignee)
+            if assignee_ids_param:
+                assignee_list = [a.strip() for a in assignee_ids_param.split(',') if a.strip()]
+                if assignee_list:
+                    user_ids = []
+                    for assignee in assignee_list:
+                        user_id = resolve_user_identifier(assignee)
+                        if user_id:
+                            user_ids.append(user_id)
+                    if user_ids:
+                        qs = qs.filter(assignments__user_id__in=user_ids).distinct()
+                # Skip assignee_ids in apply_job_filters since we handled it above
+                skip_assignee_ids_in_filter = True
+        else:
+            # Non-admin: always filter by their own user
             qs = qs.filter(assignments__user=user).distinct()
+            # Skip assignee_ids in apply_job_filters since we already filtered by user
+            skip_assignee_ids_in_filter = True
 
         # Apply additional filters
-        qs = apply_job_filters(qs, request)
+        qs = apply_job_filters(qs, request, skip_assignee_ids=skip_assignee_ids_in_filter)
 
         data = CalendarEventSerializer(qs.order_by('scheduled_at', 'series_sequence'), many=True).data
         return Response(data)
@@ -311,7 +341,7 @@ class AppointmentCalendarView(APIView):
             start_time__gte=start_dt,
             start_time__lte=end_dt,
         ).exclude(start_time__isnull=True).select_related('assigned_user', 'contact').prefetch_related('users')
-
+        print("qs: ", qs)
         user = request.user
         if not user.is_authenticated:
             return Response([], status=200)

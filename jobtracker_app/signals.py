@@ -93,64 +93,51 @@ def _store_previous_appointment_fields(sender, instance, **kwargs):
 
 @receiver(post_save, sender=Appointment)
 def _sync_appointment_to_ghl(sender, instance, created, **kwargs):
-    """Sync appointment to GHL on create or update"""
+    """
+    Sync appointment updates to GHL.
+    All appointments originate from GHL webhooks, so we only sync updates back to GHL.
+    The _skip_ghl_sync flag prevents loops when updates come from GHL webhooks.
+    """
     # Skip if this is a GHL webhook sync (to avoid infinite loop)
+    # This flag is set in create_or_update_appointment_from_ghl when processing webhooks
     if getattr(instance, '_skip_ghl_sync', False):
         return
     
-    # Skip if appointment already has a GHL ID (not local) - means it came from GHL
-    # This prevents syncing appointments that were created/updated from GHL webhooks
-    if instance.ghl_appointment_id and not instance.ghl_appointment_id.startswith('local_'):
+    # Skip creation - all appointments should come from GHL webhooks
+    if created:
+        # If somehow an appointment is created without a GHL ID, log a warning
+        if not instance.ghl_appointment_id:
+            print(f"⚠️ Appointment {instance.id} created without ghl_appointment_id. Appointments should come from GHL webhooks.")
         return
     
-    if created:
-        # Only create in GHL if this is a local appointment (starts with 'local_')
-        # or if it doesn't have a ghl_appointment_id yet
-        if not instance.ghl_appointment_id or instance.ghl_appointment_id.startswith('local_'):
-            # Create appointment in GHL
-            ghl_appointment_id = create_appointment_in_ghl(instance)
-            if ghl_appointment_id:
-                # Update the appointment with GHL ID (skip sync to avoid loop)
-                instance._skip_ghl_sync = True
-                Appointment.objects.filter(id=instance.id).update(ghl_appointment_id=ghl_appointment_id)
-                # Refresh instance
-                instance.refresh_from_db()
-    else:
+    # Handle updates - sync changes back to GHL
+    previous_fields = getattr(instance, '_previous_fields', {})
+    if not previous_fields:
+        return
+    
+    # Detect changed fields
+    changed_fields = {}
+    for field, old_value in previous_fields.items():
+        new_value = getattr(instance, field, None)
+        if old_value != new_value:
+            changed_fields[field] = new_value
+    
+    # Only sync if there are changes and appointment has a GHL ID
+    if changed_fields and instance.ghl_appointment_id:
         # Update appointment in GHL
-        previous_fields = getattr(instance, '_previous_fields', {})
-        if not previous_fields:
-            return
-        
-        # Detect changed fields
-        changed_fields = {}
-        for field, old_value in previous_fields.items():
-            new_value = getattr(instance, field, None)
-            if old_value != new_value:
-                changed_fields[field] = new_value
-        
-        # Only sync if there are changes and appointment exists in GHL
-        if changed_fields:
-            # If appointment doesn't exist in GHL yet, create it first
-            if not instance.ghl_appointment_id or instance.ghl_appointment_id.startswith('local_'):
-                ghl_appointment_id = create_appointment_in_ghl(instance)
-                if ghl_appointment_id:
-                    instance._skip_ghl_sync = True
-                    Appointment.objects.filter(id=instance.id).update(ghl_appointment_id=ghl_appointment_id)
-                    instance.refresh_from_db()
-            else:
-                update_appointment_in_ghl(instance, changed_fields=changed_fields)
+        update_appointment_in_ghl(instance, changed_fields=changed_fields)
+    elif changed_fields and not instance.ghl_appointment_id:
+        print(f"⚠️ Cannot sync appointment {instance.id} to GHL: missing ghl_appointment_id")
 
 
 @receiver(pre_delete, sender=Appointment)
 def _delete_appointment_from_ghl(sender, instance, **kwargs):
     """Delete appointment from GHL before deleting from database"""
-    # Skip if this is a local appointment
-    if not instance.ghl_appointment_id or instance.ghl_appointment_id.startswith('local_'):
-        return
-    
-    # Skip if sync is disabled
+    # Skip if sync is disabled (e.g., during webhook processing)
     if getattr(instance, '_skip_ghl_sync', False):
         return
     
-    delete_appointment_from_ghl(instance)
+    # Only delete if appointment exists in GHL (has a real GHL appointment ID)
+    if instance.ghl_appointment_id and not instance.ghl_appointment_id.startswith('local_'):
+        delete_appointment_from_ghl(instance)
 

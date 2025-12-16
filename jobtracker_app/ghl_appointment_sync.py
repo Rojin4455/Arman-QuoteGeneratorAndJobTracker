@@ -171,14 +171,15 @@ def update_appointment_in_ghl(appointment: Appointment, changed_fields: Optional
         print("❌ No GHLAuthCredentials found. Cannot sync appointment to GHL.")
         return False
     
-    # Skip if this is a local appointment (not synced to GHL yet)
-    if not appointment.ghl_appointment_id or appointment.ghl_appointment_id.startswith('local_'):
-        print(f"⚠️ Appointment {appointment.id} is local, not synced to GHL. Creating instead...")
-        ghl_id = create_appointment_in_ghl(appointment)
-        if ghl_id:
-            appointment.ghl_appointment_id = ghl_id
-            appointment.save(update_fields=['ghl_appointment_id'])
-        return ghl_id is not None
+    # All appointments should have a GHL appointment ID (they come from GHL webhooks)
+    if not appointment.ghl_appointment_id:
+        print(f"❌ Appointment {appointment.id} missing ghl_appointment_id. Cannot update in GHL.")
+        return False
+    
+    # Skip if this is a local appointment (shouldn't happen in normal flow, but handle gracefully)
+    if appointment.ghl_appointment_id.startswith('local_'):
+        print(f"⚠️ Appointment {appointment.id} has local ID. Cannot update in GHL without real GHL appointment ID.")
+        return False
     
     headers = get_ghl_headers(credentials.access_token)
     url = f'https://services.leadconnectorhq.com/calendars/events/appointments/{appointment.ghl_appointment_id}'
