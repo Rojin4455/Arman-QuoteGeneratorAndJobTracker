@@ -11,6 +11,7 @@ from django.utils.decorators import method_decorator
 import traceback
 from accounts.tasks import fetch_all_contacts_task,handle_webhook_event
 from accounts.utils import sync_all_users_to_db
+from dashboard_app.tasks import sync_single_invoice_task,delete_invoice_task
 
 
 
@@ -131,6 +132,29 @@ def webhook_handler(request):
         # Dispatch async handler
         event_type = data.get("type")
         handle_webhook_event.delay(data, event_type)
+
+        invoice_events = ["InvoiceCreate", "InvoiceUpdate", "InvoiceDelete"]
+        if event_type in invoice_events:
+            location_id = data.get("locationId")
+            # Extract invoice_id from various possible locations in the payload
+            invoice_id = None
+            invoice_obj = data.get("invoice")
+            if isinstance(invoice_obj, dict):
+                invoice_id = invoice_obj.get("_id") or invoice_obj.get("id")
+            if not invoice_id:
+                invoice_id = data.get("invoiceId") or data.get("_id")
+            
+            if location_id and invoice_id:
+                if event_type in ["InvoiceCreate", "InvoiceUpdate"]:
+                    # Sync invoice for create and update events
+                    sync_single_invoice_task.delay(location_id, invoice_id)
+                    print(f"Triggered invoice sync for {event_type}: invoice_id={invoice_id}, location_id={location_id}")
+                elif event_type == "InvoiceDelete":
+                    # Delete invoice for delete event
+                    delete_invoice_task.delay(invoice_id)
+                    print(f"Triggered invoice deletion for {event_type}: invoice_id={invoice_id}")
+            else:
+                print(f"Missing location_id or invoice_id in webhook payload for {event_type}")
 
         return JsonResponse({"message": "Webhook received"}, status=200)
 

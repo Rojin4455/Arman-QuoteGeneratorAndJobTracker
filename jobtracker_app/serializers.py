@@ -261,6 +261,17 @@ class JobSerializer(serializers.ModelSerializer):
         ]
         read_only_fields = ['id', 'created_at', 'updated_at']
 
+    def to_representation(self, instance):
+        """Override to return quoted_by as user name instead of ID"""
+        representation = super().to_representation(instance)
+        if instance.quoted_by:
+            # Return user's full name or username instead of ID
+            full_name = instance.quoted_by.get_full_name()
+            representation['quoted_by'] = full_name if full_name else instance.quoted_by.username
+        else:
+            representation['quoted_by'] = None
+        return representation
+
     def create(self, validated_data):
         items_data = validated_data.pop('items', [])
         assignments_data = validated_data.pop('assignments', [])

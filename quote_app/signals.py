@@ -135,12 +135,18 @@ def handle_quote_submission(sender, instance, created, **kwargs):
     total_price = _quantize_currency(total_price)
     total_duration = total_duration.quantize(Decimal("0.01"))
 
-    quoted_by_user = _resolve_user_from_reference(instance.quoted_by)
+    # Get quoted_by user from submission model (ForeignKey)
+    quoted_by_user = submission.quoted_by
     created_by_email = None
     if quoted_by_user:
         created_by_email = getattr(quoted_by_user, "email", None)
-    elif instance.quoted_by and "@" in instance.quoted_by:
-        created_by_email = instance.quoted_by
+    else:
+        # Fallback: try to resolve from QuoteSchedule's quoted_by string field for backward compatibility
+        quoted_by_user = _resolve_user_from_reference(instance.quoted_by)
+        if quoted_by_user:
+            created_by_email = getattr(quoted_by_user, "email", None)
+        elif instance.quoted_by and "@" in instance.quoted_by:
+            created_by_email = instance.quoted_by
 
     job_defaults = {
         "title": customer_name or "Accepted Quote",

@@ -4,7 +4,7 @@ from decimal import Decimal
 from service_app.models import (
     Service, Package, Feature, PackageFeature, Location, 
     Question, QuestionOption, SubQuestion, GlobalSizePackage,
-    ServicePackageSizeMapping, QuestionPricing, OptionPricing, SubQuestionPricing
+    ServicePackageSizeMapping, QuestionPricing, OptionPricing, SubQuestionPricing, User
 )
 from .models import (
     CustomerSubmission, CustomerServiceSelection, CustomerQuestionResponse,
@@ -108,7 +108,7 @@ class CustomerSubmissionCreateSerializer(serializers.ModelSerializer):
     """Serializer for creating customer submissions"""
     contact = serializers.PrimaryKeyRelatedField(queryset=Contact.objects.all())
     address = serializers.PrimaryKeyRelatedField(queryset=Address.objects.all(), required=False, allow_null=True)
-    quoted_by = serializers.CharField(write_only=True)
+    quoted_by = serializers.PrimaryKeyRelatedField(queryset=User.objects.all(), write_only=True, required=False, allow_null=True)
     first_time = serializers.BooleanField(write_only=True)
     class Meta:
         model = CustomerSubmission
@@ -120,16 +120,26 @@ class CustomerSubmissionCreateSerializer(serializers.ModelSerializer):
         from django.utils import timezone
         from datetime import timedelta
 
-        quoted_by = validated_data.pop('quoted_by')
+        quoted_by_user = validated_data.pop('quoted_by', None)
         first_time = validated_data.pop('first_time')
 
-        submission = CustomerSubmission.objects.create(**validated_data)
+        # Create submission with quoted_by user
+        submission = CustomerSubmission.objects.create(
+            **validated_data,
+            quoted_by=quoted_by_user
+        )
         submission.expires_at = timezone.now() + timedelta(days=30)
         submission.save()
 
+        # Store quoted_by as string in QuoteSchedule for backward compatibility
+        quoted_by_str = None
+        if quoted_by_user:
+            # Try email first, then username, then ID
+            quoted_by_str = getattr(quoted_by_user, 'email', None) or getattr(quoted_by_user, 'username', None) or str(quoted_by_user.id)
+
         QuoteSchedule.objects.create(
             submission=submission,
-            quoted_by=quoted_by,
+            quoted_by=quoted_by_str or '',
             first_time=first_time
         )
 

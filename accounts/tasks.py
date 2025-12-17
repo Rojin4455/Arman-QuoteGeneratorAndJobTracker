@@ -391,11 +391,41 @@ def fetch_and_save_all_appointments(location_id=None):
                     continue
             print(f"Updated many-to-many relationships for {len(many_to_many_updates)} appointments")
         
-        print(f"Appointment sync completed: {created_count} created, {updated_count} updated")
+        # Delete appointments that exist in our app but not in GHL
+        # Only delete appointments that:
+        # 1. Have a ghl_appointment_id (are synced from GHL)
+        # 2. Are within the time range we're syncing
+        # 3. Are not in the fetched GHL appointments list
+        deleted_count = 0
+        if ghl_appointment_ids:
+            # Get set of fetched GHL appointment IDs for quick lookup
+            fetched_ghl_ids = set(ghl_appointment_ids)
+            
+            # Find appointments to delete:
+            # - Have ghl_appointment_id (synced from GHL)
+            # - Within the time range we're syncing
+            # - Not in the fetched GHL appointments
+            appointments_to_delete = Appointment.objects.filter(
+                ghl_appointment_id__isnull=False
+            ).exclude(
+                ghl_appointment_id__in=fetched_ghl_ids
+            ).filter(
+                start_time__gte=start_time,
+                start_time__lte=end_time
+            )
+            
+            deleted_count = appointments_to_delete.count()
+            if deleted_count > 0:
+                with transaction.atomic():
+                    appointments_to_delete.delete()
+                    print(f"Deleted {deleted_count} appointments that no longer exist in GHL")
+        
+        print(f"Appointment sync completed: {created_count} created, {updated_count} updated, {deleted_count} deleted")
         
         return {
             "created": created_count,
             "updated": updated_count,
+            "deleted": deleted_count,
             "total": len(all_events)
         }
         

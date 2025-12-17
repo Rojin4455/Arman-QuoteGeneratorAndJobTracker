@@ -187,6 +187,7 @@ CORS_ALLOWED_ORIGINS = [
     "http://127.0.0.1:3001",
     "http://3.141.107.85",
     "https://quotenew.theservicepilot.com",
+    "https://services.theservicepilot.com",
 ]
 
 CORS_ALLOW_CREDENTIALS = True

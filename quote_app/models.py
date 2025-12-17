@@ -2,7 +2,7 @@
 from django.db import models
 from decimal import Decimal, ROUND_HALF_UP
 import uuid
-from service_app.models import Service, Package, Location, Question, QuestionOption, SubQuestion
+from service_app.models import Service, Package, Location, Question, QuestionOption, SubQuestion, User
 from accounts.models import Contact, Address
 from django.db.models import Sum
 
@@ -37,6 +37,9 @@ class CustomerSubmission(models.Model):
     # Submission Details
     selected_services = models.ManyToManyField(Service, through='CustomerServiceSelection')
     status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='draft')
+    
+    # User who created/quoted this submission
+    quoted_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True, related_name='quoted_submissions')
     
     # Pricing Summary (calculated after package selection)
     total_base_price = models.DecimalField(max_digits=12, decimal_places=2, default=Decimal('0.00'))
