@@ -250,11 +250,11 @@ class OccurrenceListView(APIView):
     - start (ISO), end (ISO) - required for date range
     - status: comma-separated list of statuses
     - job_ids: comma-separated list of job UUIDs
-    - assignee_ids: comma-separated list of user IDs (integer), UUIDs, or emails (admin only)
+    - assignee_ids: comma-separated list of user IDs (integer), UUIDs, or emails
     - search: search in title, description, customer fields
     Returns all jobs (one-time and recurring series instances) with scheduled_at in the range.
-    - Admins: if assignee_ids provided, only jobs for those assignees; otherwise all jobs
-    - Normal user: only jobs assigned to them (assignee_ids parameter is ignored)
+    - Admins: if assignee_ids provided, only jobs for those assignees; otherwise return empty
+    - Normal user: always return only jobs assigned to them (assignee_ids parameter is ignored)
     """
     permission_classes = [IsAuthenticatedOrReadOnly]
 
@@ -286,7 +286,7 @@ class OccurrenceListView(APIView):
         skip_assignee_ids_in_filter = False
         if is_admin:
             # Admin: if assignee_ids provided, filter by those assignees only
-            # Otherwise, show all jobs (no filtering by assignee)
+            # Otherwise, return empty (no jobs)
             if assignee_ids_param:
                 assignee_list = [a.strip() for a in assignee_ids_param.split(',') if a.strip()]
                 if assignee_list:
@@ -297,10 +297,20 @@ class OccurrenceListView(APIView):
                             user_ids.append(user_id)
                     if user_ids:
                         qs = qs.filter(assignments__user_id__in=user_ids).distinct()
+                    else:
+                        # No valid user IDs found, return empty
+                        qs = qs.none()
+                else:
+                    # Empty assignee_ids param, return empty
+                    qs = qs.none()
                 # Skip assignee_ids in apply_job_filters since we handled it above
                 skip_assignee_ids_in_filter = True
+            else:
+                # No assignee_ids provided for admin, return empty
+                qs = qs.none()
+                skip_assignee_ids_in_filter = True
         else:
-            # Non-admin: always filter by their own user
+            # Non-admin: always filter by their own user (ignore assignee_ids parameter)
             qs = qs.filter(assignments__user=user).distinct()
             # Skip assignee_ids in apply_job_filters since we already filtered by user
             skip_assignee_ids_in_filter = True
