@@ -8,5 +8,5 @@ urlpatterns = [
     path("auth/callback/", callback, name="oauth_callback"),
     path("sync_contacts/", sync_all_contacts_and_address, name="sync_contacts"),
     path("sync_users/", sync_all_users, name="sync_users"),
-    path("webhook",webhook_handler),
+    path("webhook/",webhook_handler, name="webhook"),
 ]
