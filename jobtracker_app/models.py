@@ -89,6 +89,9 @@ class Job(models.Model):
     
     # Track if completion webhook/invoice was already sent
     completion_processed = models.BooleanField(default=False, help_text="True if webhook/invoice was already sent when job was completed")
+    
+    # Invoice URL from external system (stored in contact's custom field)
+    invoice_url = models.URLField(max_length=500, blank=True, null=True, help_text="Invoice URL from external system (G4IXyj5y49rKinuXbnCA custom field)")
 
     # Series grouping for recurring jobs when creating independent jobs per date
     series_id = models.UUIDField(null=True, blank=True, db_index=True)

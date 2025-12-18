@@ -257,7 +257,7 @@ class JobSerializer(serializers.ModelSerializer):
             'job_type', 'repeat_every', 'repeat_unit', 'occurrences', 'day_of_week',
             'status', 'notes', 'items', 'assignments',
             'occurrence_count', 'occurrence_events', 'series_id', 'series_sequence',
-            'created_at', 'updated_at'
+            'invoice_url', 'created_at', 'updated_at'
         ]
         read_only_fields = ['id', 'created_at', 'updated_at']
 

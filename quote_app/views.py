@@ -27,7 +27,9 @@ from .serializers import (
     ServiceQuestionResponseSerializer, PricingCalculationRequestSerializer,SubmitFinalQuoteSerializer,ContactSerializer,
     ConditionalQuestionRequestSerializer, CustomerPackageQuoteSerializer,ConditionalQuestionResponseSerializer,ServiceResponseSubmissionSerializer,QuoteScheduleUpdateSerializer
 )
-from service_app.serializers import GlobalBasePriceSerializer
+from service_app.serializers import GlobalBasePriceSerializer, UserSerializer
+from service_app.models import User
+from payroll_app.models import EmployeeProfile
 
 from quote_app.helpers import create_or_update_ghl_contact
 from rest_framework.generics import ListAPIView
@@ -98,10 +100,20 @@ class InitialDataView(APIView):
         services = Service.objects.filter(is_active=True).order_by('order', 'name')
         size_ranges = GlobalSizePackage.objects.all().order_by('order', 'min_sqft')
         
+        # Get project-based employees (active only)
+        project_employees = EmployeeProfile.objects.filter(
+            pay_scale_type='project',
+            status='active'
+        ).select_related('user').order_by('user__first_name', 'user__last_name', 'user__username')
+        
+        # Extract User objects from EmployeeProfile (filter out None users)
+        project_users = [emp.user for emp in project_employees if emp.user and emp.user.is_active]
+        
         return Response({
             'locations': LocationPublicSerializer(locations, many=True).data,
             'services': ServicePublicSerializer(services, many=True).data,
-            'size_ranges': GlobalSizePackagePublicSerializer(size_ranges, many=True).data
+            'size_ranges': GlobalSizePackagePublicSerializer(size_ranges, many=True).data,
+            'project_employees': UserSerializer(project_users, many=True).data
         })
 
 # Step 2: Create customer submission

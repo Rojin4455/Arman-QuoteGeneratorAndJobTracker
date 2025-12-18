@@ -447,6 +447,60 @@ def create_or_update_contact(data):
     cred = GHLAuthCredentials.objects.first()
     fetch_contacts_locations([data], data.get("locationId"), cred.access_token)
     print("Contact created/updated:", contact_id)
+    
+    # Check for invoice URL in custom fields and update related jobs
+    custom_fields = data.get("customFields", [])
+    invoice_field_id = "G4IXyj5y49rKinuXbnCA"
+    invoice_url = None
+    
+    # Find the invoice URL from custom fields
+    if custom_fields:
+        for field in custom_fields:
+            if isinstance(field, dict) and field.get("id") == invoice_field_id:
+                invoice_url = field.get("value")
+                break
+    
+    # If invoice URL found, update related completed jobs
+    if invoice_url:
+        from jobtracker_app.models import Job
+        from django.db.models import Q
+        
+        # Strategy 1: Match by ghl_contact_id (covers ~37% of jobs)
+        jobs = Job.objects.filter(
+            ghl_contact_id=contact_id,
+            status='completed',
+            invoice_url__isnull=True
+        )
+        
+        # Strategy 2: If no match, try matching through submission.contact
+        if not jobs.exists():
+            jobs = Job.objects.filter(
+                submission__contact__contact_id=contact_id,
+                status='completed',
+                invoice_url__isnull=True
+            )
+        
+        # Strategy 3: If still no match, try matching by email or phone
+        # (less reliable but might catch some)
+        if not jobs.exists():
+            contact_email = contact.email
+            contact_phone = contact.phone
+            if contact_email or contact_phone:
+                query = Q(status='completed', invoice_url__isnull=True)
+                if contact_email:
+                    query &= Q(customer_email=contact_email)
+                elif contact_phone:
+                    query &= Q(customer_phone=contact_phone)
+                jobs = Job.objects.filter(query)
+        
+        if jobs.exists():
+            # Update the most recent completed job without invoice_url
+            job = jobs.order_by('-updated_at', '-created_at').first()
+            job.invoice_url = invoice_url
+            job.save(update_fields=['invoice_url'])
+            print(f"Invoice URL saved to job {job.id}: {invoice_url}")
+        else:
+            print(f"No completed job found for contact {contact_id} to save invoice URL")
 
 def delete_contact(data):
     contact_id = data.get("id")
