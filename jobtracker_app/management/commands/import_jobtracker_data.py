@@ -58,6 +58,11 @@ class Command(BaseCommand):
             default=BATCH_SIZE,
             help=f'Batch size for bulk operations (default: {BATCH_SIZE})',
         )
+        parser.add_argument(
+            '--delete-missing',
+            action='store_true',
+            help='Delete jobs that are not in the CSV file',
+        )
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -93,6 +98,7 @@ class Command(BaseCommand):
         self.dry_run = options['dry_run']
         self.csv_dir = options['csv_dir']
         self.batch_size = options['batch_size']
+        self.options = options  # Store options for later use
         
         if not os.path.isdir(self.csv_dir):
             raise CommandError(f'CSV directory does not exist: {self.csv_dir}')
@@ -537,7 +543,11 @@ class Command(BaseCommand):
                     # Parse fields
                     title = row.get('title', '').strip() or None
                     description = row.get('description', '').strip() or None
-                    status = self.map_status(row.get('status', 'pending').strip())
+                    # Parse status - handle None/empty values properly
+                    status_str = (row.get('status') or '').strip()
+                    if not status_str:
+                        status_str = 'pending'
+                    status = self.map_status(status_str)
                     priority = self.map_priority(row.get('priority', '1').strip())
                     
                     # Parse duration
@@ -652,10 +662,130 @@ class Command(BaseCommand):
                     if len(self.stats['errors']) <= 10:
                         self.stdout.write(self.style.ERROR(error_msg))
         
-        # Bulk create jobs
+        # Bulk create/update jobs
         if jobs_to_create and not self.dry_run:
-            Job.objects.bulk_create(jobs_to_create, batch_size=self.batch_size, ignore_conflicts=True)
-            # Re-fetch jobs to get full objects and verify which ones were actually created
+            # Check which jobs already exist
+            job_ids_to_check = [j.id for j in jobs_to_create]
+            existing_job_ids = set(Job.objects.filter(id__in=job_ids_to_check).values_list('id', flat=True))
+            
+            # Separate new jobs from existing ones
+            new_jobs = [j for j in jobs_to_create if j.id not in existing_job_ids]
+            existing_jobs_dict = {j.id: j for j in jobs_to_create if j.id in existing_job_ids}
+            
+            # Create new jobs - handle OneToOneField conflicts for submission
+            if new_jobs:
+                # Split jobs into those with and without submissions
+                jobs_with_submission = [j for j in new_jobs if j.submission]
+                jobs_without_submission = [j for j in new_jobs if not j.submission]
+                
+                # Handle jobs with submissions individually to catch OneToOneField conflicts
+                created_count = 0
+                failed_jobs = []
+                
+                for job in jobs_with_submission:
+                    try:
+                        # Check if submission is already linked to another job
+                        submission_id = job.submission.id if job.submission else None
+                        existing_job_with_submission = Job.objects.filter(submission=job.submission).first() if job.submission else None
+                        if existing_job_with_submission:
+                            # Submission already linked, unlink it from this job
+                            self.stdout.write(self.style.WARNING(
+                                f'  ⚠ Submission {submission_id} already linked to job {existing_job_with_submission.id}, skipping submission link for job {job.id}'
+                            ))
+                            job.submission = None
+                        
+                        # Try to create job individually to catch errors
+                        job.save()
+                        created_count += 1
+                    except Exception as e:
+                        failed_jobs.append((job.id, str(e)))
+                        error_msg = f"Failed to create job {job.id}: {str(e)}"
+                        self.stats['errors'].append(error_msg)
+                        if len(self.stats['errors']) <= 20:
+                            self.stdout.write(self.style.ERROR(error_msg))
+                        # Remove from job_map if it failed
+                        if str(job.id) in self.job_map:
+                            del self.job_map[str(job.id)]
+                
+                # Use bulk_create for jobs without submission conflicts (faster)
+                if jobs_without_submission:
+                    try:
+                        Job.objects.bulk_create(jobs_without_submission, batch_size=self.batch_size, ignore_conflicts=True)
+                        created_count += len(jobs_without_submission)
+                    except Exception as e:
+                        self.stdout.write(self.style.ERROR(f"Error in bulk_create: {str(e)}"))
+                        # Try to create individually to see which ones fail
+                        for job in jobs_without_submission:
+                            try:
+                                job.save()
+                                created_count += 1
+                            except Exception as e2:
+                                failed_jobs.append((job.id, str(e2)))
+                                error_msg = f"Failed to create job {job.id}: {str(e2)}"
+                                self.stats['errors'].append(error_msg)
+                                if len(self.stats['errors']) <= 20:
+                                    self.stdout.write(self.style.ERROR(error_msg))
+                                if str(job.id) in self.job_map:
+                                    del self.job_map[str(job.id)]
+                
+                if created_count > 0:
+                    self.stdout.write(self.style.SUCCESS(f'  ✓ Created {created_count} new jobs'))
+                if failed_jobs:
+                    self.stdout.write(self.style.WARNING(f'  ⚠ {len(failed_jobs)} jobs failed to create'))
+            
+            # Update existing jobs with correct status and other fields from CSV
+            if existing_jobs_dict:
+                # Re-fetch existing jobs from database
+                existing_job_objs = {j.id: j for j in Job.objects.filter(id__in=existing_jobs_dict.keys())}
+                jobs_to_update = []
+                
+                for job_id, csv_job in existing_jobs_dict.items():
+                    existing = existing_job_objs.get(job_id)
+                    if existing:
+                        # Update all fields from CSV, especially status
+                        existing.status = csv_job.status  # This is the key fix - update status
+                        existing.title = csv_job.title
+                        existing.description = csv_job.description
+                        existing.priority = csv_job.priority
+                        existing.duration_hours = csv_job.duration_hours
+                        existing.scheduled_at = csv_job.scheduled_at
+                        existing.total_price = csv_job.total_price
+                        existing.customer_name = csv_job.customer_name
+                        existing.customer_phone = csv_job.customer_phone
+                        existing.customer_email = csv_job.customer_email
+                        existing.customer_address = csv_job.customer_address
+                        existing.ghl_contact_id = csv_job.ghl_contact_id
+                        existing.job_type = csv_job.job_type
+                        existing.quoted_by = csv_job.quoted_by
+                        # Only update submission if it's not already linked to another job
+                        if csv_job.submission:
+                            existing_job_with_submission = Job.objects.filter(submission=csv_job.submission).exclude(id=existing.id).first()
+                            if not existing_job_with_submission:
+                                existing.submission = csv_job.submission
+                            else:
+                                self.stdout.write(self.style.WARNING(
+                                    f'  ⚠ Submission {csv_job.submission.id} already linked to job {existing_job_with_submission.id}, skipping submission link for job {existing.id}'
+                                ))
+                        else:
+                            existing.submission = None
+                        existing.notes = csv_job.notes
+                        existing.created_at = csv_job.created_at
+                        jobs_to_update.append(existing)
+                
+                if jobs_to_update:
+                    Job.objects.bulk_update(
+                        jobs_to_update,
+                        ['status', 'title', 'description', 'priority', 'duration_hours', 
+                         'scheduled_at', 'total_price', 'customer_name', 'customer_phone', 
+                         'customer_email', 'customer_address', 'ghl_contact_id', 'job_type',
+                         'quoted_by', 'submission', 'notes', 'created_at'],
+                        batch_size=self.batch_size
+                    )
+                    self.stdout.write(self.style.SUCCESS(
+                        f'  ✓ Updated {len(jobs_to_update)} existing jobs with correct status'
+                    ))
+            
+            # Re-fetch all jobs to get full objects and verify which ones were actually created
             job_ids = [str(j.id) for j in jobs_to_create]
             fetched_jobs = {str(j.id): j for j in Job.objects.filter(id__in=job_ids)}
             
@@ -668,6 +798,37 @@ class Command(BaseCommand):
                     # Job wasn't created (maybe conflict or error), remove from map
                     if str(job.id) in self.job_map:
                         del self.job_map[str(job.id)]
+        
+        # Delete jobs not in CSV if --delete-missing flag is set
+        if self.options.get('delete_missing') and not self.dry_run:
+            self.stdout.write('\n[Cleanup] Deleting jobs not in CSV...')
+            csv_job_ids = set(j.id for j in jobs_to_create)
+            jobs_to_delete = Job.objects.exclude(id__in=csv_job_ids)
+            delete_count = jobs_to_delete.count()
+            
+            if delete_count > 0:
+                # Delete related records first to avoid foreign key constraints
+                job_ids_to_delete = list(jobs_to_delete.values_list('id', flat=True))
+                
+                # Delete job service items
+                JobServiceItem.objects.filter(job_id__in=job_ids_to_delete).delete()
+                
+                # Delete job assignments
+                JobAssignment.objects.filter(job_id__in=job_ids_to_delete).delete()
+                
+                # Delete job occurrences
+                JobOccurrence.objects.filter(job_id__in=job_ids_to_delete).delete()
+                
+                # Now delete the jobs
+                jobs_to_delete.delete()
+                
+                self.stdout.write(self.style.SUCCESS(
+                    f'  ✓ Deleted {delete_count} jobs not in CSV'
+                ))
+            else:
+                self.stdout.write(self.style.SUCCESS(
+                    '  ✓ No jobs to delete (all jobs are in CSV)'
+                ))
         
         self.stdout.write(self.style.SUCCESS(
             f'  ✓ Jobs: {self.stats["jobs_created"]} created, {self.stats["jobs_skipped"]} skipped'

@@ -55,7 +55,7 @@ class CalendarEventSerializer(serializers.ModelSerializer):
         fields = [
             'job_id', 'title', 'scheduled_at', 'status', 'priority',
             'duration_hours', 'total_price', 'customer_name',
-            'series_id', 'series_sequence'
+            'series_id', 'series_sequence','job_type'
         ]
 
 
