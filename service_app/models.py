@@ -28,8 +28,8 @@ class User(AbstractUser):
         db_table = 'auth_user'
 
     def save(self, *args, **kwargs):
-        # Auto-sync is_admin from role: Managers are admins; others are regular users
-        self.is_admin = self.role == self.ROLE_MANAGER
+        # Auto-sync is_admin from role: Managers and Supervisors are admins; others are regular users
+        self.is_admin = self.role in [self.ROLE_MANAGER, self.ROLE_SUPERVISOR]
         super().save(*args, **kwargs)
 
 
