@@ -425,11 +425,18 @@ class TimeEntryViewSet(viewsets.ModelViewSet):
         })
 
 
-class PayoutViewSet(viewsets.ReadOnlyModelViewSet):
-    """ViewSet for viewing payouts (read-only, create via calculator)"""
+class PayoutViewSet(viewsets.ModelViewSet):
+    """ViewSet for managing payouts (read for all, update for admins only, create via calculator)"""
     queryset = Payout.objects.all().select_related('employee', 'job', 'time_entry')
     serializer_class = PayoutSerializer
     permission_classes = [IsAdminOrEmployeePermission]
+    
+    def get_permissions(self):
+        # Only admins can update/delete payouts
+        # Normal users can only read their own payouts
+        if self.request.method in ['PUT', 'PATCH', 'DELETE']:
+            return [IsAdminOnlyPermission()]
+        return super().get_permissions()
     
     def get_queryset(self):
         queryset = super().get_queryset()
@@ -471,6 +478,12 @@ class PayoutViewSet(viewsets.ReadOnlyModelViewSet):
             queryset = queryset.filter(project_title__icontains=project_title)
         
         return queryset.order_by('-created_at')
+    
+    def create(self, request, *args, **kwargs):
+        """Prevent direct creation - use calculator endpoint instead"""
+        return Response({
+            'error': 'Payouts should be created using the /api/payroll/calculator/ endpoint'
+        }, status=status.HTTP_405_METHOD_NOT_ALLOWED)
 
 
 class CalculatorView(APIView):

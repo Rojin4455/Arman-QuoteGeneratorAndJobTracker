@@ -126,7 +126,7 @@ def fetch_and_save_all_appointments(location_id=None):
         # Calculate time range: 1 year ago to 2 years in the future
         now = timezone.now()
         start_time = now - timedelta(days=365)  # 1 year ago
-        end_time = now + timedelta(days=10000)    # 2 years in the future
+        end_time = now + timedelta(days=2000)    # 2 years in the future
         
         # Convert to milliseconds timestamp
         start_time_ms = int(start_time.timestamp() * 1000)
