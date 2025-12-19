@@ -294,13 +294,44 @@ def send_job_completion_webhook(job_id):
         # --------------------------------------------------
         if response.status_code in [200, 201]:
             print(f"✅ Webhook sent successfully | job_id={job_id}")
+            
+            # Extract invoice URL/ID from response
+            invoice_url = None
+            try:
+                response_data = response.json() if response.content else {}
+                print(f"📋 Webhook response data: {response_data}")
+                
+                # Try multiple possible response formats
+                invoice_id = (
+                    response_data.get("invoice_id") or
+                    response_data.get("invoiceId") or
+                    response_data.get("id") or
+                    response_data.get("invoice", {}).get("id") or
+                    response_data.get("invoice", {}).get("invoice_id")
+                )
+                
+                if invoice_id:
+                    invoice_url = f"https://workorder.theservicepilot.com/invoice/{invoice_id}/"
+                    # Save invoice URL to job
+                    Job.objects.filter(id=job_id).update(invoice_url=invoice_url)
+                    print(f"✅ Invoice URL saved to job {job_id}: {invoice_url}")
+                elif response_data.get("invoice_url"):
+                    invoice_url = response_data.get("invoice_url")
+                    Job.objects.filter(id=job_id).update(invoice_url=invoice_url)
+                    print(f"✅ Invoice URL saved to job {job_id}: {invoice_url}")
+                else:
+                    print("⚠️ No invoice ID/URL found in webhook response")
+            except Exception as e:
+                print(f"⚠️ Error extracting invoice URL from response: {str(e)}")
+            
             Job.objects.filter(id=job_id).update(completion_processed=True)
             print("✅ Job marked as completion_processed=True")
 
             return {
                 "success": True,
                 "status_code": response.status_code,
-                "response": response.json() if response.content else {}
+                "response": response_data,
+                "invoice_url": invoice_url
             }
 
         print("❌ Webhook failed — will allow retry")
