@@ -54,7 +54,7 @@ def _trigger_invoice_on_completion(sender, instance, created, **kwargs):
         # --------------------------------------------------
         # Resolve location_id
         # --------------------------------------------------
-        location_id = None
+        location_id = "b8qvo7VooP3JD3dIZU42"
         try:
             print("🔍 Fetching job with submission/contact for location_id")
             job_with_relations = (
