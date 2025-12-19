@@ -177,102 +177,146 @@ def handle_completed_job_invoice(job_id):
 def send_job_completion_webhook(job_id):
     """
     Send job completion webhook to external API when location_id matches.
-    
-    Args:
-        job_id: UUID of the completed job
-        
-    Returns:
-        dict: Response from webhook API or error
     """
+    print(f"🚀 [START] send_job_completion_webhook | job_id={job_id}")
+
     try:
+        print("🔍 Fetching job with related submission, contact, items, and services")
+
         job = (
             Job.objects.select_related('submission__contact')
             .prefetch_related('items__service')
             .filter(id=job_id)
             .first()
         )
+
         if not job:
+            print(f"❌ Job not found | job_id={job_id}")
             return {"error": f"Job {job_id} not found"}
-        
-        # Get location_id from job's submission -> contact -> location_id
+
+        print(f"✅ Job found | id={job.id} | status={job.status}")
+
+        # --------------------------------------------------
+        # Resolve location_id
+        # --------------------------------------------------
         location_id = None
+
         if job.submission and job.submission.contact:
             location_id = job.submission.contact.location_id
+            print(f"📍 Location ID from submission contact: {location_id}")
         else:
-            # Fallback to credentials if submission/contact not available
+            print("⚠️ No submission/contact found, falling back to credentials")
             credentials = GHLAuthCredentials.objects.first()
             if credentials:
                 location_id = credentials.location_id
-        
+                print(f"📍 Location ID from credentials: {location_id}")
+            else:
+                print("❌ No GHL credentials found")
+
         if not location_id:
+            print("❌ Location ID could not be resolved")
             return {"error": "Location ID not found in job submission contact or credentials"}
-        
-        # Check if location_id matches the required one
-        if location_id != "b8qvo7VooP3JD3dIZU42":
-            return {"error": f"Location ID {location_id} does not match required location"}
-        
-        # Build selected_services from job items
+
+        # --------------------------------------------------
+        # Validate location_id
+        # --------------------------------------------------
+        REQUIRED_LOCATION_ID = "b8qvo7VooP3JD3dIZU42"
+        print(f"🔎 Validating location_id | required={REQUIRED_LOCATION_ID} | found={location_id}")
+
+        if location_id != REQUIRED_LOCATION_ID:
+            print("⛔ Location ID mismatch — webhook will not be sent")
+            return {
+                "error": f"Location ID {location_id} does not match required location"
+            }
+
+        # --------------------------------------------------
+        # Build selected services
+        # --------------------------------------------------
+        print("🛠️ Building selected_services payload")
         selected_services = []
+
         for item in job.items.all():
             service_data = {
                 "id": str(item.service.id) if item.service else None,
-                "name": item.service.name if item.service else item.custom_name or "Custom Service",
+                "name": (
+                    item.service.name
+                    if item.service
+                    else item.custom_name or "Custom Service"
+                ),
                 "price": float(item.price)
             }
             selected_services.append(service_data)
-        
+            print(f"   ➕ Added service: {service_data}")
+
+        # --------------------------------------------------
         # Build webhook payload
+        # --------------------------------------------------
         payload = {
             "customer_email": job.customer_email or "",
             "selected_services": selected_services,
+            "location_id": location_id
         }
-        
-        # Add optional fields
+
         if job.customer_name:
             payload["customer_name"] = job.customer_name
-        
+
         if job.customer_address:
             payload["customer_address"] = job.customer_address
-        
-        if location_id:
-            payload["location_id"] = location_id
-        
+
+        print("📦 Final webhook payload:")
+        print(payload)
+
+        # --------------------------------------------------
         # Validate required fields
+        # --------------------------------------------------
         if not payload.get("customer_email"):
+            print("❌ Validation failed: customer_email is missing")
             return {"error": "customer_email is required"}
-        
+
         if not payload.get("selected_services"):
+            print("❌ Validation failed: selected_services is empty")
             return {"error": "selected_services is required"}
-        
-        # Call external webhook API
+
+        # --------------------------------------------------
+        # Send webhook
+        # --------------------------------------------------
         url = "https://workorder.theservicepilot.com/api/webhook/"
-        headers = {
-            "Content-Type": "application/json"
-        }
-        
+        headers = {"Content-Type": "application/json"}
+
+        print(f"🌐 Sending POST request to {url}")
         response = requests.post(url, json=payload, headers=headers, timeout=30)
-        
+
+        print(f"📨 Webhook response status: {response.status_code}")
+        print(f"📨 Webhook response body: {response.text}")
+
+        # --------------------------------------------------
+        # Handle response
+        # --------------------------------------------------
         if response.status_code in [200, 201]:
-            print(f"✅ Successfully sent job completion webhook for job {job_id}")
-            # Mark job as processed only on success
+            print(f"✅ Webhook sent successfully | job_id={job_id}")
             Job.objects.filter(id=job_id).update(completion_processed=True)
+            print("✅ Job marked as completion_processed=True")
+
             return {
                 "success": True,
                 "status_code": response.status_code,
                 "response": response.json() if response.content else {}
             }
-        else:
-            print(f"❌ Failed to send webhook: {response.status_code} - {response.text}")
-            # Don't mark as processed if webhook failed - allow retry
-            return {
-                "error": f"Webhook API returned status {response.status_code}",
-                "status_code": response.status_code,
-                "response": response.text
-            }
-            
+
+        print("❌ Webhook failed — will allow retry")
+        return {
+            "error": f"Webhook API returned status {response.status_code}",
+            "status_code": response.status_code,
+            "response": response.text
+        }
+
     except requests.exceptions.RequestException as e:
-        print(f"❌ Error calling webhook API: {str(e)}")
+        print(f"🚨 Request exception occurred: {str(e)}")
         return {"error": f"Request error: {str(e)}"}
+
     except Exception as e:
-        print(f"❌ Error sending job completion webhook: {str(e)}")
+        print(f"🔥 Unexpected error occurred: {str(e)}")
         return {"error": str(e)}
+
+    finally:
+        print(f"🏁 [END] send_job_completion_webhook | job_id={job_id}")
