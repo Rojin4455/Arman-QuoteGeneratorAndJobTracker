@@ -47,12 +47,14 @@ class Job(models.Model):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
 
     # Optional link when coming from quote flow
-    submission = models.OneToOneField(
+    # Changed from OneToOneField to ForeignKey to allow multiple jobs per submission
+    # (e.g., recurring jobs created from a single accepted quote)
+    submission = models.ForeignKey(
         CustomerSubmission,
         on_delete=models.SET_NULL,
         null=True,
         blank=True,
-        related_name='job'
+        related_name='jobs'  # Changed to plural since one submission can have multiple jobs
     )
 
     title = models.CharField(max_length=255, blank=True, null=True)

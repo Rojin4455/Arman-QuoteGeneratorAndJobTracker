@@ -131,7 +131,7 @@ def build_invoice_payload_from_job(job):
     company_name = None
 
     if job.ghl_contact_id and not contact_email:
-        contact = Contact.objects.using('external').filter(contact_id=job.ghl_contact_id).first()
+        contact = Contact.objects.filter(contact_id=job.ghl_contact_id).first()
         if contact:
             contact_email = contact_email or contact.email
             contact_name = contact_name or f"{contact.first_name or ''} {contact.last_name or ''}".strip()
@@ -205,7 +205,7 @@ def create_invoice(name, contact_id, services, credentials, customer_address, ad
         "Version": "2021-07-28"
     }
 
-    contact = Contact.objects.using('external').filter(contact_id=contact_id).first()
+    contact = Contact.objects.filter(contact_id=contact_id).first()
 
     if not contact:
         return {"error": "Contact not found"}

@@ -672,66 +672,62 @@ class Command(BaseCommand):
             new_jobs = [j for j in jobs_to_create if j.id not in existing_job_ids]
             existing_jobs_dict = {j.id: j for j in jobs_to_create if j.id in existing_job_ids}
             
-            # Create new jobs - handle OneToOneField conflicts for submission
+            # Create new jobs
+            # Note: With ForeignKey, multiple jobs can share the same submission (no OneToOne constraint)
             if new_jobs:
-                # Split jobs into those with and without submissions
-                jobs_with_submission = [j for j in new_jobs if j.submission]
-                jobs_without_submission = [j for j in new_jobs if not j.submission]
-                
-                # Handle jobs with submissions individually to catch OneToOneField conflicts
-                created_count = 0
-                failed_jobs = []
-                
-                for job in jobs_with_submission:
-                    try:
-                        # Check if submission is already linked to another job
-                        submission_id = job.submission.id if job.submission else None
-                        existing_job_with_submission = Job.objects.filter(submission=job.submission).first() if job.submission else None
-                        if existing_job_with_submission:
-                            # Submission already linked, unlink it from this job
-                            self.stdout.write(self.style.WARNING(
-                                f'  ⚠ Submission {submission_id} already linked to job {existing_job_with_submission.id}, skipping submission link for job {job.id}'
-                            ))
-                            job.submission = None
-                        
-                        # Try to create job individually to catch errors
-                        job.save()
-                        created_count += 1
-                    except Exception as e:
-                        failed_jobs.append((job.id, str(e)))
-                        error_msg = f"Failed to create job {job.id}: {str(e)}"
-                        self.stats['errors'].append(error_msg)
-                        if len(self.stats['errors']) <= 20:
-                            self.stdout.write(self.style.ERROR(error_msg))
-                        # Remove from job_map if it failed
-                        if str(job.id) in self.job_map:
-                            del self.job_map[str(job.id)]
-                
-                # Use bulk_create for jobs without submission conflicts (faster)
-                if jobs_without_submission:
-                    try:
-                        Job.objects.bulk_create(jobs_without_submission, batch_size=self.batch_size, ignore_conflicts=True)
-                        created_count += len(jobs_without_submission)
-                    except Exception as e:
-                        self.stdout.write(self.style.ERROR(f"Error in bulk_create: {str(e)}"))
-                        # Try to create individually to see which ones fail
-                        for job in jobs_without_submission:
+                try:
+                    Job.objects.bulk_create(new_jobs, batch_size=self.batch_size, ignore_conflicts=True)
+                    # Verify which jobs were actually created (bulk_create with ignore_conflicts may skip some)
+                    created_job_ids = set(Job.objects.filter(id__in=[j.id for j in new_jobs]).values_list('id', flat=True))
+                    actually_created = [j for j in new_jobs if j.id in created_job_ids]
+                    failed_to_create = [j for j in new_jobs if j.id not in created_job_ids]
+                    
+                    if failed_to_create:
+                        # Try to create failed ones individually to get better error messages
+                        retry_created = []
+                        for job in failed_to_create[:]:
                             try:
                                 job.save()
-                                created_count += 1
-                            except Exception as e2:
-                                failed_jobs.append((job.id, str(e2)))
-                                error_msg = f"Failed to create job {job.id}: {str(e2)}"
+                                retry_created.append(job)
+                                failed_to_create.remove(job)
+                                actually_created.append(job)
+                            except Exception as e:
+                                error_msg = f"Failed to create job {job.id}: {str(e)}"
                                 self.stats['errors'].append(error_msg)
                                 if len(self.stats['errors']) <= 20:
                                     self.stdout.write(self.style.ERROR(error_msg))
                                 if str(job.id) in self.job_map:
                                     del self.job_map[str(job.id)]
-                
-                if created_count > 0:
-                    self.stdout.write(self.style.SUCCESS(f'  ✓ Created {created_count} new jobs'))
-                if failed_jobs:
-                    self.stdout.write(self.style.WARNING(f'  ⚠ {len(failed_jobs)} jobs failed to create'))
+                        
+                        if retry_created:
+                            self.stdout.write(self.style.SUCCESS(f'  ✓ Retried and created {len(retry_created)} jobs'))
+                    
+                    self.stdout.write(self.style.SUCCESS(f'  ✓ Created {len(actually_created)} new jobs'))
+                    if failed_to_create:
+                        self.stdout.write(self.style.WARNING(f'  ⚠ {len(failed_to_create)} jobs failed to create (check errors above)'))
+                        
+                except Exception as e:
+                    self.stdout.write(self.style.ERROR(f"Error in bulk_create: {str(e)}"))
+                    # Try to create individually to see which ones fail
+                    created_count = 0
+                    failed_jobs = []
+                    for job in new_jobs:
+                        try:
+                            job.save()
+                            created_count += 1
+                        except Exception as e2:
+                            failed_jobs.append((job.id, str(e2)))
+                            error_msg = f"Failed to create job {job.id}: {str(e2)}"
+                            self.stats['errors'].append(error_msg)
+                            if len(self.stats['errors']) <= 20:
+                                self.stdout.write(self.style.ERROR(error_msg))
+                            if str(job.id) in self.job_map:
+                                del self.job_map[str(job.id)]
+                    
+                    if created_count > 0:
+                        self.stdout.write(self.style.SUCCESS(f'  ✓ Created {created_count} new jobs'))
+                    if failed_jobs:
+                        self.stdout.write(self.style.WARNING(f'  ⚠ {len(failed_jobs)} jobs failed to create'))
             
             # Update existing jobs with correct status and other fields from CSV
             if existing_jobs_dict:
@@ -757,17 +753,8 @@ class Command(BaseCommand):
                         existing.ghl_contact_id = csv_job.ghl_contact_id
                         existing.job_type = csv_job.job_type
                         existing.quoted_by = csv_job.quoted_by
-                        # Only update submission if it's not already linked to another job
-                        if csv_job.submission:
-                            existing_job_with_submission = Job.objects.filter(submission=csv_job.submission).exclude(id=existing.id).first()
-                            if not existing_job_with_submission:
-                                existing.submission = csv_job.submission
-                            else:
-                                self.stdout.write(self.style.WARNING(
-                                    f'  ⚠ Submission {csv_job.submission.id} already linked to job {existing_job_with_submission.id}, skipping submission link for job {existing.id}'
-                                ))
-                        else:
-                            existing.submission = None
+                        # With ForeignKey, multiple jobs can share the same submission
+                        existing.submission = csv_job.submission
                         existing.notes = csv_job.notes
                         existing.created_at = csv_job.created_at
                         jobs_to_update.append(existing)
@@ -789,6 +776,9 @@ class Command(BaseCommand):
             job_ids = [str(j.id) for j in jobs_to_create]
             fetched_jobs = {str(j.id): j for j in Job.objects.filter(id__in=job_ids)}
             
+            # Track which jobs failed to be created
+            failed_job_ids = []
+            
             # Update job_map only with jobs that actually exist in database
             for job in jobs_to_create:
                 fetched = fetched_jobs.get(str(job.id))
@@ -796,8 +786,20 @@ class Command(BaseCommand):
                     self.job_map[str(job.id)] = fetched
                 else:
                     # Job wasn't created (maybe conflict or error), remove from map
+                    failed_job_ids.append(str(job.id))
                     if str(job.id) in self.job_map:
                         del self.job_map[str(job.id)]
+            
+            # Report any jobs that failed to be created
+            if failed_job_ids:
+                self.stdout.write(self.style.WARNING(
+                    f'  ⚠ {len(failed_job_ids)} jobs from CSV were not created in database'
+                ))
+                if len(failed_job_ids) <= 10:
+                    for job_id in failed_job_ids[:10]:
+                        self.stdout.write(self.style.WARNING(f'    - Job ID: {job_id}'))
+                else:
+                    self.stdout.write(self.style.WARNING(f'    (showing first 10 of {len(failed_job_ids)} failed jobs)'))
         
         # Delete jobs not in CSV if --delete-missing flag is set
         if self.options.get('delete_missing') and not self.dry_run:

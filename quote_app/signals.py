@@ -165,16 +165,17 @@ def handle_quote_submission(sender, instance, created, **kwargs):
     }
 
     with transaction.atomic():
-        job, job_created = Job.objects.get_or_create(
+        # Check if a job already exists for this submission with status 'to_convert'
+        # If it does, update it; otherwise create a new one
+        # Note: With ForeignKey, multiple jobs can exist per submission (e.g., recurring jobs)
+        existing_job = Job.objects.filter(
             submission=submission,
-            defaults={
-                **job_defaults,
-                "status": "to_convert",
-                **({"quoted_by": quoted_by_user} if quoted_by_user else {}),
-            },
-        )
-
-        if not job_created:
+            status='to_convert'
+        ).first()
+        
+        if existing_job:
+            # Update existing job
+            job = existing_job
             for attr, value in job_defaults.items():
                 setattr(job, attr, value)
             if quoted_by_user:
@@ -183,6 +184,14 @@ def handle_quote_submission(sender, instance, created, **kwargs):
                 job.status = "to_convert"
             job.save()
             job.items.all().delete()
+        else:
+            # Create new job
+            job = Job.objects.create(
+                submission=submission,
+                **job_defaults,
+                status="to_convert",
+                **({"quoted_by": quoted_by_user} if quoted_by_user else {}),
+            )
 
         items_to_create = [
             JobServiceItem(

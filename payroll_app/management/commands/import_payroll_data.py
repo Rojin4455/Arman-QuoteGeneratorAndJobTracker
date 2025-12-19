@@ -64,6 +64,7 @@ class Command(BaseCommand):
             'time_entries_skipped': 0,
             'payouts_created': 0,
             'payouts_skipped': 0,
+            'payouts_auto_created': 0,  # Auto-created payouts for time entries
             'settings_updated': 0,
             'errors': [],
         }
@@ -71,6 +72,7 @@ class Command(BaseCommand):
         # Mapping dictionaries
         self.user_map = {}  # CSV employee_id -> User object
         self.job_map = {}  # CSV job_id -> Job object (for payouts)
+        self.time_entry_map = {}  # (employee_id, check_in_time, check_out_time) -> TimeEntry object
 
     def handle(self, *args, **options):
         self.dry_run = options['dry_run']
@@ -120,7 +122,10 @@ class Command(BaseCommand):
         # Step 4: Import payouts
         self.import_payouts()
         
-        # Step 5: Import payroll settings
+        # Step 5: Create missing hourly payouts for time entries
+        self.create_missing_hourly_payouts()
+        
+        # Step 6: Import payroll settings
         self.import_payroll_settings()
 
     def import_employees(self):
@@ -419,6 +424,16 @@ class Command(BaseCommand):
                 
                 if entries_to_update:
                     TimeEntry.objects.bulk_update(entries_to_update, ['created_at'], batch_size=self.batch_size)
+            
+            # Build time_entry_map for linking hourly payouts
+            # Map by (employee_id, check_in_time, check_out_time)
+            all_time_entries = TimeEntry.objects.select_related('employee').all()
+            for entry in all_time_entries:
+                # Create a key from employee_id and times (normalize times for matching)
+                check_in_key = entry.check_in_time.isoformat() if entry.check_in_time else None
+                check_out_key = entry.check_out_time.isoformat() if entry.check_out_time else None
+                map_key = (str(entry.employee.id), check_in_key, check_out_key)
+                self.time_entry_map[map_key] = entry
         
         self.stdout.write(self.style.SUCCESS(
             f'  ✓ Time entries: {self.stats["time_entries_created"]} created, '
@@ -469,6 +484,8 @@ class Command(BaseCommand):
                     job_id = row.get('job_id', '').strip()
                     created_at = row.get('created_at', '').strip()
                     source = row.get('source', 'auto').strip().lower()
+                    clock_in_time = row.get('clock_in_time', '').strip()  # For hourly payouts
+                    clock_out_time = row.get('clock_out_time', '').strip()  # For hourly payouts
                     
                     if not payout_id or not employee_id or not amount:
                         continue
@@ -526,6 +543,63 @@ class Command(BaseCommand):
                     if job_id:
                         job = self.job_map.get(job_id)
                     
+                    # Get time_entry if available (for hourly payouts)
+                    time_entry = None
+                    if payout_type == 'hourly' and clock_in_time:
+                        try:
+                            # Parse clock_in_time and clock_out_time from payout CSV
+                            clock_in_dt = datetime.fromisoformat(clock_in_time.replace('Z', '+00:00'))
+                            if timezone.is_naive(clock_in_dt):
+                                clock_in_dt = timezone.make_aware(clock_in_dt)
+                            
+                            clock_out_dt = None
+                            if clock_out_time:
+                                try:
+                                    clock_out_dt = datetime.fromisoformat(clock_out_time.replace('Z', '+00:00'))
+                                    if timezone.is_naive(clock_out_dt):
+                                        clock_out_dt = timezone.make_aware(clock_out_dt)
+                                except:
+                                    pass
+                            
+                            # Create map key to find matching time entry
+                            clock_in_key = clock_in_dt.isoformat() if clock_in_dt else None
+                            clock_out_key = clock_out_dt.isoformat() if clock_out_dt else None
+                            map_key = (employee_id, clock_in_key, clock_out_key)
+                            
+                            # Try to find matching time entry
+                            time_entry = self.time_entry_map.get(map_key)
+                            
+                            if not time_entry:
+                                # Try fuzzy matching - find time entry by employee and approximate times
+                                # (within 1 minute tolerance for clock_in_time)
+                                for (emp_id, check_in_key, check_out_key), entry in self.time_entry_map.items():
+                                    if emp_id == employee_id:
+                                        try:
+                                            if check_in_key:
+                                                check_in_dt = datetime.fromisoformat(check_in_key)
+                                                # Check if times are within 1 minute of each other
+                                                if abs((clock_in_dt - check_in_dt).total_seconds()) <= 60:
+                                                    # Also check check_out_time if both exist
+                                                    if clock_out_dt and check_out_key:
+                                                        check_out_dt_from_entry = datetime.fromisoformat(check_out_key)
+                                                        if abs((clock_out_dt - check_out_dt_from_entry).total_seconds()) <= 60:
+                                                            time_entry = entry
+                                                            break
+                                                    elif not clock_out_dt and not check_out_key:
+                                                        # Both are None, match
+                                                        time_entry = entry
+                                                        break
+                                                    elif not clock_out_dt or not check_out_key:
+                                                        # One is None, still match if check_in is close
+                                                        time_entry = entry
+                                                        break
+                                        except:
+                                            continue
+                            
+                        except Exception as e:
+                            # If parsing fails, continue without time_entry
+                            pass
+                    
                     # Parse created_at from CSV
                     created_at_dt = None
                     if created_at:
@@ -545,6 +619,7 @@ class Command(BaseCommand):
                             payout_type=payout_type,
                             amount=amount_decimal,
                             job=job,
+                            time_entry=time_entry,  # Link to time entry for hourly payouts
                             project_value=project_value_decimal,
                             rate_percentage=rate_decimal,
                             project_title=project_title or None,  # Store service names here
@@ -584,6 +659,100 @@ class Command(BaseCommand):
             f'{self.stats["payouts_skipped"]} skipped'
         ))
 
+    def create_missing_hourly_payouts(self):
+        """Create hourly payouts for time entries that don't have a payout yet"""
+        self.stdout.write('\n[5/6] Creating missing hourly payouts for time entries...')
+        
+        if self.dry_run:
+            self.stdout.write(self.style.WARNING('  (Skipped in dry-run mode)'))
+            return
+        
+        # Get all time entries that are checked out and have total_hours
+        time_entries_without_payouts = TimeEntry.objects.filter(
+            status='checked_out',
+            total_hours__isnull=False,
+            total_hours__gt=0
+        ).select_related('employee__employee_profile').prefetch_related('payouts')
+        
+        payouts_to_create = []
+        time_entry_created_at_map = {}  # Map time_entry_id -> created_at for updating payouts
+        
+        for time_entry in time_entries_without_payouts:
+            # Check if this time entry already has an hourly payout
+            existing_payout = time_entry.payouts.filter(payout_type='hourly').first()
+            if existing_payout:
+                continue  # Already has a payout, skip
+            
+            # Check if employee has an hourly rate
+            try:
+                profile = time_entry.employee.employee_profile
+                if profile.pay_scale_type != 'hourly' or not profile.hourly_rate:
+                    continue  # Not an hourly employee or no hourly rate set
+            except EmployeeProfile.DoesNotExist:
+                continue  # No employee profile, skip
+            
+            # Calculate payout amount
+            try:
+                amount = (time_entry.total_hours * profile.hourly_rate).quantize(Decimal('0.01'))
+                
+                # Store time_entry created_at for later update
+                if time_entry.created_at:
+                    time_entry_created_at_map[str(time_entry.id)] = time_entry.created_at
+                
+                # Create payout
+                payout = Payout(
+                    employee=time_entry.employee,
+                    payout_type='hourly',
+                    amount=amount,
+                    time_entry=time_entry,
+                    rate_percentage=profile.hourly_rate,
+                    source='auto',
+                    notes=f"Auto-created hourly payout for {time_entry.total_hours} hours @ ${profile.hourly_rate}/hr"
+                )
+                payouts_to_create.append(payout)
+                self.stats['payouts_auto_created'] += 1
+                
+            except Exception as e:
+                error_msg = f"Error creating payout for time entry {time_entry.id}: {str(e)}"
+                self.stats['errors'].append(error_msg)
+                if len(self.stats['errors']) <= 10:
+                    self.stdout.write(self.style.ERROR(error_msg))
+        
+        # Bulk create payouts
+        if payouts_to_create:
+            Payout.objects.bulk_create(payouts_to_create, batch_size=self.batch_size, ignore_conflicts=True)
+            
+            # Update created_at dates from time_entry (bulk_create ignores auto_now_add values)
+            if time_entry_created_at_map:
+                payouts_to_update = []
+                # Convert string IDs to UUIDs for querying
+                time_entry_uuids = [uuid.UUID(tid) for tid in time_entry_created_at_map.keys()]
+                
+                # Fetch all payouts we just created in one query
+                fetched_payouts = Payout.objects.filter(
+                    time_entry_id__in=time_entry_uuids,
+                    payout_type='hourly',
+                    source='auto'
+                )
+                
+                # Match payouts to their time_entry created_at dates
+                for payout in fetched_payouts:
+                    time_entry_id_str = str(payout.time_entry_id)
+                    if time_entry_id_str in time_entry_created_at_map:
+                        payout.created_at = time_entry_created_at_map[time_entry_id_str]
+                        payouts_to_update.append(payout)
+                
+                if payouts_to_update:
+                    Payout.objects.bulk_update(payouts_to_update, ['created_at'], batch_size=self.batch_size)
+            
+            self.stdout.write(self.style.SUCCESS(
+                f'  ✓ Auto-created {len(payouts_to_create)} hourly payouts for time entries'
+            ))
+        else:
+            self.stdout.write(self.style.SUCCESS(
+                '  ✓ No missing hourly payouts to create'
+            ))
+
     def import_payroll_settings(self):
         """Import payroll settings from app_settings_rows.csv"""
         csv_path = os.path.join(self.csv_dir, 'app_settings_rows.csv')
@@ -591,7 +760,7 @@ class Command(BaseCommand):
             self.stdout.write(self.style.WARNING(f'App settings CSV not found: {csv_path}'))
             return
         
-        self.stdout.write('\n[5/5] Importing payroll settings...')
+        self.stdout.write('\n[6/6] Importing payroll settings...')
         
         settings = PayrollSettings.get_settings()
         
@@ -651,6 +820,7 @@ class Command(BaseCommand):
         
         self.stdout.write(f'\nPayouts:')
         self.stdout.write(f'  Created: {self.stats["payouts_created"]}')
+        self.stdout.write(f'  Auto-created: {self.stats["payouts_auto_created"]}')
         self.stdout.write(f'  Skipped: {self.stats["payouts_skipped"]}')
         
         self.stdout.write(f'\nSettings:')

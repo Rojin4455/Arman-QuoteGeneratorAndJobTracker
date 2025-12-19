@@ -36,7 +36,7 @@ def update_jobs_to_service_due():
     print(f"Updated {count} job(s) from 'confirmed' to 'service_due'")
     return f"Updated {count} job(s)"
 
-def _process_invoice_payload(data):
+def _process_invoice_payload(data, job_id=None):
     customer_email = data.get("customer_email")
     customer_name = data.get("customer_name")
     services = data.get("selected_services", [])
@@ -92,6 +92,15 @@ def _process_invoice_payload(data):
     print("Tags before check:", tags)
     if response and not response.get("error"):
         invoice_id = response.get("_id")
+
+        # Save invoice URL to job if job_id is provided
+        if job_id and invoice_id:
+            try:
+                invoice_url = f"https://workorder.theservicepilot.com/invoice/{invoice_id}/"
+                Job.objects.filter(id=job_id).update(invoice_url=invoice_url)
+                print(f"Invoice URL saved to job {job_id}: {invoice_url}")
+            except Exception as e:
+                print(f"Error saving invoice URL to job {job_id}: {str(e)}")
 
         existing_tags = tags if isinstance(tags, list) else []
         print("Existing tags:", existing_tags)
@@ -152,7 +161,7 @@ def handle_completed_job_invoice(job_id):
             return {"error": f"Job {job_id} not found"}
 
         payload = build_invoice_payload_from_job(job)
-        result = _process_invoice_payload(payload)
+        result = _process_invoice_payload(payload, job_id=str(job_id))
         
         # Mark job as processed only if invoice was successfully created
         if result and not result.get("error"):
