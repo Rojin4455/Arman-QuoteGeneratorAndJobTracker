@@ -1063,6 +1063,8 @@ class UserListCreateView(generics.ListCreateAPIView):
 
     def get_queryset(self):
         qs = super().get_queryset()
+        # Exclude super admins from the response
+        qs = qs.filter(is_superuser=False)
         search = self.request.query_params.get('search')
         role = self.request.query_params.get('role')
         if search:
