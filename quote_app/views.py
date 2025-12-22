@@ -1096,6 +1096,44 @@ class SubmitFinalQuoteView(APIView):
         submission.final_total = final_total
         submission.save()
 
+# Reject quote view
+class RejectQuoteView(APIView):
+    """Reject a submitted quote"""
+    permission_classes = [AllowAny]
+    
+    def post(self, request, submission_id):
+        submission = get_object_or_404(CustomerSubmission, id=submission_id)
+        
+        # Check if quote can be rejected (must be in submitted or accepted status)
+        if submission.status not in ['submitted', 'accepted']:
+            return Response({
+                'error': f'Quote cannot be rejected. Current status: {submission.status}. Only quotes with status "submitted" or "accepted" can be rejected.'
+            }, status=status.HTTP_400_BAD_REQUEST)
+        
+        try:
+            with transaction.atomic():
+                # Update submission status to rejected
+                submission.status = 'rejected'
+                
+                # Store rejection details in additional_data
+                rejection_data = submission.additional_data or {}
+                rejection_data['rejected_at'] = timezone.now().isoformat()
+                rejection_data['rejection_reason'] = request.data.get('rejection_reason', '')
+                rejection_data['rejected_by'] = request.data.get('rejected_by', '')
+                
+                submission.additional_data = rejection_data
+                submission.save()
+                
+                return Response({
+                    'message': 'Quote rejected successfully',
+                    'submission_id': submission.id,
+                    'status': submission.status,
+                    'rejected_at': timezone.now().isoformat()
+                }, status=status.HTTP_200_OK)
+        
+        except Exception as e:
+            return Response({'error': str(e)}, status=status.HTTP_400_BAD_REQUEST)
+
 # Utility views
 class SubmissionStatusView(APIView):
     """Check submission status"""

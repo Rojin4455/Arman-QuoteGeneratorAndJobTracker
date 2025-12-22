@@ -48,6 +48,9 @@ urlpatterns = [
     # Step 8: Submit final quote
     path('<uuid:submission_id>/submit/', views.SubmitFinalQuoteView.as_view(), name='submit-quote'),
     
+    # Reject quote
+    path('<uuid:submission_id>/reject/', views.RejectQuoteView.as_view(), name='reject-quote'),
+    
     # ============================================================================
     # UTILITY ENDPOINTS
     # ============================================================================
