@@ -1105,7 +1105,7 @@ class RejectQuoteView(APIView):
         submission = get_object_or_404(CustomerSubmission, id=submission_id)
         
         # Check if quote can be rejected (must be in submitted or accepted status)
-        if submission.status not in ['submitted', 'accepted']:
+        if submission.status in ['submitted', 'accepted']:
             return Response({
                 'error': f'Quote cannot be rejected. Current status: {submission.status}. Only quotes with status "submitted" or "accepted" can be rejected.'
             }, status=status.HTTP_400_BAD_REQUEST)
