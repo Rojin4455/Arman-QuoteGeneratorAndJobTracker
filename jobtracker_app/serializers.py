@@ -246,6 +246,7 @@ class JobSerializer(serializers.ModelSerializer):
     occurrence_events = JobOccurrenceSerializer(many=True, read_only=True, source='schedule_occurrences')
     series_id = serializers.UUIDField(read_only=True)
     series_sequence = serializers.IntegerField(read_only=True)
+    quoted_by_name = serializers.SerializerMethodField()
 
     class Meta:
         model = Job
@@ -253,7 +254,7 @@ class JobSerializer(serializers.ModelSerializer):
             'id', 'submission', 'title', 'description', 'priority', 'duration_hours', 'scheduled_at',
             'total_price',
             'customer_name', 'customer_phone', 'customer_email', 'customer_address', 'ghl_contact_id',
-            'quoted_by', 'created_by', 'created_by_email',
+            'quoted_by', 'quoted_by_name', 'created_by', 'created_by_email',
             'job_type', 'repeat_every', 'repeat_unit', 'occurrences', 'day_of_week',
             'status', 'notes', 'items', 'assignments',
             'occurrence_count', 'occurrence_events', 'series_id', 'series_sequence',
@@ -261,16 +262,12 @@ class JobSerializer(serializers.ModelSerializer):
         ]
         read_only_fields = ['id', 'created_at', 'updated_at']
 
-    def to_representation(self, instance):
-        """Override to return quoted_by as user name instead of ID"""
-        representation = super().to_representation(instance)
-        if instance.quoted_by:
-            # Return user's full name or username instead of ID
-            full_name = instance.quoted_by.get_full_name()
-            representation['quoted_by'] = full_name if full_name else instance.quoted_by.username
-        else:
-            representation['quoted_by'] = None
-        return representation
+    def get_quoted_by_name(self, obj):
+        """Return the quoted_by user's full name or username"""
+        if obj.quoted_by:
+            full_name = obj.quoted_by.get_full_name()
+            return full_name if full_name else obj.quoted_by.username
+        return None
 
     def create(self, validated_data):
         items_data = validated_data.pop('items', [])

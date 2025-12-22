@@ -21,6 +21,61 @@ class GHLAuthCredentials(models.Model):
         return f"{self.user_id} - {self.company_id}"
     
 
+class GHLCustomField(models.Model):
+    """Store custom field names and their GHL IDs for each account"""
+    FIELD_TYPE_CHOICES = [
+        ('text', 'Text'),
+        ('url', 'URL'),
+        ('number', 'Number'),
+        ('date', 'Date'),
+        ('dropdown', 'Dropdown'),
+        ('checkbox', 'Checkbox'),
+    ]
+    
+    account = models.ForeignKey(
+        GHLAuthCredentials,
+        on_delete=models.CASCADE,
+        related_name='custom_fields',
+        help_text="The account this custom field belongs to"
+    )
+    field_name = models.CharField(
+        max_length=255,
+        help_text="Human-readable name of the custom field (e.g., 'Quote URL', 'Invoice URL')"
+    )
+    ghl_field_id = models.CharField(
+        max_length=255,
+        help_text="The GHL custom field ID used in API calls"
+    )
+    field_type = models.CharField(
+        max_length=50,
+        choices=FIELD_TYPE_CHOICES,
+        default='text',
+        help_text="Type of the custom field"
+    )
+    description = models.TextField(
+        blank=True,
+        null=True,
+        help_text="Optional description of what this field is used for"
+    )
+    is_active = models.BooleanField(
+        default=True,
+        help_text="Whether this custom field mapping is currently active"
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+    
+    class Meta:
+        db_table = 'ghl_custom_fields'
+        unique_together = ['account', 'ghl_field_id']
+        ordering = ['field_name']
+        indexes = [
+            models.Index(fields=['account', 'is_active']),
+            models.Index(fields=['ghl_field_id']),
+        ]
+    
+    def __str__(self):
+        return f"{self.account.user_id} - {self.field_name} ({self.ghl_field_id})"
+
 
 class Contact(models.Model):
     contact_id = models.CharField(max_length=100, unique=True)
