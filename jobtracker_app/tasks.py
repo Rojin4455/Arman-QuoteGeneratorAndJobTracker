@@ -11,6 +11,7 @@ from .helpers import (
     search_ghl_contact,
     send_invoice,
     update_contact,
+    create_or_update_ghl_contact_from_job,
 )
 from .models import Job
 
@@ -281,6 +282,7 @@ def send_job_completion_webhook(job_id):
         # Send webhook
         # --------------------------------------------------
         url = "https://workorder.theservicepilot.com/api/webhook/"
+        # url = "http://localhost:8000/api/webhook/"
         headers = {"Content-Type": "application/json"}
 
         print(f"🌐 Sending POST request to {url}")
@@ -304,7 +306,7 @@ def send_job_completion_webhook(job_id):
                 # Try multiple possible response formats
                 invoice_id = (
                     response_data.get("invoice_id") or
-                    response_data.get("invoiceId") or
+                    response_data.get("invoice_token") or
                     response_data.get("id") or
                     response_data.get("invoice", {}).get("id") or
                     response_data.get("invoice", {}).get("invoice_id")

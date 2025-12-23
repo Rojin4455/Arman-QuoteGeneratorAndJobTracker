@@ -321,3 +321,155 @@ def send_invoice(invoiceId):
         return response.json()
     except Exception as e:
         return {"error": str(e)}
+
+
+def create_or_update_ghl_contact_from_job(job, location_id):
+    """
+    Create or update GHL contact from a Job when job is completed.
+    This is called before sending the webhook to ensure contact exists in GHL.
+    """
+    try:
+        print(f"🔹 [GHL CONTACT] Starting GHL contact sync for job {job.id}...")
+        
+        # Get credentials for the specific location
+        try:
+            credentials = GHLAuthCredentials.objects.get(location_id=location_id)
+        except GHLAuthCredentials.DoesNotExist:
+            print(f"❌ [GHL CONTACT] No GHLAuthCredentials found for location_id: {location_id}")
+            return None
+        except GHLAuthCredentials.MultipleObjectsReturned:
+            print(f"⚠️ [GHL CONTACT] Multiple credentials found for location_id: {location_id}, using first")
+            credentials = GHLAuthCredentials.objects.filter(location_id=location_id).first()
+        
+        token = credentials.access_token
+        print(f"✅ [GHL CONTACT] Using token (truncated): {token[:10]}..., locationId: {location_id}")
+
+        headers = {
+            "Accept": "application/json",
+            "Authorization": f"Bearer {token}",
+            "Version": "2021-07-28",
+            "Content-Type": "application/json"
+        }
+
+        # Get contact information from job
+        contact_email = job.customer_email
+        contact_phone = job.customer_phone
+        contact_name = job.customer_name
+        
+        if not contact_email and not contact_phone:
+            print("❌ [GHL CONTACT] No email or phone found in job to search GHL contact.")
+            return None
+
+        # Try to get contact from submission if available
+        ghl_contact_id = None
+        if job.submission and job.submission.contact:
+            ghl_contact_id = job.submission.contact.contact_id
+            contact_email = contact_email or job.submission.contact.email
+            contact_phone = contact_phone or job.submission.contact.phone
+            contact_name = contact_name or f"{job.submission.contact.first_name} {job.submission.contact.last_name}".strip()
+        
+        # Also check if job has ghl_contact_id
+        if not ghl_contact_id and job.ghl_contact_id:
+            ghl_contact_id = job.ghl_contact_id
+
+        # Step 1: Search for existing contact
+        if ghl_contact_id:
+            search_url = f"https://services.leadconnectorhq.com/contacts/{ghl_contact_id}"
+            print(f"🔍 [GHL CONTACT] Searching by contact_id: {ghl_contact_id}")
+        else:
+            search_query = contact_email or contact_phone
+            search_url = f"https://services.leadconnectorhq.com/contacts/?locationId={location_id}&query={search_query}"
+            print(f"🔍 [GHL CONTACT] Searching by query: {search_query}")
+
+        # Step 2: Fetch existing contact
+        print(f"➡️ [GHL CONTACT] Sending GET request to {search_url}")
+        search_response = requests.get(search_url, headers=headers)
+        print(f"⬅️ [GHL CONTACT] Response [{search_response.status_code}]: {search_response.text}")
+
+        if search_response.status_code != 200:
+            print("❌ [GHL CONTACT] Failed to search GHL contact.")
+            return None
+
+        search_data = search_response.json()
+        results = []
+
+        # Handle both cases: list of contacts or single contact
+        if "contacts" in search_data and isinstance(search_data["contacts"], list):
+            results = search_data["contacts"]
+            print(f"📋 [GHL CONTACT] Found {len(results)} contacts in search results.")
+        elif "contact" in search_data and isinstance(search_data["contact"], dict):
+            results = [search_data["contact"]]
+            print("📋 [GHL CONTACT] Found 1 contact in search results.")
+        elif isinstance(search_data, dict) and search_data.get("id"):
+            results = [search_data]
+            print("📋 [GHL CONTACT] Found 1 contact in search results (direct response).")
+        else:
+            print("ℹ️ [GHL CONTACT] No contacts found in GHL.")
+
+        # Step 3: Update or create contact
+        if results:
+            ghl_contact_id = results[0].get("id") or results[0].get("_id")
+            tags = results[0].get("tags", [])
+            
+            # Prepare update payload
+            contact_payload = {}
+            
+            # Add job completed tag if not present
+            if "job completed" not in [t.lower() for t in tags]:
+                tags.append("job completed")
+                contact_payload["tags"] = tags
+
+            if contact_payload:
+                print(f"✏️ [GHL CONTACT] Updating contact {ghl_contact_id} with payload: {contact_payload}")
+                contact_response = requests.put(
+                    f"https://services.leadconnectorhq.com/contacts/{ghl_contact_id}",
+                    json=contact_payload,
+                    headers=headers
+                )
+                print(f"⬅️ [GHL CONTACT] Update response [{contact_response.status_code}]: {contact_response.text}")
+                
+                if contact_response.status_code in [200, 201]:
+                    print(f"✅ [GHL CONTACT] Contact updated successfully: {ghl_contact_id}")
+                    return ghl_contact_id
+        else:
+            # Create new contact
+            # Parse name if available
+            first_name = ""
+            last_name = ""
+            if contact_name:
+                name_parts = contact_name.split(maxsplit=1)
+                first_name = name_parts[0] if name_parts else ""
+                last_name = name_parts[1] if len(name_parts) > 1 else ""
+            
+            contact_payload = {
+                "firstName": first_name,
+                "email": contact_email,
+                "phone": contact_phone,
+                "locationId": location_id,
+                "tags": ["job completed"]
+            }
+            
+            if last_name:
+                contact_payload["lastName"] = last_name
+            
+            print(f"➕ [GHL CONTACT] Creating new contact with payload: {contact_payload}")
+            contact_response = requests.post(
+                "https://services.leadconnectorhq.com/contacts/",
+                json=contact_payload,
+                headers=headers
+            )
+            
+            print(f"⬅️ [GHL CONTACT] Create response [{contact_response.status_code}]: {contact_response.text}")
+
+            if contact_response.status_code in [200, 201]:
+                response_data = contact_response.json()
+                ghl_contact_id = response_data.get("contact", {}).get("id") or response_data.get("id")
+                print(f"✅ [GHL CONTACT] Contact created successfully: {ghl_contact_id}")
+                return ghl_contact_id
+
+        print("❌ [GHL CONTACT] Failed to create/update contact in GHL.")
+        return None
+
+    except Exception as e:
+        print(f"🔥 [GHL CONTACT] Error syncing contact: {e}")
+        return None
