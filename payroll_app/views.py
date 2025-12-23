@@ -70,10 +70,20 @@ class EmployeeProfileViewSet(viewsets.ModelViewSet):
                 Q(pay_scale_type__icontains=search)
             )
         
-        # Filter by status
+        # Filter by status (EmployeeProfile status)
         status_filter = self.request.query_params.get('status', None)
         if status_filter:
             queryset = queryset.filter(status=status_filter)
+        
+        # Filter by user status (user.is_active)
+        user_status = self.request.query_params.get('is_active', None)
+        if user_status is not None:
+            # Convert string to boolean - handle various formats
+            user_status_lower = str(user_status).lower()
+            if user_status_lower in ('true', '1', 'active', 'yes'):
+                queryset = queryset.filter(user__is_active=True)
+            elif user_status_lower in ('false', '0', 'inactive', 'no'):
+                queryset = queryset.filter(user__is_active=False)
         
         # Filter by pay scale type
         pay_scale = self.request.query_params.get('pay_scale_type', None)

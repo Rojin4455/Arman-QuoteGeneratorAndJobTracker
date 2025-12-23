@@ -17,10 +17,12 @@ class JobServiceItemSerializer(serializers.ModelSerializer):
 class JobAssignmentSerializer(serializers.ModelSerializer):
     user_email = serializers.EmailField(source='user.email', read_only=True)
     user_name = serializers.CharField(source='user.username', read_only=True)
+    first_name = serializers.CharField(source='user.first_name', read_only=True)
+    last_name = serializers.CharField(source='user.last_name', read_only=True)
 
     class Meta:
         model = JobAssignment
-        fields = ['id', 'user', 'user_email', 'user_name', 'role']
+        fields = ['id', 'user', 'user_email', 'user_name', 'first_name', 'last_name', 'role']
         read_only_fields = ['id']
 
 
