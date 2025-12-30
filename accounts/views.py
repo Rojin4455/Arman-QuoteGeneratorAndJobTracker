@@ -120,7 +120,7 @@ def webhook_handler(request):
 
     try:
         data = json.loads(request.body)
-        print("date:----- ", data)
+        print("Webhook data received:----- ", data)
 
         # Create Webhook record
         Webhook.objects.create(
@@ -135,31 +135,72 @@ def webhook_handler(request):
 
         invoice_events = ["InvoiceCreate", "InvoiceUpdate", "InvoiceDelete"]
         if event_type in invoice_events:
+            # Extract location_id - could be at root or in nested structure
             location_id = data.get("locationId")
+            
             # Extract invoice_id from various possible locations in the payload
             invoice_id = None
+            
+            # Case 1: Invoice data is nested in "invoice" key
             invoice_obj = data.get("invoice")
             if isinstance(invoice_obj, dict):
                 invoice_id = invoice_obj.get("_id") or invoice_obj.get("id")
+            
+            # Case 2: Invoice data IS the root payload (your case)
+            # Check if root has _id (which indicates invoice data is at root)
             if not invoice_id:
-                invoice_id = data.get("invoiceId") or data.get("_id")
+                if "_id" in data and "invoiceNumber" in data:
+                    # This looks like invoice data at root level
+                    invoice_id = data.get("_id")
+                    # If locationId is not at root, try to get from credentials
+                    if not location_id:
+                        # Try to get location_id from altId if it's a location type
+                        if data.get("altType") == "location":
+                            location_id = data.get("altId")
+            
+            # Case 3: Try other common locations
+            if not invoice_id:
+                invoice_id = data.get("invoiceId") or data.get("_id") or data.get("id")
+            
+            # Debug logging
+            print(f"Invoice webhook - event_type: {event_type}, location_id: {location_id}, invoice_id: {invoice_id}")
             
             if location_id and invoice_id:
                 if event_type in ["InvoiceCreate", "InvoiceUpdate"]:
                     # Sync invoice for create and update events
                     sync_single_invoice_task.delay(location_id, invoice_id)
-                    print(f"Triggered invoice sync for {event_type}: invoice_id={invoice_id}, location_id={location_id}")
+                    print(f"✅ Triggered invoice sync for {event_type}: invoice_id={invoice_id}, location_id={location_id}")
                 elif event_type == "InvoiceDelete":
                     # Delete invoice for delete event
                     delete_invoice_task.delay(invoice_id)
-                    print(f"Triggered invoice deletion for {event_type}: invoice_id={invoice_id}")
+                    print(f"✅ Triggered invoice deletion for {event_type}: invoice_id={invoice_id}")
             else:
-                print(f"Missing location_id or invoice_id in webhook payload for {event_type}")
+                missing = []
+                if not location_id:
+                    missing.append("locationId")
+                if not invoice_id:
+                    missing.append("invoiceId/_id")
+                print(f"❌ Missing required fields in webhook payload for {event_type}: {', '.join(missing)}")
+                print(f"   Available keys in payload: {list(data.keys())}")
+                # Try to extract location_id from credentials if invoice_id exists
+                if invoice_id and not location_id:
+                    credentials = GHLAuthCredentials.objects.first()
+                    if credentials and credentials.location_id:
+                        location_id = credentials.location_id
+                        print(f"⚠️ Using location_id from credentials: {location_id}")
+                        if event_type in ["InvoiceCreate", "InvoiceUpdate"]:
+                            sync_single_invoice_task.delay(location_id, invoice_id)
+                            print(f"✅ Triggered invoice sync with fallback location_id")
+                        elif event_type == "InvoiceDelete":
+                            delete_invoice_task.delay(invoice_id)
+                            print(f"✅ Triggered invoice deletion")
 
         return JsonResponse({"message": "Webhook received"}, status=200)
 
     except Exception as e:
         print(f"Webhook error: {str(e)}")
+        import traceback
+        traceback.print_exc()
         return JsonResponse({"error": str(e)}, status=500)
 
 
