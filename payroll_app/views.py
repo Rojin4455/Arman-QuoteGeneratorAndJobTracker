@@ -489,6 +489,107 @@ class PayoutViewSet(viewsets.ModelViewSet):
         
         return queryset.order_by('-created_at')
     
+    def _get_employee_filter(self):
+        """Helper method to get employee filter based on user permissions and query params"""
+        user = self.request.user
+        employee_id = self.request.query_params.get('employee', None)
+        
+        # Determine which employees to include
+        if not getattr(user, 'is_admin', False):
+            # Normal users: only their own data
+            return User.objects.filter(pk=user.id)
+        elif employee_id:
+            # Admin filtering by specific employee
+            return User.objects.filter(pk=employee_id)
+        else:
+            # Admin: all employees
+            return User.objects.all()
+    
+    def _get_time_entry_queryset(self):
+        """Get filtered TimeEntry queryset matching the same filters as payouts"""
+        user = self.request.user
+        employee_filter = self._get_employee_filter()
+        
+        # Base queryset with employee filter
+        time_entries = TimeEntry.objects.filter(
+            employee__in=employee_filter,
+            status='checked_out'  # Only count completed time entries
+        )
+        
+        # Apply date range filters (same as payouts)
+        start_date = self.request.query_params.get('start_date', None)
+        end_date = self.request.query_params.get('end_date', None)
+        
+        if start_date:
+            try:
+                start = datetime.strptime(start_date, '%Y-%m-%d')
+                time_entries = time_entries.filter(check_in_time__gte=start)
+            except ValueError:
+                pass
+        
+        if end_date:
+            try:
+                end = datetime.strptime(end_date, '%Y-%m-%d') + timedelta(days=1)
+                time_entries = time_entries.filter(check_in_time__lt=end)
+            except ValueError:
+                pass
+        
+        return time_entries
+    
+    def list(self, request, *args, **kwargs):
+        """List payouts with aggregated statistics"""
+        # Get filtered queryset (before pagination for accurate totals)
+        queryset = self.filter_queryset(self.get_queryset())
+        
+        # Calculate aggregated statistics from filtered payouts (before pagination)
+        total_payouts = queryset.aggregate(total=Sum('amount'))['total'] or Decimal('0.00')
+        
+        # Project payouts total
+        project_payouts = queryset.filter(payout_type='project')
+        project_total = project_payouts.aggregate(total=Sum('amount'))['total'] or Decimal('0.00')
+        
+        # Hourly payouts total
+        hourly_payouts = queryset.filter(payout_type='hourly')
+        hourly_total = hourly_payouts.aggregate(total=Sum('amount'))['total'] or Decimal('0.00')
+        
+        # Average payout
+        payout_count = queryset.count()
+        average_payout = (total_payouts / Decimal(str(payout_count))) if payout_count > 0 else Decimal('0.00')
+        
+        # Calculate total hours worked from TimeEntry model
+        time_entries_queryset = self._get_time_entry_queryset()
+        total_hours_result = time_entries_queryset.aggregate(
+            total_hours=Sum('total_hours')
+        )
+        total_hours_worked = total_hours_result['total_hours'] or Decimal('0.00')
+        
+        # Prepare totals data
+        totals_data = {
+            'total_payouts': float(total_payouts),
+            'project_total_payouts': float(project_total),
+            'hourly_total_payouts': float(hourly_total),
+            'total_hours_worked': float(total_hours_worked),
+            'average_payout': float(average_payout),
+            'payout_count': payout_count,
+        }
+        
+        # Paginate if needed
+        page = self.paginate_queryset(queryset)
+        if page is not None:
+            serializer = self.get_serializer(page, many=True)
+            # Get paginated response and add totals
+            response = self.get_paginated_response(serializer.data)
+            # Add totals to the response data
+            response.data['totals'] = totals_data
+            return response
+        
+        # Non-paginated response
+        serializer = self.get_serializer(queryset, many=True)
+        return Response({
+            'results': serializer.data,
+            'totals': totals_data
+        })
+    
     def create(self, request, *args, **kwargs):
         """Prevent direct creation - use calculator endpoint instead"""
         return Response({
