@@ -347,7 +347,7 @@ class JobSerializer(serializers.ModelSerializer):
             return
         if not job.repeat_every or not job.repeat_unit or not job.occurrences:
             return
-        dates = self._build_occurrence_datetimes(
+        dates = JobSerializer._build_occurrence_datetimes(
             job.scheduled_at, 
             job.repeat_every, 
             job.repeat_unit, 
@@ -357,7 +357,8 @@ class JobSerializer(serializers.ModelSerializer):
         for idx, dt in enumerate(dates, start=1):
             JobOccurrence.objects.create(job=job, scheduled_at=dt, sequence=idx)
 
-    def _build_occurrence_datetimes(self, start_dt, repeat_every, repeat_unit, occurrences, day_of_week=None):
+    @staticmethod
+    def _build_occurrence_datetimes(start_dt, repeat_every, repeat_unit, occurrences, day_of_week=None):
         result = []
         current = start_dt
         
@@ -393,13 +394,14 @@ class JobSerializer(serializers.ModelSerializer):
                     months_to_add = 6 * repeat_every
                 elif repeat_unit == 'year':
                     months_to_add = 12 * repeat_every
-                current = self._add_months(current, months_to_add)
+                current = JobSerializer._add_months(current, months_to_add)
             else:
                 current = current + timedelta(days=repeat_every)
             result.append(current)
         return result
 
-    def _add_months(self, dt, months):
+    @staticmethod
+    def _add_months(dt, months):
         month = dt.month - 1 + months
         year = dt.year + month // 12
         month = month % 12 + 1
@@ -448,7 +450,7 @@ class JobSeriesCreateSerializer(serializers.Serializer):
 
         # build dates using the existing helper, passing day_of_week
         dates = JobSerializer._build_occurrence_datetimes(
-            self, base_dt, repeat_every, repeat_unit, count, day_of_week=day_of_week
+            base_dt, repeat_every, repeat_unit, count, day_of_week=day_of_week
         )
         series = uuid4()
         created_ids = []
