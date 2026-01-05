@@ -429,24 +429,67 @@ def sync_addresses_to_db(address_data):
 
 
 def create_or_update_contact(data):
-    contact_id = data.get("id")
-    contact, created = Contact.objects.update_or_create(
-        contact_id=contact_id,
-        defaults={
-            "first_name": data.get("firstName"),
-            "last_name": data.get("lastName"),
-            "email": data.get("email"),
-            "phone": data.get("phone"),
-            "dnd": data.get("dnd", False),
-            "country": data.get("country"),
-            "date_added": data.get("dateAdded"),
-            "location_id": data.get("locationId"),
-            "custom_fields":data.get("customFields")
-        }
-    )
-    cred = GHLAuthCredentials.objects.first()
-    fetch_contacts_locations([data], data.get("locationId"), cred.access_token)
-    print("Contact created/updated:", contact_id)
+    # Handle nested webhook payload structure (similar to appointments)
+    if "contact" in data:
+        contact_data = data["contact"]
+        # Get location_id from root if not in nested contact
+        if "locationId" not in contact_data:
+            contact_data["locationId"] = data.get("locationId")
+    else:
+        contact_data = data
+    
+    contact_id = contact_data.get("id")
+    if not contact_id:
+        print("❌ [WEBHOOK] Contact ID is required in webhook payload")
+        return None
+    
+    # Ensure location_id is present (required field, NOT NULL)
+    location_id = contact_data.get("locationId")
+    if not location_id:
+        # Try to get from root data
+        location_id = data.get("locationId")
+        if not location_id:
+            # Fallback to credentials
+            cred = GHLAuthCredentials.objects.first()
+            if cred and cred.location_id:
+                location_id = cred.location_id
+            else:
+                print(f"❌ [WEBHOOK] locationId is required for contact {contact_id}")
+                return None
+    
+    try:
+        # Parse date_added if provided
+        date_added = None
+        if contact_data.get("dateAdded"):
+            date_added = parse_datetime(contact_data.get("dateAdded"))
+        
+        contact, created = Contact.objects.update_or_create(
+            contact_id=contact_id,
+            defaults={
+                "first_name": contact_data.get("firstName"),
+                "last_name": contact_data.get("lastName"),
+                "email": contact_data.get("email"),
+                "phone": contact_data.get("phone"),
+                "dnd": contact_data.get("dnd", False),
+                "country": contact_data.get("country"),
+                "date_added": date_added,
+                "location_id": location_id,  # Ensure this is never None
+                "custom_fields": contact_data.get("customFields", []),
+                "tags": contact_data.get("tags", []),
+            }
+        )
+        
+        cred = GHLAuthCredentials.objects.first()
+        if cred:
+            fetch_contacts_locations([contact_data], location_id, cred.access_token)
+        
+        print(f"✅ Contact {'created' if created else 'updated'}: {contact_id}")
+        return contact
+    except Exception as e:
+        print(f"❌ Error creating/updating contact {contact_id}: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        return None
 
 def delete_contact(data):
     contact_id = data.get("id")
