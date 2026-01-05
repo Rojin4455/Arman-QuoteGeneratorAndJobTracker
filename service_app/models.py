@@ -574,6 +574,22 @@ class Appointment(models.Model):
         help_text="Store GHL user IDs from users array"
     )
     
+    # Backend creation tracking
+    created_from_backend = models.BooleanField(
+        default=False,
+        help_text="True if appointment was created from our backend, False if from GHL"
+    )
+    
+    # Job relationship - one-to-one
+    job = models.OneToOneField(
+        'jobtracker_app.Job',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='appointment',
+        help_text="Related job if appointment was created from a job"
+    )
+    
     # Timestamps
     start_time = models.DateTimeField(blank=True, null=True)
     end_time = models.DateTimeField(blank=True, null=True)

@@ -664,6 +664,10 @@ def create_or_update_appointment_from_ghl(appointment_data: Dict[str, Any], loca
     Create or update an Appointment from GHL appointment data.
     Maps assignedUserId and users array to User model using ghl_user_id.
     
+    If appointment was created from our backend (has created_from_backend=True),
+    we update it instead of creating a new one. This prevents duplicates when
+    the webhook comes back after we create an appointment in GHL.
+    
     Args:
         appointment_data (dict): Appointment data from GHL webhook with fields:
             - id: GHL appointment ID
@@ -696,33 +700,61 @@ def create_or_update_appointment_from_ghl(appointment_data: Dict[str, Any], loca
     if not ghl_appointment_id:
         raise ValueError("Appointment ID is required")
     
+    # Check if appointment already exists (created from backend)
+    existing_appointment = Appointment.objects.filter(ghl_appointment_id=ghl_appointment_id).first()
+    
     # Parse datetime fields
     start_time = parse_datetime(appointment_data.get("startTime")) if appointment_data.get("startTime") else None
     end_time = parse_datetime(appointment_data.get("endTime")) if appointment_data.get("endTime") else None
     date_added = parse_datetime(appointment_data.get("dateAdded")) if appointment_data.get("dateAdded") else None
     date_updated = parse_datetime(appointment_data.get("dateUpdated")) if appointment_data.get("dateUpdated") else None
     
-    # Get or create appointment
-    appointment, created = Appointment.objects.update_or_create(
-        ghl_appointment_id=ghl_appointment_id,
-        defaults={
-            "location_id": location_id or appointment_data.get("locationId", ""),
-            "title": appointment_data.get("title"),
-            "address": appointment_data.get("address"),
-            "calendar_id": appointment_data.get("calendarId"),
-            "appointment_status": appointment_data.get("appointmentStatus"),
-            "source": appointment_data.get("source"),
-            "notes": appointment_data.get("notes"),
-            "ghl_contact_id": appointment_data.get("contactId"),
-            "group_id": appointment_data.get("groupId"),
-            "ghl_assigned_user_id": appointment_data.get("assignedUserId"),
-            "start_time": start_time,
-            "end_time": end_time,
-            "date_added": date_added,
-            "date_updated": date_updated,
-            "users_ghl_ids": appointment_data.get("users", []),
-        }
-    )
+    # If appointment exists and was created from backend, update it
+    if existing_appointment and existing_appointment.created_from_backend:
+        print(f"🔄 [WEBHOOK] Updating existing appointment created from backend: {ghl_appointment_id}")
+        # Update the existing appointment with webhook data
+        existing_appointment.location_id = location_id or appointment_data.get("locationId", existing_appointment.location_id or "")
+        existing_appointment.title = appointment_data.get("title", existing_appointment.title)
+        existing_appointment.address = appointment_data.get("address", existing_appointment.address)
+        existing_appointment.calendar_id = appointment_data.get("calendarId", existing_appointment.calendar_id)
+        existing_appointment.appointment_status = appointment_data.get("appointmentStatus", existing_appointment.appointment_status)
+        existing_appointment.source = appointment_data.get("source", existing_appointment.source)
+        existing_appointment.notes = appointment_data.get("notes", existing_appointment.notes)
+        existing_appointment.ghl_contact_id = appointment_data.get("contactId", existing_appointment.ghl_contact_id)
+        existing_appointment.group_id = appointment_data.get("groupId", existing_appointment.group_id)
+        existing_appointment.ghl_assigned_user_id = appointment_data.get("assignedUserId", existing_appointment.ghl_assigned_user_id)
+        existing_appointment.start_time = start_time or existing_appointment.start_time
+        existing_appointment.end_time = end_time or existing_appointment.end_time
+        existing_appointment.date_added = date_added or existing_appointment.date_added
+        existing_appointment.date_updated = date_updated or existing_appointment.date_updated
+        existing_appointment.users_ghl_ids = appointment_data.get("users", existing_appointment.users_ghl_ids)
+        # Keep created_from_backend flag as True
+        existing_appointment.save()
+        appointment = existing_appointment
+        created = False
+    else:
+        # Get or create appointment (normal flow for appointments created in GHL)
+        appointment, created = Appointment.objects.update_or_create(
+            ghl_appointment_id=ghl_appointment_id,
+            defaults={
+                "location_id": location_id or appointment_data.get("locationId", ""),
+                "title": appointment_data.get("title"),
+                "address": appointment_data.get("address"),
+                "calendar_id": appointment_data.get("calendarId"),
+                "appointment_status": appointment_data.get("appointmentStatus"),
+                "source": appointment_data.get("source"),
+                "notes": appointment_data.get("notes"),
+                "ghl_contact_id": appointment_data.get("contactId"),
+                "group_id": appointment_data.get("groupId"),
+                "ghl_assigned_user_id": appointment_data.get("assignedUserId"),
+                "start_time": start_time,
+                "end_time": end_time,
+                "date_added": date_added,
+                "date_updated": date_updated,
+                "users_ghl_ids": appointment_data.get("users", []),
+                "created_from_backend": False,  # This is from GHL webhook
+            }
+        )
     
     # Set flag to prevent sync back to GHL (this is from GHL webhook)
     appointment._skip_ghl_sync = True

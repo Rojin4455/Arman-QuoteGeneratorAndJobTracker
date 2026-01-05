@@ -17,7 +17,8 @@ from rest_framework.response import Response
 
 from accounts.models import Webhook
 from service_app.models import User, Appointment
-from .models import Job, JobOccurrence
+from .models import Job, JobOccurrence, JobServiceItem, JobAssignment
+from .ghl_appointment_sync import delete_appointment_from_ghl
 from .serializers import (
     CalendarEventSerializer,
     JobSeriesCreateSerializer,
@@ -605,8 +606,10 @@ class JobSeriesCreateView(APIView):
 
 class JobBySeriesView(APIView):
     """
-    Returns jobs for a specific series.
-    Query params:
+    GET: Returns jobs for a specific series.
+    DELETE: Deletes all jobs in a series (admin only).
+    
+    Query params (for GET):
     - page: page number (default: 1)
     - page_size: number of items per page (default: 20, max: 100)
     """
@@ -629,6 +632,89 @@ class JobBySeriesView(APIView):
         paginated_qs = paginator.paginate_queryset(qs, request)
         serializer = JobSerializer(paginated_qs, many=True)
         return paginator.get_paginated_response(serializer.data)
+
+    def delete(self, request, series_id):
+        """
+        Delete all jobs in a series.
+        Users can delete if they are assigned to any job in the series, or if they are admins.
+        """
+        user = request.user
+        if not user.is_authenticated:
+            return Response({'detail': 'Authentication required.'}, status=401)
+        
+        # Get all jobs in the series
+        jobs_in_series = Job.objects.filter(series_id=series_id)
+        job_count = jobs_in_series.count()
+        
+        if job_count == 0:
+            return Response({
+                'detail': f'No jobs found for series {series_id}.',
+                'series_id': str(series_id),
+                'deleted_count': 0
+            }, status=404)
+        
+        # Check permissions: user must be admin OR assigned to at least one job in the series
+        is_admin = getattr(user, 'is_admin', False)
+        if not is_admin:
+            # Check if user is assigned to any job in this series
+            user_assigned_jobs = jobs_in_series.filter(assignments__user=user).distinct()
+            if not user_assigned_jobs.exists():
+                return Response({
+                    'detail': 'You do not have permission to delete this job series. You must be assigned to at least one job in the series or be an admin.'
+                }, status=403)
+        
+        # Get job IDs for related record cleanup
+        job_ids = list(jobs_in_series.values_list('id', flat=True))
+        
+        # Handle appointments linked to these jobs - delete from GHL and our database
+        appointments_to_delete = Appointment.objects.filter(job_id__in=job_ids)
+        appointment_count = appointments_to_delete.count()
+        appointments_deleted_from_ghl = 0
+        appointments_deleted_from_db = 0
+        
+        if appointment_count > 0:
+            print(f"Found {appointment_count} appointment(s) linked to jobs in series {series_id}")
+            
+            # Delete appointments from GHL first, then from our database
+            for appointment in appointments_to_delete:
+                try:
+                    # Delete from GHL (skip sync flag to prevent signal from interfering)
+                    appointment._skip_ghl_sync = True
+                    if delete_appointment_from_ghl(appointment):
+                        appointments_deleted_from_ghl += 1
+                        print(f"✅ Deleted appointment {appointment.ghl_appointment_id} from GHL")
+                    else:
+                        print(f"⚠️ Failed to delete appointment {appointment.ghl_appointment_id} from GHL, but will still delete from database")
+                except Exception as e:
+                    print(f"❌ Error deleting appointment {appointment.ghl_appointment_id} from GHL: {str(e)}")
+                    # Continue with deletion from database even if GHL deletion fails
+                
+                # Delete from our database
+                try:
+                    appointment.delete()
+                    appointments_deleted_from_db += 1
+                except Exception as e:
+                    print(f"❌ Error deleting appointment {appointment.id} from database: {str(e)}")
+            
+            print(f"Deleted {appointments_deleted_from_db} appointment(s) from database (attempted to delete {appointments_deleted_from_ghl} from GHL)")
+        
+        # Delete related records first (though CASCADE should handle this, being explicit is safer)
+        # Note: JobServiceItem, JobAssignment, and JobOccurrence have CASCADE delete,
+        # but we'll delete them explicitly for clarity and to handle any edge cases
+        JobServiceItem.objects.filter(job_id__in=job_ids).delete()
+        JobAssignment.objects.filter(job_id__in=job_ids).delete()
+        JobOccurrence.objects.filter(job_id__in=job_ids).delete()
+        
+        # Delete all jobs in the series
+        jobs_in_series.delete()
+        
+        return Response({
+            'detail': f'Successfully deleted {job_count} job(s) from series {series_id}.',
+            'series_id': str(series_id),
+            'deleted_count': job_count,
+            'appointments_deleted_from_ghl': appointments_deleted_from_ghl,
+            'appointments_deleted_from_db': appointments_deleted_from_db
+        }, status=200)
 
 
 

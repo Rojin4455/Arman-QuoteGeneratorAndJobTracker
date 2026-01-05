@@ -5,6 +5,7 @@ Handles syncing appointments with GoHighLevel API
 import requests
 from typing import Dict, Any, Optional
 from django.utils import timezone
+from django.utils.dateparse import parse_datetime
 from accounts.models import GHLAuthCredentials
 from service_app.models import Appointment, User
 
@@ -317,3 +318,201 @@ def delete_appointment_from_ghl(appointment: Appointment) -> bool:
     except Exception as e:
         print(f"❌ Error deleting appointment from GHL: {str(e)}")
         return False
+
+
+def create_ghl_appointment_from_job(job) -> Optional[Appointment]:
+    """
+    Create an appointment in GHL from a Job when job status becomes 'confirmed'.
+    This function creates the appointment in GHL and saves it to our database.
+    
+    Args:
+        job: Job instance that has status='confirmed'
+        
+    Returns:
+        Appointment instance if successful, None otherwise
+    """
+    from jobtracker_app.models import Job
+    
+    print(f"📅 [CREATE APPOINTMENT FROM JOB] Starting for job {job.id}")
+    
+    # Check if appointment already exists for this job
+    if hasattr(job, 'appointment') and job.appointment:
+        print(f"⚠️ [CREATE APPOINTMENT FROM JOB] Appointment already exists for job {job.id}: {job.appointment.ghl_appointment_id}")
+        return job.appointment
+    
+    # Resolve location_id
+    location_id = None
+    try:
+        job_with_relations = (
+            Job.objects
+            .select_related('submission__contact')
+            .get(id=job.id)
+        )
+        
+        if job_with_relations.submission and job_with_relations.submission.contact:
+            location_id = job_with_relations.submission.contact.location_id
+            print(f"📍 [CREATE APPOINTMENT FROM JOB] Location ID: {location_id}")
+        else:
+            print("⚠️ [CREATE APPOINTMENT FROM JOB] No submission/contact found, using credentials")
+            credentials = GHLAuthCredentials.objects.first()
+            if credentials:
+                location_id = credentials.location_id
+                print(f"📍 [CREATE APPOINTMENT FROM JOB] Location ID from credentials: {location_id}")
+    except Job.DoesNotExist:
+        print("❌ [CREATE APPOINTMENT FROM JOB] Job not found")
+        return None
+    
+    if not location_id:
+        print("❌ [CREATE APPOINTMENT FROM JOB] Could not resolve location_id")
+        return None
+    
+    # Get credentials for this location
+    try:
+        credentials = GHLAuthCredentials.objects.get(location_id=location_id)
+    except GHLAuthCredentials.DoesNotExist:
+        print(f"❌ [CREATE APPOINTMENT FROM JOB] No GHLAuthCredentials found for location_id: {location_id}")
+        return None
+    except GHLAuthCredentials.MultipleObjectsReturned:
+        print(f"⚠️ [CREATE APPOINTMENT FROM JOB] Multiple credentials found, using first")
+        credentials = GHLAuthCredentials.objects.filter(location_id=location_id).first()
+    
+    # Get GHL contact ID
+    ghl_contact_id = job.ghl_contact_id
+    if not ghl_contact_id and job.submission and job.submission.contact:
+        ghl_contact_id = job.submission.contact.contact_id
+    
+    if not ghl_contact_id:
+        print("⚠️ [CREATE APPOINTMENT FROM JOB] No GHL contact ID found for job")
+        # We can still create the appointment without contact_id, but it's not ideal
+    
+    # Get assigned user GHL ID from job assignments
+    assigned_user_ghl_id = None
+    if job.assignments.exists():
+        assigned_user = job.assignments.first().user
+        if assigned_user and assigned_user.ghl_user_id:
+            assigned_user_ghl_id = assigned_user.ghl_user_id
+            print(f"📍 [CREATE APPOINTMENT FROM JOB] Assigned user GHL ID: {assigned_user_ghl_id}")
+        else:
+            print("⚠️ [CREATE APPOINTMENT FROM JOB] No assigned user found")
+    else:
+        print("⚠️ [CREATE APPOINTMENT FROM JOB] No assignments found")
+    
+    # Get calendar_id - we might need to get this from settings or use a default
+    # For now, we'll leave it optional
+    calendar_id = "Bh99EZHXlRpJ0CfqwDEW"
+    
+    # Build appointment payload
+    if not job.scheduled_at:
+        print("❌ [CREATE APPOINTMENT FROM JOB] Job has no scheduled_at time")
+        return None
+    
+    # Calculate end_time from scheduled_at and duration_hours
+    start_time = job.scheduled_at
+    from datetime import timedelta
+    duration_hours = float(job.duration_hours) if job.duration_hours else 1.0
+    end_time = start_time + timedelta(hours=duration_hours)
+    
+    # Format datetime for GHL API
+    start_time_str = format_datetime_for_ghl(start_time)
+    end_time_str = format_datetime_for_ghl(end_time)
+    
+    payload = {
+        "title": job.title or "Job Appointment",
+        "meetingLocationType": "custom",
+        "meetingLocationId": "custom_0",
+        "overrideLocationConfig": True,
+        "appointmentStatus": "confirmed",
+        "description": job.description or job.notes or "",
+        "address": job.customer_address or "Zoom",  # Default to "Zoom" if no address
+        "ignoreDateRange": False,
+        "ignoreFreeSlotValidation": True,
+        "locationId": location_id,
+        "startTime": start_time_str,
+        "endTime": end_time_str,
+    }
+    
+    # Add optional fields
+    if calendar_id:
+        payload["calendarId"] = calendar_id
+    
+    if ghl_contact_id:
+        payload["contactId"] = ghl_contact_id
+    
+    if assigned_user_ghl_id:
+        payload["assignedUserId"] = assigned_user_ghl_id
+    
+    # Make API call to create appointment in GHL
+    headers = get_ghl_headers(credentials.access_token)
+    url = 'https://services.leadconnectorhq.com/calendars/events/appointments'
+    
+    try:
+        print(f"📤 [CREATE APPOINTMENT FROM JOB] Creating appointment in GHL for job {job.id}")
+        response = requests.post(url, json=payload, headers=headers)
+        
+        if response.status_code in [200, 201]:
+            data = response.json()
+            print(f"✅ [CREATE APPOINTMENT FROM JOB] GHL API response: {data}")
+            
+            # Extract GHL appointment ID from response
+            ghl_appointment_id = None
+            if isinstance(data, dict):
+                ghl_appointment_id = (
+                    data.get('id') or 
+                    data.get('appointmentId') or 
+                    data.get('appointment', {}).get('id') if isinstance(data.get('appointment'), dict) else None
+                )
+            
+            if not ghl_appointment_id:
+                print(f"❌ [CREATE APPOINTMENT FROM JOB] GHL API response missing appointment ID. Response: {response.text}")
+                return None
+            
+            print(f"✅ [CREATE APPOINTMENT FROM JOB] Created appointment in GHL: {ghl_appointment_id}")
+            
+            # Create appointment in our database
+            # We'll wait for the webhook to create it, but we can also create it here
+            # with a flag to indicate it was created from backend
+            appointment = Appointment.objects.create(
+                ghl_appointment_id=ghl_appointment_id,
+                location_id=location_id,
+                title=payload.get("title"),
+                address=payload.get("address"),
+                calendar_id=calendar_id,
+                appointment_status="confirmed",
+                notes=payload.get("description"),
+                ghl_contact_id=ghl_contact_id,
+                ghl_assigned_user_id=assigned_user_ghl_id,
+                start_time=start_time,
+                end_time=end_time,
+                created_from_backend=True,
+                job=job,
+            )
+            
+            # Link contact if available
+            if ghl_contact_id:
+                from accounts.models import Contact
+                try:
+                    contact = Contact.objects.get(contact_id=ghl_contact_id)
+                    appointment.contact = contact
+                    appointment.save(update_fields=['contact'])
+                except Contact.DoesNotExist:
+                    print(f"⚠️ [CREATE APPOINTMENT FROM JOB] Contact {ghl_contact_id} not found")
+            
+            # Link assigned user if available
+            if assigned_user_ghl_id:
+                try:
+                    assigned_user = User.objects.get(ghl_user_id=assigned_user_ghl_id)
+                    appointment.assigned_user = assigned_user
+                    appointment.save(update_fields=['assigned_user'])
+                except User.DoesNotExist:
+                    print(f"⚠️ [CREATE APPOINTMENT FROM JOB] User {assigned_user_ghl_id} not found")
+            
+            print(f"✅ [CREATE APPOINTMENT FROM JOB] Created appointment {appointment.id} for job {job.id}")
+            return appointment
+            
+        else:
+            print(f"❌ [CREATE APPOINTMENT FROM JOB] Failed to create appointment in GHL: {response.status_code} - {response.text}")
+            return None
+            
+    except Exception as e:
+        print(f"❌ [CREATE APPOINTMENT FROM JOB] Error creating appointment in GHL: {str(e)}")
+        return None

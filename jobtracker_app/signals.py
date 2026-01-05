@@ -33,6 +33,40 @@ def _store_previous_status(sender, instance, **kwargs):
         instance._previous_customer_address = None
 
 
+# @receiver(post_save, sender=Job)
+# def _create_appointment_on_confirmed(sender, instance, created, **kwargs):
+#     """
+#     Create appointment in GHL when job status becomes 'confirmed'.
+#     This only happens once when status changes to 'confirmed'.
+#     """
+#     # Check if appointment already exists for this job
+#     try:
+#         existing_appointment = instance.appointment
+#         if existing_appointment:
+#             print(f"⚠️ [APPOINTMENT] Appointment already exists for job {instance.id}: {existing_appointment.ghl_appointment_id}")
+#             return
+#     except Appointment.DoesNotExist:
+#         pass  # No appointment exists, which is fine - we can create one
+    
+#     if created:
+#         # If job is created with 'confirmed' status directly
+#         if instance.status == 'confirmed':
+#             print(f"🆕 [APPOINTMENT] Job created with confirmed status | job_id={instance.id}")
+#             from .ghl_appointment_sync import create_ghl_appointment_from_job
+#             create_ghl_appointment_from_job(instance)
+#         return
+    
+#     previous_status = getattr(instance, "_previous_status", None)
+    
+#     # Only act when job status transitions to 'confirmed'
+#     if instance.status == 'confirmed' and previous_status != 'confirmed':
+#         print(f"✅ [APPOINTMENT] Job transitioned to CONFIRMED | job_id={instance.id} | previous={previous_status}")
+        
+#         # Create appointment in GHL
+#         from .ghl_appointment_sync import create_ghl_appointment_from_job
+#         create_ghl_appointment_from_job(instance)
+
+
 @receiver(post_save, sender=Job)
 def _trigger_invoice_on_completion(sender, instance, created, **kwargs):
     print(f"🔔 [SIGNAL] post_save triggered | job_id={instance.id} | created={created}")
