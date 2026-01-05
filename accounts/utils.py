@@ -799,3 +799,42 @@ def create_or_update_appointment_from_ghl(appointment_data: Dict[str, Any], loca
     
     print(f"Appointment {'created' if created else 'updated'}: {ghl_appointment_id}")
     return appointment
+
+
+def delete_appointment_from_ghl_webhook(appointment_data: Dict[str, Any]) -> bool:
+    """
+    Delete an Appointment from our database when GHL sends a delete webhook.
+    
+    Args:
+        appointment_data (dict): Appointment data from GHL webhook with fields:
+            - id: GHL appointment ID (required)
+            - appointment: nested appointment data (optional)
+    
+    Returns:
+        bool: True if appointment was deleted, False otherwise
+    """
+    from service_app.models import Appointment
+    
+    # Handle nested webhook payload structure
+    if "appointment" in appointment_data:
+        appointment_data = appointment_data["appointment"]
+    
+    ghl_appointment_id = appointment_data.get("id")
+    
+    if not ghl_appointment_id:
+        print("❌ [WEBHOOK DELETE] Appointment ID is required in webhook payload")
+        return False
+    
+    try:
+        appointment = Appointment.objects.get(ghl_appointment_id=ghl_appointment_id)
+        # Set flag to prevent sync back to GHL (this is from GHL webhook)
+        appointment._skip_ghl_sync = True
+        appointment.delete()
+        print(f"✅ [WEBHOOK DELETE] Deleted appointment: {ghl_appointment_id}")
+        return True
+    except Appointment.DoesNotExist:
+        print(f"⚠️ [WEBHOOK DELETE] Appointment with GHL ID {ghl_appointment_id} not found in database")
+        return False
+    except Exception as e:
+        print(f"❌ [WEBHOOK DELETE] Error deleting appointment {ghl_appointment_id}: {str(e)}")
+        return False

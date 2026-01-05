@@ -69,10 +69,14 @@ def handle_webhook_event(data, event_type):
         elif event_type == "UserCreate":
             # Handle user creation from GHL
             create_or_update_user_from_ghl(data)
-        elif event_type in ["AppointmentCreate"]:
+        elif event_type in ["AppointmentCreate", "AppointmentUpdate"]:
             # Handle appointment creation/update from GHL
             location_id = data.get("locationId")
             create_or_update_appointment_from_ghl(data, location_id)
+        elif event_type == "AppointmentDelete":
+            # Handle appointment deletion from GHL
+            from accounts.utils import delete_appointment_from_ghl_webhook
+            delete_appointment_from_ghl_webhook(data)
     except Exception as e:
         print(f"Error handling webhook event: {str(e)}")
 

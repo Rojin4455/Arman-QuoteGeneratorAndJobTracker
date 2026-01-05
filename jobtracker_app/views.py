@@ -584,9 +584,74 @@ class AppointmentViewSet(viewsets.ModelViewSet):
         else:
             serializer.save()
 
-    def destroy(self, request, *args, **kwargs):
-        """Delete appointment"""
+    def update(self, request, *args, **kwargs):
+        """Update appointment and sync to GHL"""
+        partial = kwargs.pop('partial', False)
         instance = self.get_object()
+        
+        # Store previous field values to detect changes
+        previous_fields = {
+            'title': instance.title,
+            'appointment_status': instance.appointment_status,
+            'start_time': instance.start_time,
+            'end_time': instance.end_time,
+            'address': instance.address,
+            'notes': instance.notes,
+            'calendar_id': instance.calendar_id,
+            'ghl_contact_id': instance.ghl_contact_id,
+            'assigned_user': instance.assigned_user,
+            'ghl_assigned_user_id': instance.ghl_assigned_user_id,
+        }
+        
+        serializer = self.get_serializer(instance, data=request.data, partial=partial)
+        serializer.is_valid(raise_exception=True)
+        
+        # Set flag to skip signal sync before saving (to prevent loop)
+        instance._skip_ghl_sync = True
+        
+        # Save the appointment
+        self.perform_update(serializer)
+        
+        # Refresh instance from database to get updated values
+        updated_instance = serializer.instance
+        updated_instance.refresh_from_db()
+        
+        # Detect changed fields
+        changed_fields = {}
+        for field, old_value in previous_fields.items():
+            new_value = getattr(updated_instance, field, None)
+            if old_value != new_value:
+                changed_fields[field] = new_value
+        
+        # Sync to GHL if there are changes and appointment has a GHL ID
+        if changed_fields and updated_instance.ghl_appointment_id:
+            # Skip signal sync to prevent loop (already set above, but ensure it's still set)
+            updated_instance._skip_ghl_sync = True
+            from .ghl_appointment_sync import update_appointment_in_ghl
+            update_appointment_in_ghl(updated_instance, changed_fields=changed_fields)
+        
+        if getattr(updated_instance, '_prefetched_objects_cache', None):
+            # If 'prefetch_related' has been applied to a queryset, we need to
+            # forcibly invalidate the prefetch cache on the instance.
+            updated_instance._prefetched_objects_cache = {}
+        
+        return Response(serializer.data)
+
+    def perform_update(self, serializer):
+        serializer.save()
+
+    def destroy(self, request, *args, **kwargs):
+        """Delete appointment and sync deletion to GHL"""
+        instance = self.get_object()
+        
+        # Sync deletion to GHL before deleting from database
+        if instance.ghl_appointment_id and not instance.ghl_appointment_id.startswith('local_'):
+            # Skip signal sync to prevent loop
+            instance._skip_ghl_sync = True
+            from .ghl_appointment_sync import delete_appointment_from_ghl
+            delete_appointment_from_ghl(instance)
+        
+        # Delete from database
         self.perform_destroy(instance)
         return Response({'detail': 'Appointment deleted successfully'}, status=204)
 
