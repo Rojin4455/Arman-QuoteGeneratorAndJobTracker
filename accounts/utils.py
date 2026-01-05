@@ -463,6 +463,11 @@ def create_or_update_contact(data):
         if contact_data.get("dateAdded"):
             date_added = parse_datetime(contact_data.get("dateAdded"))
         
+        # Handle dnd field - GHL may send None, but database requires boolean
+        dnd_value = contact_data.get("dnd")
+        if dnd_value is None:
+            dnd_value = False
+        
         contact, created = Contact.objects.update_or_create(
             contact_id=contact_id,
             defaults={
@@ -470,7 +475,7 @@ def create_or_update_contact(data):
                 "last_name": contact_data.get("lastName"),
                 "email": contact_data.get("email"),
                 "phone": contact_data.get("phone"),
-                "dnd": contact_data.get("dnd", False),
+                "dnd": dnd_value,  # Ensure this is always a boolean, never None
                 "country": contact_data.get("country"),
                 "date_added": date_added,
                 "location_id": location_id,  # Ensure this is never None
