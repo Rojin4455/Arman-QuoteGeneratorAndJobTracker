@@ -33,6 +33,7 @@ def _store_previous_status(sender, instance, **kwargs):
         instance._previous_title = None
         instance._previous_customer_address = None
 
+from service_app.models import Appointment
 
 # @receiver(post_save, sender=Job)
 # def _create_appointment_on_confirmed(sender, instance, created, **kwargs):

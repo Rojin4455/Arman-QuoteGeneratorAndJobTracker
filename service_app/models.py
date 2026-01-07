@@ -534,7 +534,14 @@ class Appointment(models.Model):
     # Basic appointment info
     title = models.CharField(max_length=255, blank=True, null=True)
     address = models.URLField(max_length=500, blank=True, null=True, help_text="Meeting URL or address")
-    calendar_id = models.CharField(max_length=255, blank=True, null=True)
+    calendar = models.ForeignKey(
+        'accounts.Calendar',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='appointments',
+        help_text="GHL calendar this appointment belongs to"
+    )
     appointment_status = models.CharField(max_length=50, choices=APPOINTMENT_STATUS_CHOICES, blank=True, null=True)
     source = models.CharField(max_length=100, blank=True, null=True)
     notes = models.TextField(blank=True, null=True)

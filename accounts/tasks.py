@@ -1,14 +1,18 @@
 
 import requests
 from celery import shared_task
-from accounts.models import GHLAuthCredentials
+from accounts.models import GHLAuthCredentials, Calendar
 from decouple import config
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from collections import defaultdict
 from accounts.utils import (
     fetch_all_contacts,
     create_or_update_contact,
     delete_contact,
     create_or_update_user_from_ghl,
-    create_or_update_appointment_from_ghl
+    create_or_update_appointment_from_ghl,
+    delete_appointment_from_ghl_webhook,
+    sync_calendars_from_ghl as sync_calendars_from_ghl_utils
 )
 from datetime import datetime, timedelta
 from django.utils import timezone
@@ -148,37 +152,40 @@ def fetch_and_save_all_appointments(location_id=None):
             "Authorization": f"Bearer {access_token}"
         }
         
-        # Collect all events from all users
+        # Collect all events from all users using parallel requests
         all_events = []
         
-        # Loop through each user's ghl_user_id
-        for user_ghl_id in user_ghl_ids:
-            print(f"Fetching appointments for user: {user_ghl_id}")
-            
+        def fetch_user_appointments(user_ghl_id):
+            """Fetch appointments for a single user"""
             params = {
                 "locationId": location_id,
                 "userId": user_ghl_id,
                 "startTime": start_time_ms,
                 "endTime": end_time_ms
             }
-            
-            # Make API request
             try:
-                response = requests.get(url, headers=headers, params=params)
-                
+                response = requests.get(url, headers=headers, params=params, timeout=30)
                 if response.status_code != 200:
                     print(f"Error Response for user {user_ghl_id}: {response.status_code}")
-                    print(f"Error Details: {response.text}")
-                    continue  # Skip this user and continue with next
-                
+                    return []
                 data = response.json()
                 events = data.get("events", [])
-                all_events.extend(events)
                 print(f"Fetched {len(events)} appointments for user {user_ghl_id}")
-                
+                return events
             except Exception as e:
                 print(f"Error fetching appointments for user {user_ghl_id}: {str(e)}")
-                continue  # Skip this user and continue with next
+                return []
+        
+        # Use ThreadPoolExecutor for parallel API calls (max 10 concurrent requests)
+        print(f"Fetching appointments for {len(user_ghl_ids)} users in parallel...")
+        with ThreadPoolExecutor(max_workers=10) as executor:
+            future_to_user = {
+                executor.submit(fetch_user_appointments, user_id): user_id 
+                for user_id in user_ghl_ids
+            }
+            for future in as_completed(future_to_user):
+                events = future.result()
+                all_events.extend(events)
         
         print(f"Total fetched {len(all_events)} appointments from GHL API across all users")
         
@@ -211,13 +218,16 @@ def fetch_and_save_all_appointments(location_id=None):
                 date_added_dt = parse_datetime(event_data.get("dateAdded")) if event_data.get("dateAdded") else None
                 date_updated_dt = parse_datetime(event_data.get("dateUpdated")) if event_data.get("dateUpdated") else None
                 
-                # Create Appointment object
+                # Store calendar_id for bulk lookup later
+                calendar_id_str = event_data.get("calendarId")
+                
+                # Create Appointment object (calendar will be set in bulk later)
                 appointment = Appointment(
                     ghl_appointment_id=ghl_appointment_id,
                     location_id=location_id or event_data.get("locationId", ""),
                     title=event_data.get("title"),
                     address=event_data.get("address"),
-                    calendar_id=event_data.get("calendarId"),
+                    calendar=None,  # Will be set in bulk after fetching all calendars
                     appointment_status=event_data.get("appointmentStatus"),
                     source=event_data.get("source"),
                     notes=event_data.get("notes") or event_data.get("description"),
@@ -232,12 +242,34 @@ def fetch_and_save_all_appointments(location_id=None):
                 
                 appointment_objects.append(appointment)
                 appointment_data_map[ghl_appointment_id] = event_data
+                # Store calendar_id for bulk lookup
+                if calendar_id_str:
+                    appointment._calendar_id = calendar_id_str
                 
             except Exception as e:
                 print(f"Error parsing appointment {event.get('id', 'Unknown')}: {str(e)}")
                 continue
         
         print(f"Parsed {len(appointment_objects)} appointments")
+        
+        # Bulk fetch all calendars needed
+        calendar_ids = set()
+        for appt in appointment_objects:
+            if hasattr(appt, '_calendar_id') and appt._calendar_id:
+                calendar_ids.add(appt._calendar_id)
+        
+        calendars_dict = {}
+        if calendar_ids:
+            calendars_dict = {
+                cal.ghl_calendar_id: cal
+                for cal in Calendar.objects.filter(ghl_calendar_id__in=calendar_ids)
+            }
+            print(f"Fetched {len(calendars_dict)} calendars in bulk")
+        
+        # Assign calendars to appointments
+        for appt in appointment_objects:
+            if hasattr(appt, '_calendar_id') and appt._calendar_id:
+                appt.calendar = calendars_dict.get(appt._calendar_id)
         
         # Get existing appointments in bulk
         ghl_appointment_ids = [appt.ghl_appointment_id for appt in appointment_objects]
@@ -258,7 +290,7 @@ def fetch_and_save_all_appointments(location_id=None):
                 existing.location_id = appointment.location_id
                 existing.title = appointment.title
                 existing.address = appointment.address
-                existing.calendar_id = appointment.calendar_id
+                existing.calendar = appointment.calendar
                 existing.appointment_status = appointment.appointment_status
                 existing.source = appointment.source
                 existing.notes = appointment.notes
@@ -292,7 +324,7 @@ def fetch_and_save_all_appointments(location_id=None):
                 Appointment.objects.bulk_update(
                     appointments_to_update,
                     fields=[
-                        'location_id', 'title', 'address', 'calendar_id',
+                        'location_id', 'title', 'address', 'calendar',
                         'appointment_status', 'source', 'notes', 'ghl_contact_id',
                         'ghl_assigned_user_id', 'start_time', 'end_time',
                         'date_added', 'date_updated', 'users_ghl_ids'
@@ -302,12 +334,19 @@ def fetch_and_save_all_appointments(location_id=None):
                 print(f"Bulk updated {updated_count} appointments")
         
         # Handle relationships in bulk after main operations
-        # Get all appointments again for relationship linking
+        # Use existing appointments dict (already fetched) and merge with newly created ones
         all_appointment_ids = ghl_appointment_ids
-        appointments_dict = {
-            appt.ghl_appointment_id: appt
-            for appt in Appointment.objects.filter(ghl_appointment_id__in=all_appointment_ids)
-        }
+        # Get newly created appointments that weren't in existing_appointments
+        newly_created_ids = set(ghl_appointment_ids) - set(existing_appointments.keys())
+        appointments_dict = dict(existing_appointments)  # Start with existing
+        
+        # Fetch newly created appointments if any
+        if newly_created_ids:
+            newly_created = {
+                appt.ghl_appointment_id: appt
+                for appt in Appointment.objects.filter(ghl_appointment_id__in=newly_created_ids)
+            }
+            appointments_dict.update(newly_created)
         
         # Get all contacts and users in bulk
         contact_ids = set()
@@ -383,17 +422,31 @@ def fetch_and_save_all_appointments(location_id=None):
                 )
                 print(f"Updated relationships for {len(appointments_to_update_relationships)} appointments")
         
-        # Handle many-to-many relationships (users)
+        # Handle many-to-many relationships (users) - optimized with bulk operations
         if many_to_many_updates:
+            # Fetch all appointments in one query
+            appointment_ids = list(many_to_many_updates.keys())
+            appointments_for_m2m = Appointment.objects.filter(id__in=appointment_ids).prefetch_related('users')
+            appointments_dict_m2m = {appt.id: appt for appt in appointments_for_m2m}
+            
+            # Use through model for bulk operations (more efficient)
+            AppointmentUser = Appointment.users.through
+            
+            # Clear existing relationships in bulk
+            AppointmentUser.objects.filter(appointment_id__in=appointment_ids).delete()
+            
+            # Create new relationships in bulk
+            bulk_m2m_objects = []
             for appointment_id, users_list in many_to_many_updates.items():
-                try:
-                    appointment = Appointment.objects.get(id=appointment_id)
-                    appointment.users.clear()
-                    if users_list:
-                        appointment.users.add(*users_list)
-                except Appointment.DoesNotExist:
-                    continue
-            print(f"Updated many-to-many relationships for {len(many_to_many_updates)} appointments")
+                if appointment_id in appointments_dict_m2m and users_list:
+                    for user in users_list:
+                        bulk_m2m_objects.append(
+                            AppointmentUser(appointment_id=appointment_id, user_id=user.id)
+                        )
+            
+            if bulk_m2m_objects:
+                AppointmentUser.objects.bulk_create(bulk_m2m_objects, ignore_conflicts=True)
+            print(f"Updated many-to-many relationships for {len(many_to_many_updates)} appointments in bulk")
         
         # Delete appointments that exist in our app but not in GHL
         # Only delete appointments that:
@@ -436,3 +489,9 @@ def fetch_and_save_all_appointments(location_id=None):
     except Exception as e:
         print(f"Error fetching appointments: {str(e)}")
         raise
+
+
+
+@shared_task
+def sync_calendars_from_ghl_task(location_id, access_token):
+    sync_calendars_from_ghl_utils(location_id, access_token)

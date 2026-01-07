@@ -225,6 +225,21 @@ class JobViewSet(viewsets.ModelViewSet):
         
         return obj
 
+    def retrieve(self, request, *args, **kwargs):
+        """
+        Override retrieve to optimize queryset for appointment checking
+        """
+        instance = self.get_object()
+        
+        # Optimize queryset with prefetch for assignments and related data
+        instance = Job.objects.prefetch_related(
+            'assignments__user',
+            'appointment'
+        ).get(pk=instance.pk)
+        
+        serializer = self.get_serializer(instance)
+        return Response(serializer.data)
+
     @action(detail=False, methods=['get'], url_path='mine')
     def mine(self, request):
         """Convenience endpoint: jobs for the authenticated user (by email)."""
@@ -458,8 +473,11 @@ class AppointmentViewSet(viewsets.ModelViewSet):
             return Appointment.objects.none()
         
         qs = Appointment.objects.select_related(
-            'assigned_user', 'contact'
+            'assigned_user', 'contact', 'calendar'
         ).prefetch_related('users').all()
+        
+        # Exclude appointments with calendar name "Reccuring Service Calendar"
+        qs = qs.exclude(calendar__name="Reccuring Service Calendar")
         
         is_admin = getattr(user, 'is_admin', False)
         
@@ -520,10 +538,10 @@ class AppointmentViewSet(viewsets.ModelViewSet):
         if location_id:
             qs = qs.filter(location_id=location_id)
         
-        # Filter by calendar_id
+        # Filter by calendar_id (using ForeignKey relationship)
         calendar_id = self.request.query_params.get('calendar_id')
         if calendar_id:
-            qs = qs.filter(calendar_id=calendar_id)
+            qs = qs.filter(calendar__ghl_calendar_id=calendar_id)
         
         # Filter by source
         source = self.request.query_params.get('source')
@@ -597,7 +615,7 @@ class AppointmentViewSet(viewsets.ModelViewSet):
             'end_time': instance.end_time,
             'address': instance.address,
             'notes': instance.notes,
-            'calendar_id': instance.calendar_id,
+            'calendar_id': instance.calendar.ghl_calendar_id if instance.calendar else None,
             'ghl_contact_id': instance.ghl_contact_id,
             'assigned_user': instance.assigned_user,
             'ghl_assigned_user_id': instance.ghl_assigned_user_id,

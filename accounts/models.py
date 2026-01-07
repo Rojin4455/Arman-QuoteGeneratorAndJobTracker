@@ -14,6 +14,7 @@ class GHLAuthCredentials(models.Model):
     user_type = models.CharField(max_length=50, null=True, blank=True)
     company_id = models.CharField(max_length=255, null=True, blank=True)
     location_id = models.CharField(max_length=255, null=True, blank=True)
+    timezone = models.CharField(max_length=100, null=True, blank=True, default="America/Chicago")
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -134,3 +135,35 @@ class Address(models.Model):
 
     def __str__(self):
         return f"{self.street_address}, {self.city}, {self.state}"
+
+
+class Calendar(models.Model):
+    """Store GHL calendar information"""
+    ghl_calendar_id = models.CharField(max_length=255, unique=True, help_text="GHL calendar ID")
+    account = models.ForeignKey(
+        GHLAuthCredentials,
+        on_delete=models.CASCADE,
+        related_name='calendars',
+        null=True,
+        blank=True,
+        help_text="The GHL account this calendar belongs to"
+    )
+    name = models.CharField(max_length=255, help_text="Calendar name")
+    description = models.TextField(blank=True, null=True, help_text="Calendar description")
+    widget_type = models.CharField(max_length=50, blank=True, null=True, help_text="Widget type (e.g., 'default')")
+    calendar_type = models.CharField(max_length=50, blank=True, null=True, help_text="Calendar type (e.g., 'round_robin')")
+    widget_slug = models.CharField(max_length=255, blank=True, null=True, help_text="Widget slug for the calendar")
+    group_id = models.CharField(max_length=255, blank=True, null=True, help_text="Group ID if calendar belongs to a group")
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = 'ghl_calendars'
+        ordering = ['name']
+        indexes = [
+            models.Index(fields=['account']),
+            models.Index(fields=['ghl_calendar_id']),
+        ]
+
+    def __str__(self):
+        return f"{self.name} ({self.ghl_calendar_id})"

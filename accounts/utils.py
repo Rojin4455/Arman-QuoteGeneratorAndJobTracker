@@ -1,14 +1,11 @@
 import requests
 import time
+import re
 from typing import List, Dict, Any, Optional
 from django.utils.dateparse import parse_datetime
 from django.db import transaction
-from accounts.models import GHLAuthCredentials,Contact,Address
 from django.core.exceptions import ObjectDoesNotExist
-import re
-import requests
-from accounts.models import GHLAuthCredentials
-from accounts.models import Contact, Address
+from accounts.models import GHLAuthCredentials, Contact, Address, Calendar
 from service_app.models import User, Appointment
 
 
@@ -760,11 +757,21 @@ def create_or_update_appointment_from_ghl(appointment_data: Dict[str, Any], loca
     # If appointment exists and was created from backend, update it
     if existing_appointment and existing_appointment.created_from_backend:
         print(f"🔄 [WEBHOOK] Updating existing appointment created from backend: {ghl_appointment_id}")
+        # Get Calendar object if calendarId is provided
+        calendar_id_str = appointment_data.get("calendarId")
+        calendar = None
+        if calendar_id_str:
+            try:
+                calendar = Calendar.objects.filter(ghl_calendar_id=calendar_id_str).first()
+            except Exception as e:
+                print(f"Warning: Could not find calendar with ID {calendar_id_str}: {str(e)}")
+        
         # Update the existing appointment with webhook data
         existing_appointment.location_id = location_id or appointment_data.get("locationId", existing_appointment.location_id or "")
         existing_appointment.title = appointment_data.get("title", existing_appointment.title)
         existing_appointment.address = appointment_data.get("address", existing_appointment.address)
-        existing_appointment.calendar_id = appointment_data.get("calendarId", existing_appointment.calendar_id)
+        if calendar:
+            existing_appointment.calendar = calendar
         existing_appointment.appointment_status = appointment_data.get("appointmentStatus", existing_appointment.appointment_status)
         existing_appointment.source = appointment_data.get("source", existing_appointment.source)
         existing_appointment.notes = appointment_data.get("notes", existing_appointment.notes)
@@ -781,27 +788,45 @@ def create_or_update_appointment_from_ghl(appointment_data: Dict[str, Any], loca
         appointment = existing_appointment
         created = False
     else:
+        # Get Calendar object if calendarId is provided
+        calendar_id_str = appointment_data.get("calendarId")
+        calendar = None
+        if calendar_id_str:
+            try:
+                calendar = Calendar.objects.filter(ghl_calendar_id=calendar_id_str).first()
+                if not calendar:
+                    print(f"⚠️ [WEBHOOK] Calendar with GHL ID '{calendar_id_str}' not found in database. Appointment will be created without calendar.")
+            except Exception as e:
+                print(f"⚠️ [WEBHOOK] Error finding calendar with ID {calendar_id_str}: {str(e)}")
+                calendar = None
+        
         # Get or create appointment (normal flow for appointments created in GHL)
+        # Only include calendar in defaults if it's not None to avoid any issues
+        defaults_dict = {
+            "location_id": location_id or appointment_data.get("locationId", ""),
+            "title": appointment_data.get("title"),
+            "address": appointment_data.get("address"),
+            "appointment_status": appointment_data.get("appointmentStatus"),
+            "source": appointment_data.get("source"),
+            "notes": appointment_data.get("notes"),
+            "ghl_contact_id": appointment_data.get("contactId"),
+            "group_id": appointment_data.get("groupId"),
+            "ghl_assigned_user_id": appointment_data.get("assignedUserId"),
+            "start_time": start_time,
+            "end_time": end_time,
+            "date_added": date_added,
+            "date_updated": date_updated,
+            "users_ghl_ids": appointment_data.get("users", []),
+            "created_from_backend": False,  # This is from GHL webhook
+        }
+        
+        # Only add calendar if it exists (ForeignKey can be None)
+        if calendar is not None:
+            defaults_dict["calendar"] = calendar
+        
         appointment, created = Appointment.objects.update_or_create(
             ghl_appointment_id=ghl_appointment_id,
-            defaults={
-                "location_id": location_id or appointment_data.get("locationId", ""),
-                "title": appointment_data.get("title"),
-                "address": appointment_data.get("address"),
-                "calendar_id": appointment_data.get("calendarId"),
-                "appointment_status": appointment_data.get("appointmentStatus"),
-                "source": appointment_data.get("source"),
-                "notes": appointment_data.get("notes"),
-                "ghl_contact_id": appointment_data.get("contactId"),
-                "group_id": appointment_data.get("groupId"),
-                "ghl_assigned_user_id": appointment_data.get("assignedUserId"),
-                "start_time": start_time,
-                "end_time": end_time,
-                "date_added": date_added,
-                "date_updated": date_updated,
-                "users_ghl_ids": appointment_data.get("users", []),
-                "created_from_backend": False,  # This is from GHL webhook
-            }
+            defaults=defaults_dict
         )
     
     # Set flag to prevent sync back to GHL (this is from GHL webhook)
@@ -886,3 +911,110 @@ def delete_appointment_from_ghl_webhook(appointment_data: Dict[str, Any]) -> boo
     except Exception as e:
         print(f"❌ [WEBHOOK DELETE] Error deleting appointment {ghl_appointment_id}: {str(e)}")
         return False
+
+
+def sync_calendars_from_ghl(location_id: str = None, access_token: str = None) -> List[Dict[str, Any]]:
+    """
+    Fetch calendars from GoHighLevel API and sync them to the database.
+    
+    Args:
+        location_id (str, optional): The location ID for the subaccount. If not provided, 
+                                     will use the first GHLAuthCredentials location_id.
+        access_token (str, optional): Bearer token for authentication. If not provided,
+                                     will fetch from GHLAuthCredentials.
+        
+    Returns:
+        List[Dict]: List of synced calendar data with status information
+    """
+    try:
+        # Get credentials if not provided
+        credentials = None
+        if location_id:
+            credentials = GHLAuthCredentials.objects.filter(location_id=location_id).first()
+        else:
+            credentials = GHLAuthCredentials.objects.first()
+        
+        if not credentials:
+            print("❌ [CALENDAR SYNC] No GHLAuthCredentials found in DB.")
+            return []
+        
+        access_token = access_token or credentials.access_token
+        location_id = location_id or credentials.location_id
+        
+        if not access_token or not location_id:
+            print("❌ [CALENDAR SYNC] Missing access_token or location_id.")
+            return []
+        
+        # Make API call to fetch calendars
+        base_url = "https://services.leadconnectorhq.com/calendars/"
+        headers = {
+            "Accept": "application/json",
+            "Authorization": f"Bearer {access_token}",
+            "Version": "2021-04-15"
+        }
+        
+        params = {
+            "locationId": location_id
+        }
+        
+        print(f"🔹 [CALENDAR SYNC] Fetching calendars for location_id: {location_id}")
+        response = requests.get(base_url, headers=headers, params=params)
+        
+        if response.status_code != 200:
+            print(f"❌ [CALENDAR SYNC] Error Response: {response.status_code}")
+            print(f"❌ [CALENDAR SYNC] Error Details: {response.text}")
+            return []
+        
+        data = response.json()
+        calendars = data.get("calendars", [])
+        
+        if not calendars:
+            print("⚠️ [CALENDAR SYNC] No calendars found in API response.")
+            return []
+        
+        print(f"✅ [CALENDAR SYNC] Found {len(calendars)} calendars in API response.")
+        
+        synced_calendars = []
+        
+        # Sync each calendar to database
+        for calendar_data in calendars:
+            try:
+                ghl_calendar_id = calendar_data.get("id")
+                if not ghl_calendar_id:
+                    print("⚠️ [CALENDAR SYNC] Calendar missing ID, skipping...")
+                    continue
+                
+                # Extract only the fields we need
+                calendar_obj, created = Calendar.objects.update_or_create(
+                    ghl_calendar_id=ghl_calendar_id,
+                    defaults={
+                        "account": credentials,
+                        "name": calendar_data.get("name", ""),
+                        "description": calendar_data.get("description", ""),
+                        "widget_type": calendar_data.get("widgetType", ""),
+                        "calendar_type": calendar_data.get("calendarType", ""),
+                        "widget_slug": calendar_data.get("widgetSlug", ""),
+                        "group_id": calendar_data.get("groupId", "") or None,
+                    }
+                )
+                
+                action = "Created" if created else "Updated"
+                print(f"✅ [CALENDAR SYNC] {action} calendar: {calendar_obj.name} ({ghl_calendar_id})")
+                
+                synced_calendars.append({
+                    "id": ghl_calendar_id,
+                    "name": calendar_obj.name,
+                    "status": action,
+                    "created": created
+                })
+                
+            except Exception as e:
+                print(f"❌ [CALENDAR SYNC] Error syncing calendar {calendar_data.get('id', 'unknown')}: {str(e)}")
+                continue
+        
+        print(f"✅ [CALENDAR SYNC] Successfully synced {len(synced_calendars)} calendars.")
+        return synced_calendars
+        
+    except Exception as e:
+        print(f"❌ [CALENDAR SYNC] Error in sync_calendars_from_ghl: {str(e)}")
+        return []
