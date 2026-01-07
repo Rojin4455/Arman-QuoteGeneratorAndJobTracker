@@ -69,93 +69,93 @@ from service_app.models import Appointment
 #         create_ghl_appointment_from_job(instance)
 
 
-# @receiver(post_save, sender=Job)
-# def _trigger_invoice_on_completion(sender, instance, created, **kwargs):
-#     print(f"🔔 [SIGNAL] post_save triggered | job_id={instance.id} | created={created}")
+@receiver(post_save, sender=Job)
+def _trigger_invoice_on_completion(sender, instance, created, **kwargs):
+    print(f"🔔 [SIGNAL] post_save triggered | job_id={instance.id} | created={created}")
 
-#     if created:
-#         print("🆕 Job was just created — skipping completion logic")
-#         return
+    if created:
+        print("🆕 Job was just created — skipping completion logic")
+        return
 
-#     previous_status = getattr(instance, "_previous_status", None)
-#     print(f"📊 Job status check | previous={previous_status} | current={instance.status}")
+    previous_status = getattr(instance, "_previous_status", None)
+    print(f"📊 Job status check | previous={previous_status} | current={instance.status}")
 
-#     # --------------------------------------------------
-#     # Only act when job transitions to 'completed'
-#     # --------------------------------------------------
-#     if instance.status == 'completed' and previous_status != 'completed':
-#         print(f"✅ Job transitioned to COMPLETED | job_id={instance.id}")
+    # --------------------------------------------------
+    # Only act when job transitions to 'completed'
+    # --------------------------------------------------
+    if instance.status == 'completed' and previous_status != 'completed':
+        print(f"✅ Job transitioned to COMPLETED | job_id={instance.id}")
 
-#         # --------------------------------------------------
-#         # Prevent duplicate processing
-#         # --------------------------------------------------
-#         if instance.completion_processed:
-#             print(
-#                 f"⚠️ Completion already processed — skipping | "
-#                 f"job_id={instance.id}"
-#             )
-#             return
+        # --------------------------------------------------
+        # Prevent duplicate processing
+        # --------------------------------------------------
+        if instance.completion_processed:
+            print(
+                f"⚠️ Completion already processed — skipping | "
+                f"job_id={instance.id}"
+            )
+            return
 
-#         # --------------------------------------------------
-#         # Resolve location_id
-#         # --------------------------------------------------
-#         location_id = "b8qvo7VooP3JD3dIZU42"
-#         try:
-#             print("🔍 Fetching job with submission/contact for location_id")
-#             job_with_relations = (
-#                 Job.objects
-#                 .select_related('submission__contact')
-#                 .get(id=instance.id)
-#             )
+        # --------------------------------------------------
+        # Resolve location_id
+        # --------------------------------------------------
+        location_id = "b8qvo7VooP3JD3dIZU42"
+        try:
+            print("🔍 Fetching job with submission/contact for location_id")
+            job_with_relations = (
+                Job.objects
+                .select_related('submission__contact')
+                .get(id=instance.id)
+            )
 
-#             if job_with_relations.submission and job_with_relations.submission.contact:
-#                 location_id = job_with_relations.submission.contact.location_id
-#                 print(f"📍 location_id resolved: {location_id}")
-#             else:
-#                 print("⚠️ No submission/contact found for job")
+            if job_with_relations.submission and job_with_relations.submission.contact:
+                location_id = job_with_relations.submission.contact.location_id
+                print(f"📍 location_id resolved: {location_id}")
+            else:
+                print("⚠️ No submission/contact found for job")
 
-#         except Job.DoesNotExist:
-#             print("❌ Job not found while resolving location_id")
+        except Job.DoesNotExist:
+            print("❌ Job not found while resolving location_id")
 
-#         # --------------------------------------------------
-#         # Decide which async task to trigger
-#         # --------------------------------------------------
-#         REQUIRED_LOCATION_ID = "b8qvo7VooP3JD3dIZU42"
-#         print(
-#             f"🔎 Evaluating routing | "
-#             f"location_id={location_id} | required={REQUIRED_LOCATION_ID}"
-#         )
+        # --------------------------------------------------
+        # Decide which async task to trigger
+        # --------------------------------------------------
+        REQUIRED_LOCATION_ID = "b8qvo7VooP3JD3dIZU42"
+        print(
+            f"🔎 Evaluating routing | "
+            f"location_id={location_id} | required={REQUIRED_LOCATION_ID}"
+        )
 
-#         if location_id == REQUIRED_LOCATION_ID:
-#             print(
-#                 f"🌐 Routing to EXTERNAL WEBHOOK | "
-#                 f"job_id={instance.id}"
-#             )
-#             from .tasks import send_job_completion_webhook
-#             send_job_completion_webhook.delay(str(instance.id))
-#         else:
-#             print(
-#                 f"🧾 Routing to INVOICE HANDLER | "
-#                 f"job_id={instance.id}"
-#             )
-#             handle_completed_job_invoice.delay(str(instance.id))
+        if location_id == REQUIRED_LOCATION_ID:
+            print(
+                f"🌐 Routing to EXTERNAL WEBHOOK | "
+                f"job_id={instance.id}"
+            )
+            from .tasks import send_job_completion_webhook
+            send_job_completion_webhook.delay(str(instance.id))
+        else:
+            print(
+                f"🧾 Routing to INVOICE HANDLER | "
+                f"job_id={instance.id}"
+            )
+            handle_completed_job_invoice.delay(str(instance.id))
 
-#         # --------------------------------------------------
-#         # Mark completion as processed
-#         # --------------------------------------------------
-#         print(
-#             f"🧷 Marking job as completion_processed=True | "
-#             f"job_id={instance.id}"
-#         )
+        # --------------------------------------------------
+        # Mark completion as processed
+        # --------------------------------------------------
+        print(
+            f"🧷 Marking job as completion_processed=True | "
+            f"job_id={instance.id}"
+        )
 
-#         instance.completion_processed = True
-#         Job.objects.filter(id=instance.id).update(completion_processed=True)
+        instance.completion_processed = True
+        Job.objects.filter(id=instance.id).update(completion_processed=True)
 
-#     else:
-#         print(
-#             f"No action taken | "
-#             f"status={instance.status} | previous={previous_status}"
-#         )
+    else:
+        print(
+            f"No action taken | "
+            f"status={instance.status} | previous={previous_status}"
+        )
 
 
 @receiver(post_save, sender=Job)
