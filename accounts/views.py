@@ -81,8 +81,8 @@ def tokens(request):
 
             }
         )
-        # fetch_all_contacts_task.delay(response_data.get("locationId"), response_data.get("access_token"))
-        # sync_calendars_from_ghl_task.delay(response_data.get("locationId"), response_data.get("access_token"))
+        fetch_all_contacts_task.delay(response_data.get("locationId"), response_data.get("access_token"))
+        sync_calendars_from_ghl_task.delay(response_data.get("locationId"), response_data.get("access_token"))
         return JsonResponse({
             "message": "Authentication successful",
             "access_token": response_data.get('access_token'),
