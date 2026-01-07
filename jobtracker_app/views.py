@@ -477,7 +477,7 @@ class AppointmentViewSet(viewsets.ModelViewSet):
         ).prefetch_related('users').all()
         
         # Exclude appointments with calendar name "Reccuring Service Calendar"
-        qs = qs.exclude(calendar__name="Reccuring Service Calendar")
+        # qs = qs.exclude(calendar__name="Reccuring Service Calendar")
         
         is_admin = getattr(user, 'is_admin', False)
         

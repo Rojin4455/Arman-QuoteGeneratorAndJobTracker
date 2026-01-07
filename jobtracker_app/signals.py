@@ -35,127 +35,127 @@ def _store_previous_status(sender, instance, **kwargs):
 
 from service_app.models import Appointment
 
-@receiver(post_save, sender=Job)
-def _create_appointment_on_confirmed(sender, instance, created, **kwargs):
-    """
-    Create appointment in GHL when job status becomes 'confirmed'.
-    This only happens once when status changes to 'confirmed'.
-    """
-    # Check if appointment already exists for this job
-    try:
-        existing_appointment = instance.appointment
-        if existing_appointment:
-            print(f"⚠️ [APPOINTMENT] Appointment already exists for job {instance.id}: {existing_appointment.ghl_appointment_id}")
-            return
-    except Appointment.DoesNotExist:
-        pass  # No appointment exists, which is fine - we can create one
+# @receiver(post_save, sender=Job)
+# def _create_appointment_on_confirmed(sender, instance, created, **kwargs):
+#     """
+#     Create appointment in GHL when job status becomes 'confirmed'.
+#     This only happens once when status changes to 'confirmed'.
+#     """
+#     # Check if appointment already exists for this job
+#     try:
+#         existing_appointment = instance.appointment
+#         if existing_appointment:
+#             print(f"⚠️ [APPOINTMENT] Appointment already exists for job {instance.id}: {existing_appointment.ghl_appointment_id}")
+#             return
+#     except Appointment.DoesNotExist:
+#         pass  # No appointment exists, which is fine - we can create one
     
-    if created:
-        # If job is created with 'confirmed' status directly
-        if instance.status == 'confirmed':
-            print(f"🆕 [APPOINTMENT] Job created with confirmed status | job_id={instance.id}")
-            from .ghl_appointment_sync import create_ghl_appointment_from_job
-            create_ghl_appointment_from_job(instance)
-        return
+#     if created:
+#         # If job is created with 'confirmed' status directly
+#         if instance.status == 'confirmed':
+#             print(f"🆕 [APPOINTMENT] Job created with confirmed status | job_id={instance.id}")
+#             from .ghl_appointment_sync import create_ghl_appointment_from_job
+#             create_ghl_appointment_from_job(instance)
+#         return
     
-    previous_status = getattr(instance, "_previous_status", None)
+#     previous_status = getattr(instance, "_previous_status", None)
     
-    # Only act when job status transitions to 'confirmed'
-    if instance.status == 'confirmed' and previous_status != 'confirmed':
-        print(f"✅ [APPOINTMENT] Job transitioned to CONFIRMED | job_id={instance.id} | previous={previous_status}")
+#     # Only act when job status transitions to 'confirmed'
+#     if instance.status == 'confirmed' and previous_status != 'confirmed':
+#         print(f"✅ [APPOINTMENT] Job transitioned to CONFIRMED | job_id={instance.id} | previous={previous_status}")
         
-        # Create appointment in GHL
-        from .ghl_appointment_sync import create_ghl_appointment_from_job
-        create_ghl_appointment_from_job(instance)
+#         # Create appointment in GHL
+#         from .ghl_appointment_sync import create_ghl_appointment_from_job
+#         create_ghl_appointment_from_job(instance)
 
 
-@receiver(post_save, sender=Job)
-def _trigger_invoice_on_completion(sender, instance, created, **kwargs):
-    print(f"🔔 [SIGNAL] post_save triggered | job_id={instance.id} | created={created}")
+# @receiver(post_save, sender=Job)
+# def _trigger_invoice_on_completion(sender, instance, created, **kwargs):
+#     print(f"🔔 [SIGNAL] post_save triggered | job_id={instance.id} | created={created}")
 
-    if created:
-        print("🆕 Job was just created — skipping completion logic")
-        return
+#     if created:
+#         print("🆕 Job was just created — skipping completion logic")
+#         return
 
-    previous_status = getattr(instance, "_previous_status", None)
-    print(f"📊 Job status check | previous={previous_status} | current={instance.status}")
+#     previous_status = getattr(instance, "_previous_status", None)
+#     print(f"📊 Job status check | previous={previous_status} | current={instance.status}")
 
-    # --------------------------------------------------
-    # Only act when job transitions to 'completed'
-    # --------------------------------------------------
-    if instance.status == 'completed' and previous_status != 'completed':
-        print(f"✅ Job transitioned to COMPLETED | job_id={instance.id}")
+#     # --------------------------------------------------
+#     # Only act when job transitions to 'completed'
+#     # --------------------------------------------------
+#     if instance.status == 'completed' and previous_status != 'completed':
+#         print(f"✅ Job transitioned to COMPLETED | job_id={instance.id}")
 
-        # --------------------------------------------------
-        # Prevent duplicate processing
-        # --------------------------------------------------
-        if instance.completion_processed:
-            print(
-                f"⚠️ Completion already processed — skipping | "
-                f"job_id={instance.id}"
-            )
-            return
+#         # --------------------------------------------------
+#         # Prevent duplicate processing
+#         # --------------------------------------------------
+#         if instance.completion_processed:
+#             print(
+#                 f"⚠️ Completion already processed — skipping | "
+#                 f"job_id={instance.id}"
+#             )
+#             return
 
-        # --------------------------------------------------
-        # Resolve location_id
-        # --------------------------------------------------
-        location_id = "b8qvo7VooP3JD3dIZU42"
-        try:
-            print("🔍 Fetching job with submission/contact for location_id")
-            job_with_relations = (
-                Job.objects
-                .select_related('submission__contact')
-                .get(id=instance.id)
-            )
+#         # --------------------------------------------------
+#         # Resolve location_id
+#         # --------------------------------------------------
+#         location_id = "b8qvo7VooP3JD3dIZU42"
+#         try:
+#             print("🔍 Fetching job with submission/contact for location_id")
+#             job_with_relations = (
+#                 Job.objects
+#                 .select_related('submission__contact')
+#                 .get(id=instance.id)
+#             )
 
-            if job_with_relations.submission and job_with_relations.submission.contact:
-                location_id = job_with_relations.submission.contact.location_id
-                print(f"📍 location_id resolved: {location_id}")
-            else:
-                print("⚠️ No submission/contact found for job")
+#             if job_with_relations.submission and job_with_relations.submission.contact:
+#                 location_id = job_with_relations.submission.contact.location_id
+#                 print(f"📍 location_id resolved: {location_id}")
+#             else:
+#                 print("⚠️ No submission/contact found for job")
 
-        except Job.DoesNotExist:
-            print("❌ Job not found while resolving location_id")
+#         except Job.DoesNotExist:
+#             print("❌ Job not found while resolving location_id")
 
-        # --------------------------------------------------
-        # Decide which async task to trigger
-        # --------------------------------------------------
-        REQUIRED_LOCATION_ID = "b8qvo7VooP3JD3dIZU42"
-        print(
-            f"🔎 Evaluating routing | "
-            f"location_id={location_id} | required={REQUIRED_LOCATION_ID}"
-        )
+#         # --------------------------------------------------
+#         # Decide which async task to trigger
+#         # --------------------------------------------------
+#         REQUIRED_LOCATION_ID = "b8qvo7VooP3JD3dIZU42"
+#         print(
+#             f"🔎 Evaluating routing | "
+#             f"location_id={location_id} | required={REQUIRED_LOCATION_ID}"
+#         )
 
-        if location_id == REQUIRED_LOCATION_ID:
-            print(
-                f"🌐 Routing to EXTERNAL WEBHOOK | "
-                f"job_id={instance.id}"
-            )
-            from .tasks import send_job_completion_webhook
-            send_job_completion_webhook.delay(str(instance.id))
-        else:
-            print(
-                f"🧾 Routing to INVOICE HANDLER | "
-                f"job_id={instance.id}"
-            )
-            handle_completed_job_invoice.delay(str(instance.id))
+#         if location_id == REQUIRED_LOCATION_ID:
+#             print(
+#                 f"🌐 Routing to EXTERNAL WEBHOOK | "
+#                 f"job_id={instance.id}"
+#             )
+#             from .tasks import send_job_completion_webhook
+#             send_job_completion_webhook.delay(str(instance.id))
+#         else:
+#             print(
+#                 f"🧾 Routing to INVOICE HANDLER | "
+#                 f"job_id={instance.id}"
+#             )
+#             handle_completed_job_invoice.delay(str(instance.id))
 
-        # --------------------------------------------------
-        # Mark completion as processed
-        # --------------------------------------------------
-        print(
-            f"🧷 Marking job as completion_processed=True | "
-            f"job_id={instance.id}"
-        )
+#         # --------------------------------------------------
+#         # Mark completion as processed
+#         # --------------------------------------------------
+#         print(
+#             f"🧷 Marking job as completion_processed=True | "
+#             f"job_id={instance.id}"
+#         )
 
-        instance.completion_processed = True
-        Job.objects.filter(id=instance.id).update(completion_processed=True)
+#         instance.completion_processed = True
+#         Job.objects.filter(id=instance.id).update(completion_processed=True)
 
-    else:
-        print(
-            f"No action taken | "
-            f"status={instance.status} | previous={previous_status}"
-        )
+#     else:
+#         print(
+#             f"No action taken | "
+#             f"status={instance.status} | previous={previous_status}"
+#         )
 
 
 @receiver(post_save, sender=Job)
