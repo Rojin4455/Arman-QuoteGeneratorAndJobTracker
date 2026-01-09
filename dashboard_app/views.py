@@ -422,19 +422,24 @@ class InvoiceViewSet(viewsets.ModelViewSet):
         accepted_estimates = submissions_qs.filter(status='accepted')
         accepted_estimate_total_value = accepted_estimates.aggregate(Sum('final_total'))['final_total__sum'] or 0
         
-        # 5. Scheduled Job (upcoming jobs, excluding to_convert and cancelled)
+        # 5. Estimate to Convert (jobs with status: to_convert)
         jobs_qs = Job.objects.all()
         if location_filter:
             # Jobs don't have location_id directly, filter through submissions
             jobs_qs = jobs_qs.filter(submission__contact__location_id=location_filter['location_id'])
         
+        estimate_to_convert_jobs_qs = jobs_qs.filter(status='to_convert')
+        estimate_to_convert_count = estimate_to_convert_jobs_qs.count()
+        estimate_to_convert_total_value = estimate_to_convert_jobs_qs.aggregate(Sum('total_price'))['total_price__sum'] or 0
+        
+        # 6. Scheduled Job (upcoming jobs, excluding to_convert and cancelled)
         scheduled_jobs_qs = jobs_qs.exclude(status__in=['to_convert', 'cancelled']).filter(
             scheduled_at__gte=now
         )
         scheduled_job_count = scheduled_jobs_qs.count()
         scheduled_job_total_value = scheduled_jobs_qs.aggregate(Sum('total_price'))['total_price__sum'] or 0
         
-        # 6. Closed Jobs (status: completed)
+        # 7. Closed Jobs (status: completed)
         closed_jobs_qs = jobs_qs.filter(status='completed')
         closed_job_count = closed_jobs_qs.count()
         closed_job_total_value = closed_jobs_qs.aggregate(Sum('total_price'))['total_price__sum'] or 0
@@ -474,6 +479,11 @@ class InvoiceViewSet(viewsets.ModelViewSet):
                     'count': accepted_estimate_count,
                     'total_value': float(accepted_estimate_total_value),
                     'label': 'Accepted Estimates'
+                },
+                'estimate_to_convert': {
+                    'count': estimate_to_convert_count,
+                    'total_value': float(estimate_to_convert_total_value),
+                    'label': 'Estimate to Convert'
                 },
                 'scheduled_jobs': {
                     'count': scheduled_job_count,
@@ -534,20 +544,58 @@ class InvoiceViewSet(viewsets.ModelViewSet):
             .order_by('week')
         )
         
-        weekly_average = 0
+        # Calculate forecast using recent data and trend
+        weekly_base = 0
+        weekly_trend = 0
+        weekly_count_base = 0
+        weekly_count_trend = 0
         if weekly_data:
-            weekly_totals = [item['total_revenue'] for item in weekly_data]
-            weekly_average = sum(weekly_totals) / len(weekly_totals)
+            weekly_totals = [float(item['total_revenue']) for item in weekly_data]
+            weekly_counts = [item['invoice_count'] for item in weekly_data]
+            
+            # Use recent 8 weeks for base average (or all if less than 8)
+            recent_weeks = min(8, len(weekly_totals))
+            recent_totals = weekly_totals[-recent_weeks:] if len(weekly_totals) >= recent_weeks else weekly_totals
+            recent_counts = weekly_counts[-recent_weeks:] if len(weekly_counts) >= recent_weeks else weekly_counts
+            weekly_base = sum(recent_totals) / len(recent_totals) if recent_totals else 0
+            weekly_count_base = sum(recent_counts) / len(recent_counts) if recent_counts else 0
+            
+            # Calculate revenue trend (average of last 4 weeks vs previous 4 weeks)
+            if len(weekly_totals) >= 8:
+                recent_4_avg = sum(weekly_totals[-4:]) / 4
+                previous_4_avg = sum(weekly_totals[-8:-4]) / 4
+                weekly_trend = (recent_4_avg - previous_4_avg) / 4 if previous_4_avg > 0 else 0
+                
+                # Calculate invoice count trend
+                recent_4_count_avg = sum(weekly_counts[-4:]) / 4
+                previous_4_count_avg = sum(weekly_counts[-8:-4]) / 4
+                weekly_count_trend = (recent_4_count_avg - previous_4_count_avg) / 4 if previous_4_count_avg > 0 else 0
+            elif len(weekly_totals) >= 4:
+                # If less than 8 weeks, use last 2 vs previous 2
+                recent_2_avg = sum(weekly_totals[-2:]) / 2
+                previous_2_avg = sum(weekly_totals[-4:-2]) / 2
+                weekly_trend = (recent_2_avg - previous_2_avg) / 2 if previous_2_avg > 0 else 0
+                
+                recent_2_count_avg = sum(weekly_counts[-2:]) / 2
+                previous_2_count_avg = sum(weekly_counts[-4:-2]) / 2
+                weekly_count_trend = (recent_2_count_avg - previous_2_count_avg) / 2 if previous_2_count_avg > 0 else 0
         
-        # Generate next 8 weeks forecast
+        # Generate next 8 weeks forecast with trend
         next_8_weeks = []
         for i in range(1, 9):
             week_start = now + timedelta(weeks=i)
+            # Apply trend: each week grows/declines by trend amount
+            forecasted_revenue = weekly_base + (weekly_trend * i)
+            forecasted_revenue = max(0, forecasted_revenue)  # Ensure non-negative
+            
+            forecasted_count = weekly_count_base + (weekly_count_trend * i)
+            forecasted_count = max(0, forecasted_count)  # Ensure non-negative
+            
             next_8_weeks.append({
                 'week': week_start.isoformat(),
                 'week_number': i,
-                'forecasted_revenue': float(weekly_average),
-                'forecasted_invoice_count': len(weekly_data) > 0 and round(sum([item['invoice_count'] for item in weekly_data]) / len(weekly_data)) or 0
+                'forecasted_revenue': round(float(forecasted_revenue), 2),
+                'forecasted_invoice_count': round(forecasted_count) if forecasted_count > 0 else 0
             })
         
         # Monthly Forecast
@@ -558,12 +606,43 @@ class InvoiceViewSet(viewsets.ModelViewSet):
             .order_by('month')
         )
         
-        monthly_average = 0
+        # Calculate forecast using recent data and trend
+        monthly_base = 0
+        monthly_trend = 0
+        monthly_count_base = 0
+        monthly_count_trend = 0
         if monthly_data:
-            monthly_totals = [item['total_revenue'] for item in monthly_data]
-            monthly_average = sum(monthly_totals) / len(monthly_totals)
+            monthly_totals = [float(item['total_revenue']) for item in monthly_data]
+            monthly_counts = [item['invoice_count'] for item in monthly_data]
+            
+            # Use recent 6 months for base average (or all if less than 6)
+            recent_months = min(6, len(monthly_totals))
+            recent_totals = monthly_totals[-recent_months:] if len(monthly_totals) >= recent_months else monthly_totals
+            recent_counts = monthly_counts[-recent_months:] if len(monthly_counts) >= recent_months else monthly_counts
+            monthly_base = sum(recent_totals) / len(recent_totals) if recent_totals else 0
+            monthly_count_base = sum(recent_counts) / len(recent_counts) if recent_counts else 0
+            
+            # Calculate revenue trend (average of last 3 months vs previous 3 months)
+            if len(monthly_totals) >= 6:
+                recent_3_avg = sum(monthly_totals[-3:]) / 3
+                previous_3_avg = sum(monthly_totals[-6:-3]) / 3
+                monthly_trend = (recent_3_avg - previous_3_avg) / 3 if previous_3_avg > 0 else 0
+                
+                # Calculate invoice count trend
+                recent_3_count_avg = sum(monthly_counts[-3:]) / 3
+                previous_3_count_avg = sum(monthly_counts[-6:-3]) / 3
+                monthly_count_trend = (recent_3_count_avg - previous_3_count_avg) / 3 if previous_3_count_avg > 0 else 0
+            elif len(monthly_totals) >= 3:
+                # If less than 6 months, use last 2 vs previous 1
+                recent_2_avg = sum(monthly_totals[-2:]) / 2
+                previous_avg = monthly_totals[-3] if len(monthly_totals) >= 3 else monthly_totals[0]
+                monthly_trend = (recent_2_avg - previous_avg) / 2 if previous_avg > 0 else 0
+                
+                recent_2_count_avg = sum(monthly_counts[-2:]) / 2
+                previous_count_avg = monthly_counts[-3] if len(monthly_counts) >= 3 else monthly_counts[0]
+                monthly_count_trend = (recent_2_count_avg - previous_count_avg) / 2 if previous_count_avg > 0 else 0
         
-        # Generate next 12 months forecast
+        # Generate next 12 months forecast with trend
         next_12_months = []
         for i in range(1, 13):
             month = now.month + i
@@ -573,15 +652,23 @@ class InvoiceViewSet(viewsets.ModelViewSet):
                 year += 1
             month_start = datetime(year, month, 1, tzinfo=now.tzinfo)
             
+            # Apply trend: each month grows/declines by trend amount
+            forecasted_revenue = monthly_base + (monthly_trend * i)
+            forecasted_revenue = max(0, forecasted_revenue)  # Ensure non-negative
+            
+            forecasted_count = monthly_count_base + (monthly_count_trend * i)
+            forecasted_count = max(0, forecasted_count)  # Ensure non-negative
+            
             next_12_months.append({
                 'month': month_start.isoformat(),
                 'month_number': i,
-                'forecasted_revenue': float(monthly_average),
-                'forecasted_invoice_count': len(monthly_data) > 0 and round(sum([item['invoice_count'] for item in monthly_data]) / len(monthly_data)) or 0
+                'forecasted_revenue': round(float(forecasted_revenue), 2),
+                'forecasted_invoice_count': round(forecasted_count) if forecasted_count > 0 else 0
             })
         
-        # Quarterly Forecast (3 months average)
-        quarterly_average = monthly_average * 3
+        # Quarterly Forecast (based on monthly forecast, sum 3 months)
+        quarterly_base = monthly_base * 3
+        quarterly_trend = monthly_trend * 3
         next_4_quarters = []
         current_quarter = ((now.month - 1) // 3) + 1
         for i in range(1, 5):
@@ -593,25 +680,61 @@ class InvoiceViewSet(viewsets.ModelViewSet):
             quarter_start_month = (target_quarter - 1) * 3 + 1
             quarter_start = datetime(target_year, quarter_start_month, 1, tzinfo=now.tzinfo)
             
+            # Calculate which months (relative to now) this quarter spans
+            # Sum the forecasted revenue and counts for the 3 months in this quarter
+            quarter_revenue = 0
+            quarter_count = 0
+            for month_in_quarter in range(3):
+                # Calculate the month index relative to now (1 = next month, 2 = month after, etc.)
+                months_from_now = ((target_year - now.year) * 12) + (quarter_start_month + month_in_quarter - now.month)
+                if months_from_now > 0:
+                    forecasted_revenue = monthly_base + (monthly_trend * months_from_now)
+                    forecasted_revenue = max(0, forecasted_revenue)
+                    quarter_revenue += forecasted_revenue
+                    
+                    forecasted_count = monthly_count_base + (monthly_count_trend * months_from_now)
+                    forecasted_count = max(0, forecasted_count)
+                    quarter_count += forecasted_count
+            
+            quarter_revenue = max(0, quarter_revenue) if quarter_revenue > 0 else (quarterly_base + (quarterly_trend * i))
+            quarter_revenue = max(0, quarter_revenue)
+            
             next_4_quarters.append({
                 'quarter': quarter_start.isoformat(),
                 'quarter_number': i,
                 'quarter_label': f'Q{target_quarter} {target_year}',
-                'forecasted_revenue': float(quarterly_average),
-                'forecasted_invoice_count': len(monthly_data) > 0 and round(sum([item['invoice_count'] for item in monthly_data]) / len(monthly_data) * 3) or 0
+                'forecasted_revenue': round(float(quarter_revenue), 2),
+                'forecasted_invoice_count': round(quarter_count) if quarter_count > 0 else 0
             })
         
-        # Yearly Forecast
-        yearly_average = monthly_average * 12
+        # Yearly Forecast (sum 12 months from monthly forecast)
+        yearly_base = monthly_base * 12
+        yearly_trend = monthly_trend * 12
         next_2_years = []
         for i in range(1, 3):
             year_start = datetime(now.year + i, 1, 1, tzinfo=now.tzinfo)
+            
+            # Sum 12 months for the year
+            year_revenue = 0
+            year_count = 0
+            for month_offset in range(1, 13):
+                month_idx = ((i - 1) * 12) + month_offset
+                forecasted_revenue = monthly_base + (monthly_trend * month_idx)
+                forecasted_revenue = max(0, forecasted_revenue)
+                year_revenue += forecasted_revenue
+                
+                forecasted_count = monthly_count_base + (monthly_count_trend * month_idx)
+                forecasted_count = max(0, forecasted_count)
+                year_count += forecasted_count
+            
+            year_revenue = max(0, year_revenue)
+            
             next_2_years.append({
                 'year': year_start.isoformat(),
                 'year_number': i,
                 'year_label': str(now.year + i),
-                'forecasted_revenue': float(yearly_average),
-                'forecasted_invoice_count': len(monthly_data) > 0 and round(sum([item['invoice_count'] for item in monthly_data]) / len(monthly_data) * 12) or 0
+                'forecasted_revenue': round(float(year_revenue), 2),
+                'forecasted_invoice_count': round(year_count) if year_count > 0 else 0
             })
         
         # Historical summary
@@ -628,24 +751,28 @@ class InvoiceViewSet(viewsets.ModelViewSet):
             },
             'forecasts': {
                 'weekly': {
-                    'average_revenue_per_week': float(weekly_average),
+                    'base_revenue_per_week': round(float(weekly_base), 2),
+                    'trend_per_week': round(float(weekly_trend), 2),
                     'periods': next_8_weeks,
-                    'total_forecasted_revenue_8_weeks': float(weekly_average * 8)
+                    'total_forecasted_revenue_8_weeks': round(sum([p['forecasted_revenue'] for p in next_8_weeks]), 2)
                 },
                 'monthly': {
-                    'average_revenue_per_month': float(monthly_average),
+                    'base_revenue_per_month': round(float(monthly_base), 2),
+                    'trend_per_month': round(float(monthly_trend), 2),
                     'periods': next_12_months,
-                    'total_forecasted_revenue_12_months': float(monthly_average * 12)
+                    'total_forecasted_revenue_12_months': round(sum([p['forecasted_revenue'] for p in next_12_months]), 2)
                 },
                 'quarterly': {
-                    'average_revenue_per_quarter': float(quarterly_average),
+                    'base_revenue_per_quarter': round(float(quarterly_base), 2),
+                    'trend_per_quarter': round(float(quarterly_trend), 2),
                     'periods': next_4_quarters,
-                    'total_forecasted_revenue_4_quarters': float(quarterly_average * 4)
+                    'total_forecasted_revenue_4_quarters': round(sum([p['forecasted_revenue'] for p in next_4_quarters]), 2)
                 },
                 'yearly': {
-                    'average_revenue_per_year': float(yearly_average),
+                    'base_revenue_per_year': round(float(yearly_base), 2),
+                    'trend_per_year': round(float(yearly_trend), 2),
                     'periods': next_2_years,
-                    'total_forecasted_revenue_2_years': float(yearly_average * 2)
+                    'total_forecasted_revenue_2_years': round(sum([p['forecasted_revenue'] for p in next_2_years]), 2)
                 }
             },
             'historical_data_summary': {

@@ -67,13 +67,15 @@ class AppointmentCalendarSerializer(serializers.ModelSerializer):
     assigned_user_name = serializers.SerializerMethodField()
     contact_name = serializers.SerializerMethodField()
     users_count = serializers.SerializerMethodField()
+    calendar = serializers.SerializerMethodField()
+
 
     class Meta:
         model = Appointment
         fields = [
             'appointment_id', 'title', 'start_time', 'end_time', 
             'appointment_status', 'assigned_user_name', 'contact_name',
-            'address', 'notes', 'source', 'users_count'
+            'address', 'notes', 'source', 'users_count','calendar'
         ]
 
     def get_assigned_user_name(self, obj):
@@ -88,6 +90,20 @@ class AppointmentCalendarSerializer(serializers.ModelSerializer):
 
     def get_users_count(self, obj):
         return obj.users.count()
+    
+    def get_calendar(self, obj):
+        """Return full calendar information"""
+        if obj.calendar:
+            return {
+                'id': obj.calendar.ghl_calendar_id,
+                'name': obj.calendar.name,
+                'description': obj.calendar.description,
+                'widget_type': obj.calendar.widget_type,
+                'calendar_type': obj.calendar.calendar_type,
+                'widget_slug': obj.calendar.widget_slug,
+                'group_id': obj.calendar.group_id
+            }
+        return None
 
 
 class AppointmentSerializer(serializers.ModelSerializer):
