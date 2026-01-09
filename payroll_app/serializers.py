@@ -24,9 +24,9 @@ class CollaborationRateCreateSerializer(serializers.ModelSerializer):
         read_only_fields = ['id']
     
     def validate_member_count(self, value):
-        """Validate member_count is between 1 and 5"""
-        if value < 1 or value > 5:
-            raise serializers.ValidationError("member_count must be between 1 and 5")
+        """Validate member_count is between 1 and 10"""
+        if value < 1 or value > 10:
+            raise serializers.ValidationError("member_count must be between 1 and 10")
         return value
     
     def validate_percentage(self, value):
@@ -56,7 +56,8 @@ class EmployeeProfileSerializer(serializers.ModelSerializer):
         model = EmployeeProfile
         fields = [
             'id', 'user', 'user_id', 'username', 'email', 'first_name', 'last_name', 'full_name',
-            'phone', 'department', 'position', 'timezone',
+            'phone', 'address', 'date_of_birth', 'hire_date', 'emergency_contact_name', 
+            'emergency_contact_number', 'department', 'position', 'timezone',
             'pay_scale_type', 'hourly_rate', 'is_administrator', 'status','is_active',
             'collaboration_rates', 'collaboration_rates_read', 'created_at', 'updated_at'
         ]
@@ -166,9 +167,9 @@ class CollaborationRateCreateSerializer(serializers.ModelSerializer):
         read_only_fields = ['id']
     
     def validate_member_count(self, value):
-        """Validate member_count is between 1 and 5"""
-        if value < 1 or value > 5:
-            raise serializers.ValidationError("member_count must be between 1 and 5")
+        """Validate member_count is between 1 and 10"""
+        if value < 1 or value > 10:
+            raise serializers.ValidationError("member_count must be between 1 and 10")
         return value
     
     def validate_percentage(self, value):

@@ -17,6 +17,11 @@ class EmployeeProfile(models.Model):
     
     # Basic Info
     phone = models.CharField(max_length=20, blank=True, null=True)
+    address = models.TextField(blank=True, null=True)
+    date_of_birth = models.DateField(blank=True, null=True)
+    hire_date = models.DateField(blank=True, null=True)
+    emergency_contact_name = models.CharField(max_length=100, blank=True, null=True)
+    emergency_contact_number = models.CharField(max_length=20, blank=True, null=True)
     department = models.CharField(max_length=100)
     position = models.CharField(max_length=100)
     timezone = models.CharField(max_length=50, default='America/Chicago')

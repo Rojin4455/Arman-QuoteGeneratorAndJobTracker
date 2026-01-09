@@ -13,6 +13,8 @@ from datetime import datetime, timedelta, time
 from django_filters import rest_framework as filters
 
 from jobtracker_app.models import Job
+from accounts.models import Contact
+from quote_app.models import CustomerSubmission
 
 from .models import Invoice, InvoiceItem
 from .serializers import InvoiceSerializer, InvoiceDetailSerializer, InvoiceItemSerializer
@@ -370,6 +372,287 @@ class InvoiceViewSet(viewsets.ModelViewSet):
         items = invoice.items.all()
         serializer = InvoiceItemSerializer(items, many=True)
         return Response(serializer.data)
+    
+    @action(detail=False, methods=['get'])
+    def lead_funnel_report(self, request):
+        """
+        Lead Funnel Report endpoint.
+        Returns comprehensive metrics for the sales funnel including leads, estimates, and jobs.
+        """
+        user = request.user
+        location_id = request.query_params.get('location_id')
+        
+        # Apply location filter if user has location_id or if location_id is provided
+        location_filter = {}
+        if hasattr(user, 'location_id') and user.location_id:
+            location_filter['location_id'] = user.location_id
+        elif location_id:
+            location_filter['location_id'] = location_id
+        
+        now = timezone.now()
+        seven_days_ago = now - timedelta(days=7)
+        
+        # 1. New Lead Count (contacts created in last 7 days)
+        contacts_qs = Contact.objects.all()
+        if location_filter:
+            contacts_qs = contacts_qs.filter(**location_filter)
+        new_leads_count = contacts_qs.filter(
+            date_added__gte=seven_days_ago
+        ).count()
+        
+        # 2. Open Estimate (submissions with status: draft, responses_completed, packages_selected)
+        open_statuses = ['draft', 'responses_completed', 'packages_selected']
+        submissions_qs = CustomerSubmission.objects.all()
+        if location_filter:
+            # Filter by contact's location_id
+            submissions_qs = submissions_qs.filter(contact__location_id=location_filter['location_id'])
+        open_estimate_count = submissions_qs.filter(status__in=open_statuses).count()
+        
+        # Get open estimate details with total value
+        open_estimates = submissions_qs.filter(status__in=open_statuses)
+        open_estimate_total_value = open_estimates.aggregate(Sum('final_total'))['final_total__sum'] or 0
+        
+        # 3. Rejected Estimate (status: rejected)
+        rejected_estimate_count = submissions_qs.filter(status='rejected').count()
+        rejected_estimates = submissions_qs.filter(status='rejected')
+        rejected_estimate_total_value = rejected_estimates.aggregate(Sum('final_total'))['final_total__sum'] or 0
+        
+        # 4. Accepted Estimate (status: accepted)
+        accepted_estimate_count = submissions_qs.filter(status='accepted').count()
+        accepted_estimates = submissions_qs.filter(status='accepted')
+        accepted_estimate_total_value = accepted_estimates.aggregate(Sum('final_total'))['final_total__sum'] or 0
+        
+        # 5. Scheduled Job (upcoming jobs, excluding to_convert and cancelled)
+        jobs_qs = Job.objects.all()
+        if location_filter:
+            # Jobs don't have location_id directly, filter through submissions
+            jobs_qs = jobs_qs.filter(submission__contact__location_id=location_filter['location_id'])
+        
+        scheduled_jobs_qs = jobs_qs.exclude(status__in=['to_convert', 'cancelled']).filter(
+            scheduled_at__gte=now
+        )
+        scheduled_job_count = scheduled_jobs_qs.count()
+        scheduled_job_total_value = scheduled_jobs_qs.aggregate(Sum('total_price'))['total_price__sum'] or 0
+        
+        # 6. Closed Jobs (status: completed)
+        closed_jobs_qs = jobs_qs.filter(status='completed')
+        closed_job_count = closed_jobs_qs.count()
+        closed_job_total_value = closed_jobs_qs.aggregate(Sum('total_price'))['total_price__sum'] or 0
+        
+        # Additional metrics for better insights
+        # Total pipeline value (open estimates + scheduled jobs)
+        pipeline_value = float(open_estimate_total_value) + float(scheduled_job_total_value)
+        
+        # Conversion rates
+        total_estimates = open_estimate_count + rejected_estimate_count + accepted_estimate_count
+        acceptance_rate = (accepted_estimate_count / total_estimates * 100) if total_estimates > 0 else 0
+        rejection_rate = (rejected_estimate_count / total_estimates * 100) if total_estimates > 0 else 0
+        
+        return Response({
+            'report_period': {
+                'start_date': seven_days_ago.isoformat(),
+                'end_date': now.isoformat(),
+                'period_days': 7
+            },
+            'lead_funnel': {
+                'new_leads': {
+                    'count': new_leads_count,
+                    'label': 'New Leads (Last 7 Days)'
+                },
+                'open_estimates': {
+                    'count': open_estimate_count,
+                    'total_value': float(open_estimate_total_value),
+                    'label': 'Open Estimates',
+                    'statuses': open_statuses
+                },
+                'rejected_estimates': {
+                    'count': rejected_estimate_count,
+                    'total_value': float(rejected_estimate_total_value),
+                    'label': 'Rejected Estimates'
+                },
+                'accepted_estimates': {
+                    'count': accepted_estimate_count,
+                    'total_value': float(accepted_estimate_total_value),
+                    'label': 'Accepted Estimates'
+                },
+                'scheduled_jobs': {
+                    'count': scheduled_job_count,
+                    'total_value': float(scheduled_job_total_value),
+                    'label': 'Scheduled Jobs (Upcoming)'
+                },
+                'closed_jobs': {
+                    'count': closed_job_count,
+                    'total_value': float(closed_job_total_value),
+                    'label': 'Closed/Completed Jobs'
+                }
+            },
+            'summary_metrics': {
+                'pipeline_value': pipeline_value,
+                'total_pipeline_items': open_estimate_count + scheduled_job_count,
+                'acceptance_rate_percent': round(acceptance_rate, 2),
+                'rejection_rate_percent': round(rejection_rate, 2),
+                'total_revenue_closed_jobs': float(closed_job_total_value)
+            }
+        })
+    
+    @action(detail=False, methods=['get'])
+    def sales_forecasting(self, request):
+        """
+        Sales Forecasting endpoint.
+        Returns revenue forecasts for weekly, monthly, quarterly, and yearly periods
+        based on historical invoice data.
+        """
+        user = request.user
+        location_id = request.query_params.get('location_id')
+        
+        # Apply location filter
+        location_filter = {}
+        if hasattr(user, 'location_id') and user.location_id:
+            location_filter['location_id'] = user.location_id
+        elif location_id:
+            location_filter['location_id'] = location_id
+        
+        now = timezone.now()
+        
+        # Get historical invoice data (paid invoices for accurate revenue)
+        invoices_qs = Invoice.objects.filter(status='paid')
+        if location_filter:
+            invoices_qs = invoices_qs.filter(**location_filter)
+        
+        # Get historical data for the last 2 years for better forecasting
+        two_years_ago = now - timedelta(days=730)
+        historical_invoices = invoices_qs.filter(
+            created_at__gte=two_years_ago,
+            created_at__lte=now
+        ).exclude(total__isnull=True).exclude(total=0)
+        
+        # Weekly Forecast
+        weekly_data = list(
+            historical_invoices.annotate(week=TruncWeek('created_at'))
+            .values('week')
+            .annotate(total_revenue=Sum('total'), invoice_count=Count('id'))
+            .order_by('week')
+        )
+        
+        weekly_average = 0
+        if weekly_data:
+            weekly_totals = [item['total_revenue'] for item in weekly_data]
+            weekly_average = sum(weekly_totals) / len(weekly_totals)
+        
+        # Generate next 8 weeks forecast
+        next_8_weeks = []
+        for i in range(1, 9):
+            week_start = now + timedelta(weeks=i)
+            next_8_weeks.append({
+                'week': week_start.isoformat(),
+                'week_number': i,
+                'forecasted_revenue': float(weekly_average),
+                'forecasted_invoice_count': len(weekly_data) > 0 and round(sum([item['invoice_count'] for item in weekly_data]) / len(weekly_data)) or 0
+            })
+        
+        # Monthly Forecast
+        monthly_data = list(
+            historical_invoices.annotate(month=TruncMonth('created_at'))
+            .values('month')
+            .annotate(total_revenue=Sum('total'), invoice_count=Count('id'))
+            .order_by('month')
+        )
+        
+        monthly_average = 0
+        if monthly_data:
+            monthly_totals = [item['total_revenue'] for item in monthly_data]
+            monthly_average = sum(monthly_totals) / len(monthly_totals)
+        
+        # Generate next 12 months forecast
+        next_12_months = []
+        for i in range(1, 13):
+            month = now.month + i
+            year = now.year
+            while month > 12:
+                month -= 12
+                year += 1
+            month_start = datetime(year, month, 1, tzinfo=now.tzinfo)
+            
+            next_12_months.append({
+                'month': month_start.isoformat(),
+                'month_number': i,
+                'forecasted_revenue': float(monthly_average),
+                'forecasted_invoice_count': len(monthly_data) > 0 and round(sum([item['invoice_count'] for item in monthly_data]) / len(monthly_data)) or 0
+            })
+        
+        # Quarterly Forecast (3 months average)
+        quarterly_average = monthly_average * 3
+        next_4_quarters = []
+        current_quarter = ((now.month - 1) // 3) + 1
+        for i in range(1, 5):
+            target_quarter = current_quarter + i
+            target_year = now.year
+            while target_quarter > 4:
+                target_quarter -= 4
+                target_year += 1
+            quarter_start_month = (target_quarter - 1) * 3 + 1
+            quarter_start = datetime(target_year, quarter_start_month, 1, tzinfo=now.tzinfo)
+            
+            next_4_quarters.append({
+                'quarter': quarter_start.isoformat(),
+                'quarter_number': i,
+                'quarter_label': f'Q{target_quarter} {target_year}',
+                'forecasted_revenue': float(quarterly_average),
+                'forecasted_invoice_count': len(monthly_data) > 0 and round(sum([item['invoice_count'] for item in monthly_data]) / len(monthly_data) * 3) or 0
+            })
+        
+        # Yearly Forecast
+        yearly_average = monthly_average * 12
+        next_2_years = []
+        for i in range(1, 3):
+            year_start = datetime(now.year + i, 1, 1, tzinfo=now.tzinfo)
+            next_2_years.append({
+                'year': year_start.isoformat(),
+                'year_number': i,
+                'year_label': str(now.year + i),
+                'forecasted_revenue': float(yearly_average),
+                'forecasted_invoice_count': len(monthly_data) > 0 and round(sum([item['invoice_count'] for item in monthly_data]) / len(monthly_data) * 12) or 0
+            })
+        
+        # Historical summary
+        total_historical_revenue = historical_invoices.aggregate(Sum('total'))['total__sum'] or 0
+        total_historical_invoices = historical_invoices.count()
+        
+        return Response({
+            'forecast_generated_at': now.isoformat(),
+            'historical_period': {
+                'start_date': two_years_ago.isoformat(),
+                'end_date': now.isoformat(),
+                'total_revenue': float(total_historical_revenue),
+                'total_invoices': total_historical_invoices
+            },
+            'forecasts': {
+                'weekly': {
+                    'average_revenue_per_week': float(weekly_average),
+                    'periods': next_8_weeks,
+                    'total_forecasted_revenue_8_weeks': float(weekly_average * 8)
+                },
+                'monthly': {
+                    'average_revenue_per_month': float(monthly_average),
+                    'periods': next_12_months,
+                    'total_forecasted_revenue_12_months': float(monthly_average * 12)
+                },
+                'quarterly': {
+                    'average_revenue_per_quarter': float(quarterly_average),
+                    'periods': next_4_quarters,
+                    'total_forecasted_revenue_4_quarters': float(quarterly_average * 4)
+                },
+                'yearly': {
+                    'average_revenue_per_year': float(yearly_average),
+                    'periods': next_2_years,
+                    'total_forecasted_revenue_2_years': float(yearly_average * 2)
+                }
+            },
+            'historical_data_summary': {
+                'weekly_trends': weekly_data[-12:] if len(weekly_data) > 12 else weekly_data,  # Last 12 weeks
+                'monthly_trends': monthly_data[-12:] if len(monthly_data) > 12 else monthly_data  # Last 12 months
+            }
+        })
 
 
 class TechnicianWorkloadHeatmapView(APIView):
