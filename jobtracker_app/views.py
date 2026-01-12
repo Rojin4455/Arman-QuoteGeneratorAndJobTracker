@@ -366,7 +366,11 @@ class AppointmentCalendarView(APIView):
         qs = Appointment.objects.filter(
             start_time__gte=start_dt,
             start_time__lte=end_dt,
-        ).exclude(start_time__isnull=True).select_related('assigned_user', 'contact').prefetch_related('users')
+        ).exclude(start_time__isnull=True).select_related('assigned_user', 'contact', 'calendar').prefetch_related('users')
+        
+        # Exclude appointments with calendar name "Reccuring Service Calendar"
+        qs = qs.exclude(calendar__name="Reccuring Service Calendar")
+        
         print("qs: ", qs)
         user = request.user
         if not user.is_authenticated:
