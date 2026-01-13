@@ -71,7 +71,7 @@ def resolve_user_identifier(identifier):
     return None
 
 
-def apply_job_filters(queryset, request, skip_assignee_ids=False):
+def apply_job_filters(queryset, request, skip_assignee_ids=False, allow_to_convert=False):
     """
     Apply common filters to job queryset based on query parameters.
     Supports:
@@ -87,6 +87,7 @@ def apply_job_filters(queryset, request, skip_assignee_ids=False):
         queryset: The job queryset to filter
         request: The request object with query parameters
         skip_assignee_ids: If True, skip filtering by assignee_ids (useful when handled separately)
+        allow_to_convert: If True, don't exclude jobs with status "to_convert" (useful for DELETE operations)
     """
     params = request.query_params
     
@@ -97,9 +98,11 @@ def apply_job_filters(queryset, request, skip_assignee_ids=False):
         if status_list:
             queryset = queryset.filter(status__in=status_list)
     else:
-        queryset = queryset.exclude(
-            Q(status__isnull=True) | Q(status="") | Q(status="to_convert")
-        )
+        # Only exclude to_convert if not explicitly allowed
+        if not allow_to_convert:
+            queryset = queryset.exclude(
+                Q(status__isnull=True) | Q(status="") | Q(status="to_convert")
+            )
     
     # Filter by job_type (supports multiple job types)
     job_type = params.get('job_type')
@@ -190,15 +193,18 @@ class JobViewSet(viewsets.ModelViewSet):
         if not user.is_authenticated:
             return queryset.none()
 
+        # Allow to_convert jobs to be accessed for DELETE operations
+        allow_to_convert = (self.request.method == 'DELETE')
+
         if getattr(user, 'is_admin', False):
             # Apply filters for admins
-            queryset = apply_job_filters(queryset, self.request)
+            queryset = apply_job_filters(queryset, self.request, allow_to_convert=allow_to_convert)
             return queryset
 
         # Normal users: only jobs assigned to them
         queryset = queryset.filter(assignments__user=user).distinct()
         # Apply filters for normal users
-        queryset = apply_job_filters(queryset, self.request)
+        queryset = apply_job_filters(queryset, self.request, allow_to_convert=allow_to_convert)
         return queryset
 
     def get_permissions(self):
