@@ -43,6 +43,15 @@ class Job(models.Model):
         ('completed', 'Completed'),
         ('cancelled', 'Cancelled'),
     ]
+    PAYMENT_METHOD_CHOICES = [
+        ('cash', 'Cash'),
+        ('credit_card', 'Credit Card'),
+        ('debit_card', 'Debit Card'),
+        ('check', 'Check'),
+        ('bank_transfer', 'Bank Transfer'),
+        ('online_payment', 'Online Payment'),
+        ('other', 'Other'),
+    ]
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
 
@@ -88,6 +97,9 @@ class Job(models.Model):
 
     status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='pending')
     notes = models.TextField(blank=True, null=True)
+    
+    # Payment method for completed jobs
+    payment_method = models.CharField(max_length=20, choices=PAYMENT_METHOD_CHOICES, blank=True, null=True, help_text="Payment method used for this job (only for completed jobs)")
     
     # Track if completion webhook/invoice was already sent
     completion_processed = models.BooleanField(default=False, help_text="True if webhook/invoice was already sent when job was completed")
@@ -148,3 +160,22 @@ class JobOccurrence(models.Model):
     scheduled_at = models.DateTimeField()
     sequence = models.PositiveIntegerField()
     created_at = models.DateTimeField(auto_now_add=True)
+
+
+class JobImage(models.Model):
+    """Model to store images uploaded for completed jobs"""
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    job = models.ForeignKey(Job, on_delete=models.CASCADE, related_name='images')
+    image = models.ImageField(upload_to='job_images/%Y/%m/%d/')
+    caption = models.CharField(max_length=255, blank=True, null=True, help_text="Optional caption for the image")
+    uploaded_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True, related_name='uploaded_job_images')
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ['-created_at']
+        verbose_name = 'Job Image'
+        verbose_name_plural = 'Job Images'
+
+    def __str__(self):
+        return f"Image for {self.job.title or self.job.id} - {self.created_at}"

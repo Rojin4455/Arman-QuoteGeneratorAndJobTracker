@@ -1,10 +1,11 @@
 from django.urls import path, include
 from rest_framework.routers import DefaultRouter
-from .views import JobViewSet, OccurrenceListView, JobSeriesCreateView, JobBySeriesView,LocationJobListView,LocationJobDetailView,webhook_handler, AppointmentCalendarView, AppointmentViewSet
+from .views import JobViewSet, OccurrenceListView, JobSeriesCreateView, JobBySeriesView,LocationJobListView,LocationJobDetailView,webhook_handler, AppointmentCalendarView, AppointmentViewSet, JobImageViewSet
 
 router = DefaultRouter()
 router.register(r'jobs', JobViewSet, basename='job')
 router.register(r'appointments', AppointmentViewSet, basename='appointment')
+router.register(r'job-images', JobImageViewSet, basename='job-image')
 
 urlpatterns = [
     path('', include(router.urls)),

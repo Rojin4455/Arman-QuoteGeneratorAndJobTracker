@@ -1,5 +1,5 @@
 from rest_framework import serializers
-from .models import Job, JobServiceItem, JobAssignment, JobOccurrence
+from .models import Job, JobServiceItem, JobAssignment, JobOccurrence, JobImage
 from datetime import datetime, timedelta
 import calendar
 from service_app.models import User, Service, Appointment
@@ -277,7 +277,35 @@ class AppointmentSerializer(serializers.ModelSerializer):
             instance.users.set(users)
         
         return instance
+        
+class JobImageSerializer(serializers.ModelSerializer):
+    """Serializer for job images"""
+    image_url = serializers.SerializerMethodField()
+    uploaded_by_name = serializers.SerializerMethodField()
+    job_title = serializers.CharField(source='job.title', read_only=True)
 
+    class Meta:
+        model = JobImage
+        fields = [
+            'id', 'job', 'job_title', 'image', 'image_url', 'caption',
+            'uploaded_by', 'uploaded_by_name', 'created_at', 'updated_at'
+        ]
+        read_only_fields = ['id', 'uploaded_by', 'created_at', 'updated_at']
+
+    def get_image_url(self, obj):
+        """Return the full URL of the image"""
+        if obj.image:
+            request = self.context.get('request')
+            if request:
+                return request.build_absolute_uri(obj.image.url)
+            return obj.image.url
+        return None
+
+    def get_uploaded_by_name(self, obj):
+        """Return the name of the user who uploaded the image"""
+        if obj.uploaded_by:
+            return obj.uploaded_by.get_full_name() or obj.uploaded_by.username
+        return None
 
 class JobSerializer(serializers.ModelSerializer):
     items = JobServiceItemSerializer(many=True, required=False)
@@ -288,6 +316,7 @@ class JobSerializer(serializers.ModelSerializer):
     series_sequence = serializers.IntegerField(read_only=True)
     quoted_by_name = serializers.SerializerMethodField()
     slot_reserved_info = serializers.SerializerMethodField()
+    images = JobImageSerializer(many=True, read_only=True)
 
     class Meta:
         model = Job
@@ -297,9 +326,9 @@ class JobSerializer(serializers.ModelSerializer):
             'customer_name', 'customer_phone', 'customer_email', 'customer_address', 'ghl_contact_id',
             'quoted_by', 'quoted_by_name', 'created_by', 'created_by_email',
             'job_type', 'repeat_every', 'repeat_unit', 'occurrences', 'day_of_week',
-            'status', 'notes', 'items', 'assignments',
+            'status', 'notes', 'payment_method', 'items', 'assignments',
             'occurrence_count', 'occurrence_events', 'series_id', 'series_sequence',
-            'invoice_url', 'slot_reserved_info', 'created_at', 'updated_at'
+            'invoice_url', 'slot_reserved_info', 'images', 'created_at', 'updated_at'
         ]
         read_only_fields = ['id', 'created_at', 'updated_at']
 
@@ -732,3 +761,5 @@ class LocationSummarySerializer(serializers.Serializer):
     next_scheduled = serializers.DateTimeField(allow_null=True)
     service_names = serializers.ListField(child=serializers.CharField())
     job_ids = serializers.ListField(child=serializers.UUIDField())
+
+

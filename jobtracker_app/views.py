@@ -17,7 +17,7 @@ from rest_framework.response import Response
 
 from accounts.models import Webhook
 from service_app.models import User, Appointment
-from .models import Job, JobOccurrence, JobServiceItem, JobAssignment
+from .models import Job, JobOccurrence, JobServiceItem, JobAssignment, JobImage
 from .ghl_appointment_sync import delete_appointment_from_ghl
 from .serializers import (
     CalendarEventSerializer,
@@ -27,6 +27,7 @@ from .serializers import (
     OccurrenceEventSerializer,
     AppointmentCalendarSerializer,
     AppointmentSerializer,
+    JobImageSerializer,
 )
 from .tasks import handle_webhook_event
 
@@ -178,7 +179,7 @@ class IsAuthenticatedOrReadOnly(permissions.BasePermission):
 
 
 class JobViewSet(viewsets.ModelViewSet):
-    queryset = Job.objects.all().select_related('submission')
+    queryset = Job.objects.all().select_related('submission').prefetch_related('images', 'images__uploaded_by')
     serializer_class = JobSerializer
     permission_classes = [IsAuthenticatedOrReadOnly]
 
@@ -240,7 +241,9 @@ class JobViewSet(viewsets.ModelViewSet):
         # Optimize queryset with prefetch for assignments and related data
         instance = Job.objects.prefetch_related(
             'assignments__user',
-            'appointment'
+            'appointment',
+            'images',
+            'images__uploaded_by'
         ).get(pk=instance.pk)
         
         serializer = self.get_serializer(instance)
@@ -253,6 +256,44 @@ class JobViewSet(viewsets.ModelViewSet):
             return Response([], status=200)
         qs = self.get_queryset()
         serializer = self.get_serializer(qs, many=True)
+        return Response(serializer.data)
+
+    @action(detail=True, methods=['patch'], url_path='update-payment-method')
+    def update_payment_method(self, request, pk=None):
+        """
+        Update payment method for a completed job.
+        Only allows updating payment_method for jobs with status 'completed'.
+        
+        PATCH /api/jobtracker/jobs/{id}/update-payment-method/
+        Body: {"payment_method": "cash"}
+        """
+        job = self.get_object()
+        
+        # Check if job is completed
+        if job.status != 'completed':
+            return Response({
+                'detail': f'Payment method can only be updated for completed jobs. Current job status: {job.status}'
+            }, status=400)
+        
+        # Get payment_method from request data
+        payment_method = request.data.get('payment_method')
+        if not payment_method:
+            return Response({
+                'detail': 'payment_method field is required'
+            }, status=400)
+        
+        # Validate payment_method choice
+        valid_methods = [choice[0] for choice in Job.PAYMENT_METHOD_CHOICES]
+        if payment_method not in valid_methods:
+            return Response({
+                'detail': f'Invalid payment_method. Must be one of: {", ".join(valid_methods)}'
+            }, status=400)
+        
+        # Update payment method
+        job.payment_method = payment_method
+        job.save()
+        
+        serializer = self.get_serializer(job)
         return Response(serializer.data)
 
     def perform_create(self, serializer):
@@ -976,6 +1017,103 @@ class LocationJobDetailView(APIView):
         return paginator.get_paginated_response(serializer.data)
 
 
+
+
+class JobImageViewSet(viewsets.ModelViewSet):
+    """
+    ViewSet for managing job images.
+    Only allows uploading images for completed jobs.
+    
+    Permissions:
+    - Admins: Full access to all job images
+    - Normal users: Can only access images for jobs assigned to them
+    
+    Endpoints:
+    - POST /api/jobtracker/job-images/ - Upload a new image (requires job_id in request)
+    - GET /api/jobtracker/job-images/ - List all images (filter by job_id query param)
+    - GET /api/jobtracker/job-images/{id}/ - Retrieve a specific image
+    - DELETE /api/jobtracker/job-images/{id}/ - Delete an image
+    """
+    serializer_class = JobImageSerializer
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get_queryset(self):
+        """Filter queryset based on user permissions"""
+        user = self.request.user
+        
+        if not user.is_authenticated:
+            return JobImage.objects.none()
+        
+        qs = JobImage.objects.select_related('job', 'uploaded_by').all()
+        
+        # Filter by job_id if provided
+        job_id = self.request.query_params.get('job_id')
+        if job_id:
+            try:
+                job_uuid = uuid.UUID(job_id)
+                qs = qs.filter(job_id=job_uuid)
+            except (ValueError, TypeError):
+                return JobImage.objects.none()
+        
+        # Permission filtering
+        is_admin = getattr(user, 'is_admin', False)
+        if not is_admin:
+            # Normal users: only images for jobs assigned to them
+            qs = qs.filter(job__assignments__user=user).distinct()
+        
+        return qs.order_by('-created_at')
+
+    def get_serializer_context(self):
+        """Add request to serializer context for building absolute URLs"""
+        context = super().get_serializer_context()
+        context['request'] = self.request
+        return context
+
+    def perform_create(self, serializer):
+        """Validate that job is completed before allowing image upload"""
+        job_id = self.request.data.get('job')
+        if not job_id:
+            from rest_framework.exceptions import ValidationError
+            raise ValidationError({'job': 'job field is required'})
+        
+        try:
+            job = Job.objects.get(id=job_id)
+        except Job.DoesNotExist:
+            from rest_framework.exceptions import NotFound
+            raise NotFound('Job not found')
+        
+        # Check if job is completed
+        if job.status != 'completed':
+            from rest_framework.exceptions import ValidationError
+            raise ValidationError({
+                'job': f'Images can only be uploaded for completed jobs. Current job status: {job.status}'
+            })
+        
+        # Check permissions
+        user = self.request.user
+        is_admin = getattr(user, 'is_admin', False)
+        if not is_admin:
+            # Normal users: must be assigned to the job
+            if not job.assignments.filter(user=user).exists():
+                raise PermissionDenied("You do not have permission to upload images for this job.")
+        
+        # Save with uploaded_by set to current user
+        serializer.save(uploaded_by=user)
+
+    def get_object(self):
+        """Override to check permissions on individual object"""
+        obj = super().get_object()
+        user = self.request.user
+        
+        # Admins can access any image
+        if getattr(user, 'is_admin', False):
+            return obj
+        
+        # Normal users: only if assigned to the job
+        if not obj.job.assignments.filter(user=user).exists():
+            raise PermissionDenied("You do not have permission to access this image.")
+        
+        return obj
 
 
 @csrf_exempt
