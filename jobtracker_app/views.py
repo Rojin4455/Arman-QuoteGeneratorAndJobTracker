@@ -1,5 +1,6 @@
 import json
 import uuid
+import requests
 from collections import defaultdict
 from datetime import datetime, timedelta
 
@@ -15,7 +16,7 @@ from rest_framework.exceptions import PermissionDenied
 from rest_framework.pagination import PageNumberPagination
 from rest_framework.response import Response
 
-from accounts.models import Webhook
+from accounts.models import Webhook, GHLAuthCredentials, GHLCustomField, Contact
 from service_app.models import User, Appointment
 from .models import Job, JobOccurrence, JobServiceItem, JobAssignment, JobImage
 from .ghl_appointment_sync import delete_appointment_from_ghl
@@ -179,7 +180,7 @@ class IsAuthenticatedOrReadOnly(permissions.BasePermission):
 
 
 class JobViewSet(viewsets.ModelViewSet):
-    queryset = Job.objects.all().select_related('submission').prefetch_related('images', 'images__uploaded_by')
+    queryset = Job.objects.all().select_related('submission', 'contact', 'address').prefetch_related('images', 'images__uploaded_by')
     serializer_class = JobSerializer
     permission_classes = [IsAuthenticatedOrReadOnly]
 
@@ -1114,6 +1115,232 @@ class JobImageViewSet(viewsets.ModelViewSet):
             raise PermissionDenied("You do not have permission to access this image.")
         
         return obj
+
+
+class EstimateAppointmentListView(APIView):
+    """
+    Get all estimate appointments (appointments with calendar name "FREE On-Site Estimate").
+    
+    Query params:
+    - status: filter by estimate_status (comma-separated list)
+    - assigned_user_ids: filter by assigned user IDs (comma-separated list)
+    - start_date: filter by start_time >= date (YYYY-MM-DD format)
+    - end_date: filter by start_time <= date (YYYY-MM-DD format)
+    - search: search in title and notes (case-insensitive)
+    - page: page number (default: 1)
+    - page_size: number of items per page (default: 20, max: 100)
+    
+    Permissions:
+    - Admins: Full access to all estimate appointments
+    - Normal users: Only estimate appointments assigned to them or where they are in users list
+    """
+    permission_classes = [IsAuthenticatedOrReadOnly]
+
+    def get(self, request):
+        user = request.user
+        if not user.is_authenticated:
+            return Response([], status=200)
+        
+        # Filter by calendar name "FREE On-Site Estimate"
+        qs = Appointment.objects.filter(
+            calendar__name="FREE On-Site Estimate"
+        ).select_related(
+            'assigned_user', 'contact', 'calendar'
+        ).prefetch_related('users').all()
+        
+        is_admin = getattr(user, 'is_admin', False)
+        
+        # Permission filtering
+        if not is_admin:
+            # Normal users: only appointments assigned to them or where they are in users list
+            qs = qs.filter(
+                Q(assigned_user=user) | Q(users=user)
+            ).distinct()
+        
+        # Filter by estimate_status (comma-separated list)
+        status = request.query_params.get('status')
+        if status:
+            status_list = [s.strip() for s in status.split(',') if s.strip()]
+            if status_list:
+                qs = qs.filter(estimate_status__in=status_list)
+        
+        # Filter by assigned_user_ids (comma-separated list of IDs, UUIDs, or emails)
+        assigned_user_ids = request.query_params.get('assigned_user_ids')
+        if assigned_user_ids:
+            assigned_list = [a.strip() for a in assigned_user_ids.split(',') if a.strip()]
+            if assigned_list:
+                user_ids = []
+                for assignee in assigned_list:
+                    user_id = resolve_user_identifier(assignee)
+                    if user_id:
+                        user_ids.append(user_id)
+                if user_ids:
+                    qs = qs.filter(assigned_user__id__in=user_ids)
+        
+        # Filter by date range
+        start_date = request.query_params.get('start_date')
+        if start_date:
+            try:
+                start_dt = datetime.strptime(start_date, '%Y-%m-%d')
+                qs = qs.filter(start_time__gte=start_dt)
+            except ValueError:
+                pass
+        
+        end_date = request.query_params.get('end_date')
+        if end_date:
+            try:
+                end_dt = datetime.strptime(end_date, '%Y-%m-%d') + timedelta(days=1)
+                qs = qs.filter(start_time__lt=end_dt)
+            except ValueError:
+                pass
+        
+        # Search filter (title and notes)
+        search = request.query_params.get('search')
+        if search:
+            qs = qs.filter(
+                Q(title__icontains=search) |
+                Q(notes__icontains=search)
+            )
+        
+        # Order by start_time
+        qs = qs.order_by('-start_time', '-created_at')
+        
+        # Apply pagination
+        paginator = PageNumberPagination()
+        paginator.page_size = 20
+        paginator.page_size_query_param = 'page_size'
+        paginator.max_page_size = 100
+        
+        paginated_qs = paginator.paginate_queryset(qs, request)
+        serializer = AppointmentSerializer(paginated_qs, many=True, context={'request': request})
+        return paginator.get_paginated_response(serializer.data)
+
+
+class EstimateAppointmentUpdateStatusView(APIView):
+    """
+    Update estimate_status for an estimate appointment.
+    
+    PATCH /api/jobtracker/estimate-appointments/{id}/update-status/
+    Body: {"estimate_status": "confirmed"}
+    
+    Permissions:
+    - Admins: Can update any estimate appointment
+    - Normal users: Can only update estimate appointments assigned to them or where they are in users list
+    """
+    permission_classes = [permissions.IsAuthenticated]
+
+    def patch(self, request, appointment_id):
+        try:
+            appointment = Appointment.objects.select_related('calendar', 'assigned_user', 'contact').prefetch_related('users').get(id=appointment_id)
+        except Appointment.DoesNotExist:
+            return Response({'detail': 'Appointment not found.'}, status=404)
+        
+        # Check if it's an estimate appointment
+        if not appointment.calendar or appointment.calendar.name != "FREE On-Site Estimate":
+            return Response({
+                'detail': 'This endpoint is only for estimate appointments (FREE On-Site Estimate calendar).'
+            }, status=400)
+        
+        # Check permissions
+        user = request.user
+        is_admin = getattr(user, 'is_admin', False)
+        if not is_admin:
+            # Normal users: only if assigned to them or in users list
+            if appointment.assigned_user != user and user not in appointment.users.all():
+                raise PermissionDenied("You don't have permission to update this appointment.")
+        
+        # Get estimate_status from request data
+        estimate_status = request.data.get('estimate_status')
+        if not estimate_status:
+            return Response({
+                'detail': 'estimate_status field is required'
+            }, status=400)
+        
+        # Validate estimate_status choice
+        valid_statuses = [choice[0] for choice in Appointment.ESTIMATE_STATUS_CHOICES]
+        if estimate_status not in valid_statuses:
+            return Response({
+                'detail': f'Invalid estimate_status. Must be one of: {", ".join(valid_statuses)}'
+            }, status=400)
+        
+        # Update estimate_status
+        appointment.estimate_status = estimate_status
+        appointment.save()
+        
+        # Update GHL custom field for Estimate Status
+        try:
+            # Get contact to find location_id
+            location_id = None
+            ghl_contact_id = None
+            
+            # Try to get location_id from appointment's contact
+            if appointment.contact:
+                location_id = appointment.contact.location_id
+                ghl_contact_id = appointment.ghl_contact_id or appointment.contact.contact_id
+            elif appointment.ghl_contact_id:
+                # Fallback: get contact by ghl_contact_id
+                contact = Contact.objects.filter(contact_id=appointment.ghl_contact_id).first()
+                if contact:
+                    location_id = contact.location_id
+                    ghl_contact_id = appointment.ghl_contact_id
+            
+            if not location_id or not ghl_contact_id:
+                print("⚠️ [ESTIMATE STATUS] Could not resolve location_id or ghl_contact_id, skipping GHL update")
+            else:
+                # Get GHLAuthCredentials by location_id
+                try:
+                    credentials = GHLAuthCredentials.objects.get(location_id=location_id)
+                except GHLAuthCredentials.DoesNotExist:
+                    print(f"❌ [ESTIMATE STATUS] No GHLAuthCredentials found for location_id: {location_id}")
+                except GHLAuthCredentials.MultipleObjectsReturned:
+                    print(f"⚠️ [ESTIMATE STATUS] Multiple credentials found for location_id: {location_id}, using first")
+                    credentials = GHLAuthCredentials.objects.filter(location_id=location_id).first()
+                else:
+                    # Get Estimate Status custom field
+                    try:
+                        estimate_status_field = GHLCustomField.objects.get(
+                            account=credentials,
+                            field_name='Estimate Status',
+                            is_active=True
+                        )
+                        
+                        # Map estimate_status to display-friendly value
+                        status_display = dict(Appointment.ESTIMATE_STATUS_CHOICES).get(estimate_status, estimate_status)
+                        
+                        # Build custom fields payload
+                        custom_fields = [{
+                            "id": estimate_status_field.ghl_field_id,
+                            "field_value": status_display
+                        }]
+                        
+                        # Update GHL contact with custom field
+                        update_data = {
+                            "customFields": custom_fields
+                        }
+                        
+                        url = f'https://services.leadconnectorhq.com/contacts/{ghl_contact_id}'
+                        headers = {
+                            'Authorization': f'Bearer {credentials.access_token}',
+                            'Content-Type': 'application/json',
+                            'Version': '2021-07-28',
+                            'Accept': 'application/json'
+                        }
+                        
+                        response = requests.put(url, headers=headers, json=update_data)
+                        if response.status_code in [200, 201]:
+                            print(f"✅ [ESTIMATE STATUS] Successfully updated GHL custom field 'Estimate Status' to '{status_display}'")
+                        else:
+                            print(f"❌ [ESTIMATE STATUS] Failed to update GHL custom field: {response.status_code} - {response.text}")
+                    except GHLCustomField.DoesNotExist:
+                        print(f"⚠️ [ESTIMATE STATUS] 'Estimate Status' custom field not found for location_id: {location_id}")
+                    except Exception as e:
+                        print(f"❌ [ESTIMATE STATUS] Error updating GHL custom field: {str(e)}")
+        except Exception as e:
+            print(f"❌ [ESTIMATE STATUS] Error in GHL custom field update process: {str(e)}")
+            # Don't fail the request if GHL update fails, just log the error
+        
+        serializer = AppointmentSerializer(appointment, context={'request': request})
+        return Response(serializer.data)
 
 
 @csrf_exempt

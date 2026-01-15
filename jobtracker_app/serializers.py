@@ -3,6 +3,7 @@ from .models import Job, JobServiceItem, JobAssignment, JobOccurrence, JobImage
 from datetime import datetime, timedelta
 import calendar
 from service_app.models import User, Service, Appointment
+from accounts.models import Contact, Address
 
 
 class JobServiceItemSerializer(serializers.ModelSerializer):
@@ -134,7 +135,7 @@ class AppointmentSerializer(serializers.ModelSerializer):
         model = Appointment
         fields = [
             'appointment_id', 'ghl_appointment_id', 'location_id', 'title',
-            'address', 'calendar_id', 'calendar', 'appointment_status', 'source', 'notes',
+            'address', 'calendar_id', 'calendar', 'appointment_status', 'estimate_status', 'source', 'notes',
             'start_time', 'end_time', 'date_added', 'date_updated',
             'ghl_contact_id', 'group_id',
             'assigned_user_id', 'assigned_user_name', 'assigned_user_email', 'assigned_user_uuid',
@@ -317,12 +318,29 @@ class JobSerializer(serializers.ModelSerializer):
     quoted_by_name = serializers.SerializerMethodField()
     slot_reserved_info = serializers.SerializerMethodField()
     images = JobImageSerializer(many=True, read_only=True)
+    contact_details = serializers.SerializerMethodField()
+    address_details = serializers.SerializerMethodField()
+
+    # Write-only fields for linking to Contact and Address models
+    contact_id = serializers.IntegerField(
+        write_only=True,
+        required=False,
+        allow_null=True,
+        help_text="ID of Contact model (optional - if provided, customer info will be auto-populated)"
+    )
+    address_id = serializers.IntegerField(
+        write_only=True,
+        required=False,
+        allow_null=True,
+        help_text="ID of Address model (optional - if provided, customer_address will be auto-populated)"
+    )
 
     class Meta:
         model = Job
         fields = [
             'id', 'submission', 'title', 'description', 'priority', 'duration_hours', 'scheduled_at',
             'total_price',
+            'contact', 'address', 'contact_id', 'address_id', 'contact_details', 'address_details',  # New fields
             'customer_name', 'customer_phone', 'customer_email', 'customer_address', 'ghl_contact_id',
             'quoted_by', 'quoted_by_name', 'created_by', 'created_by_email',
             'job_type', 'repeat_every', 'repeat_unit', 'occurrences', 'day_of_week',
@@ -330,7 +348,35 @@ class JobSerializer(serializers.ModelSerializer):
             'occurrence_count', 'occurrence_events', 'series_id', 'series_sequence',
             'invoice_url', 'slot_reserved_info', 'images', 'created_at', 'updated_at'
         ]
-        read_only_fields = ['id', 'created_at', 'updated_at']
+        read_only_fields = ['id', 'contact', 'address', 'created_at', 'updated_at']
+
+    def get_contact_details(self, obj):
+        """Return contact details if contact is linked"""
+        if obj.contact:
+            return {
+                'id': obj.contact.id,
+                'contact_id': obj.contact.contact_id,
+                'first_name': obj.contact.first_name,
+                'last_name': obj.contact.last_name,
+                'email': obj.contact.email,
+                'phone': obj.contact.phone,
+            }
+        return None
+
+    def get_address_details(self, obj):
+        """Return address details if address is linked"""
+        if obj.address:
+            return {
+                'id': obj.address.id,
+                'address_id': obj.address.address_id,
+                'name': obj.address.name,
+                'street_address': obj.address.street_address,
+                'city': obj.address.city,
+                'state': obj.address.state,
+                'postal_code': obj.address.postal_code,
+                'full_address': obj.address.get_full_address(),
+            }
+        return None
 
     def get_quoted_by_name(self, obj):
         """Return the quoted_by user's full name or username"""
@@ -482,6 +528,57 @@ class JobSerializer(serializers.ModelSerializer):
     def create(self, validated_data):
         items_data = validated_data.pop('items', [])
         assignments_data = validated_data.pop('assignments', [])
+        
+        # Handle contact_id and address_id (write-only fields)
+        contact_id = validated_data.pop('contact_id', None)
+        address_id = validated_data.pop('address_id', None)
+        
+        # If contact_id is provided, get the contact and populate customer fields
+        if contact_id:
+            try:
+                contact = Contact.objects.get(id=contact_id)
+                validated_data['contact'] = contact
+                
+                # Populate customer fields from contact if not already provided
+                if not validated_data.get('customer_name'):
+                    # Combine first_name and last_name
+                    name_parts = [contact.first_name, contact.last_name]
+                    validated_data['customer_name'] = ' '.join(filter(None, name_parts)) or None
+                
+                if not validated_data.get('customer_phone'):
+                    validated_data['customer_phone'] = contact.phone
+                
+                if not validated_data.get('customer_email'):
+                    validated_data['customer_email'] = contact.email
+                
+                if not validated_data.get('ghl_contact_id'):
+                    validated_data['ghl_contact_id'] = contact.contact_id
+            except Contact.DoesNotExist:
+                raise serializers.ValidationError({
+                    'contact_id': f'Contact with id {contact_id} does not exist.'
+                })
+        
+        # If address_id is provided, get the address and populate customer_address
+        if address_id:
+            try:
+                address = Address.objects.get(id=address_id)
+                validated_data['address'] = address
+                
+                # Populate customer_address from address if not already provided
+                if not validated_data.get('customer_address'):
+                    validated_data['customer_address'] = address.get_full_address()
+            except Address.DoesNotExist:
+                raise serializers.ValidationError({
+                    'address_id': f'Address with id {address_id} does not exist.'
+                })
+        
+        # Validate that if address is provided, it belongs to the contact (if contact is also provided)
+        if validated_data.get('address') and validated_data.get('contact'):
+            if validated_data['address'].contact != validated_data['contact']:
+                raise serializers.ValidationError({
+                    'address_id': 'The provided address does not belong to the provided contact.'
+                })
+        
         job = Job.objects.create(**validated_data)
 
         for item in items_data:

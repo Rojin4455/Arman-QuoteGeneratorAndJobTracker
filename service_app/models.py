@@ -527,6 +527,17 @@ class Appointment(models.Model):
         ('invalid', 'Invalid'),
     ]
     
+    ESTIMATE_STATUS_CHOICES = [
+        ('confirmed', 'Confirmed'),
+        ('on_my_way', 'On My Way'),
+        ('in_progress', 'In Progress'),
+        ('quoted', 'Quoted'),
+        ('canceled', 'Canceled'),
+        ('accepted', 'Accepted'),
+        ('declined', 'Declined'),
+        ('expired', 'Expired'),
+    ]
+    
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     ghl_appointment_id = models.CharField(max_length=255, unique=True, db_index=True)
     location_id = models.CharField(max_length=255, db_index=True)
@@ -543,6 +554,7 @@ class Appointment(models.Model):
         help_text="GHL calendar this appointment belongs to"
     )
     appointment_status = models.CharField(max_length=50, choices=APPOINTMENT_STATUS_CHOICES, blank=True, null=True)
+    estimate_status = models.CharField(max_length=50, choices=ESTIMATE_STATUS_CHOICES, blank=True, null=True, help_text="Status for estimate appointments (FREE On-Site Estimate calendar)")
     source = models.CharField(max_length=100, blank=True, null=True)
     notes = models.TextField(blank=True, null=True)
     

@@ -3,6 +3,7 @@ import uuid
 from decimal import Decimal
 from quote_app.models import CustomerSubmission
 from service_app.models import User, Service
+from accounts.models import Contact, Address
 
 
 class Job(models.Model):
@@ -73,7 +74,24 @@ class Job(models.Model):
     scheduled_at = models.DateTimeField(null=True, blank=True)
     total_price = models.DecimalField(max_digits=12, decimal_places=2, default=Decimal('0.00'))
 
-    # Customer info (freeform for now)
+    # Customer info - can be linked to Contact/Address models or provided manually
+    contact = models.ForeignKey(
+        Contact,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='jobs',
+        help_text="Link to Contact model (optional - if provided, customer info will be populated from this)"
+    )
+    address = models.ForeignKey(
+        Address,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='jobs',
+        help_text="Link to Address model (optional - if provided, customer_address will be populated from this)"
+    )
+    # Customer info (freeform - can be manually provided or auto-populated from contact/address)
     customer_name = models.CharField(max_length=255, blank=True, null=True)
     customer_phone = models.CharField(max_length=30, blank=True, null=True)
     customer_email = models.EmailField(blank=True, null=True)

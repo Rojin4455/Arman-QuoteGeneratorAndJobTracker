@@ -10,7 +10,7 @@ from .tasks import handle_completed_job_invoice
 #     update_appointment_in_ghl,
 #     delete_appointment_from_ghl
 # )
-from accounts.models import GHLAuthCredentials, GHLCustomField
+from accounts.models import GHLAuthCredentials, GHLCustomField, Contact
 import requests
 
 
@@ -189,23 +189,35 @@ def _update_ghl_custom_fields_on_job_change(sender, instance, created, **kwargs)
         print("⚠️ [GHL CUSTOM FIELDS] No ghl_contact_id found, skipping update")
         return
     
-    # Get location_id from job's submission contact
+    # Get location_id by mapping with contact using ghl_contact_id
     location_id = None
     try:
-        job_with_relations = (
-            Job.objects
-            .select_related('submission__contact')
-            .get(id=instance.id)
-        )
-        
-        if job_with_relations.submission and job_with_relations.submission.contact:
-            location_id = job_with_relations.submission.contact.location_id
-            print(f"📍 [GHL CUSTOM FIELDS] Location ID: {location_id}")
+        # First, try to get location_id from contact using ghl_contact_id
+        contact = Contact.objects.filter(contact_id=instance.ghl_contact_id).first()
+        if contact:
+            location_id = contact.location_id
+            print(f"📍 [GHL CUSTOM FIELDS] Location ID from contact: {location_id}")
         else:
-            print("⚠️ [GHL CUSTOM FIELDS] No submission/contact found for job")
-            return
-    except Job.DoesNotExist:
-        print("❌ [GHL CUSTOM FIELDS] Job not found while resolving location_id")
+            # Fallback: try to get from submission contact if available
+            print("⚠️ [GHL CUSTOM FIELDS] Contact not found by ghl_contact_id, trying submission...")
+            try:
+                job_with_relations = (
+                    Job.objects
+                    .select_related('submission__contact')
+                    .get(id=instance.id)
+                )
+                
+                if job_with_relations.submission and job_with_relations.submission.contact:
+                    location_id = job_with_relations.submission.contact.location_id
+                    print(f"📍 [GHL CUSTOM FIELDS] Location ID from submission contact: {location_id}")
+                else:
+                    print("⚠️ [GHL CUSTOM FIELDS] No submission/contact found for job")
+                    return
+            except Job.DoesNotExist:
+                print("❌ [GHL CUSTOM FIELDS] Job not found while resolving location_id")
+                return
+    except Exception as e:
+        print(f"❌ [GHL CUSTOM FIELDS] Error resolving location_id: {str(e)}")
         return
     
     if not location_id:
