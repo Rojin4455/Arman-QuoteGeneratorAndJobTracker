@@ -76,13 +76,98 @@ def handle_webhook_event(data, event_type):
         elif event_type in ["AppointmentCreate", "AppointmentUpdate"]:
             # Handle appointment creation/update from GHL
             location_id = data.get("locationId")
-            create_or_update_appointment_from_ghl(data, location_id)
+            appointment = create_or_update_appointment_from_ghl(data, location_id)
+            
+            # If this is an update and the appointment is linked to a QuoteSchedule, update it
+            if event_type == "AppointmentUpdate":
+                update_quote_schedule_from_appointment(data, appointment)
         elif event_type == "AppointmentDelete":
             # Handle appointment deletion from GHL
             from accounts.utils import delete_appointment_from_ghl_webhook
             delete_appointment_from_ghl_webhook(data)
     except Exception as e:
         print(f"Error handling webhook event: {str(e)}")
+
+
+def update_quote_schedule_from_appointment(webhook_data: dict, appointment=None):
+    """
+    Update QuoteSchedule when appointment is updated in GHL.
+    
+    Args:
+        webhook_data (dict): Webhook payload data
+        appointment (Appointment, optional): The appointment object if already created/updated
+    """
+    try:
+        # Extract appointment ID from webhook data (handle nested structure)
+        appointment_data = webhook_data.get("appointment", webhook_data)
+        
+        # Try multiple ways to get appointment ID
+        ghl_appointment_id = (
+            appointment_data.get("id") or 
+            appointment_data.get("appointmentId") or
+            webhook_data.get("calendar", {}).get("appointmentId")
+        )
+        
+        # If we have the appointment object, use its ghl_appointment_id
+        if not ghl_appointment_id and appointment:
+            ghl_appointment_id = appointment.ghl_appointment_id
+        
+        if not ghl_appointment_id:
+            print("⚠️ [QUOTE SCHEDULE] No appointment ID found in webhook data")
+            return
+        
+        # Find QuoteSchedule by appointment_id
+        from quote_app.models import QuoteSchedule
+        
+        quote_schedule = QuoteSchedule.objects.filter(appointment_id=ghl_appointment_id).first()
+        
+        if not quote_schedule:
+            print(f"ℹ️ [QUOTE SCHEDULE] No QuoteSchedule found for appointment_id: {ghl_appointment_id}")
+            return
+        
+        print(f"🔄 [QUOTE SCHEDULE] Updating QuoteSchedule for appointment_id: {ghl_appointment_id}")
+        
+        # Track if any fields were updated
+        updated_fields = []
+        
+        # Update scheduled_date from startTime
+        start_time = appointment_data.get("startTime")
+        if start_time:
+            scheduled_date = parse_datetime(start_time)
+            if scheduled_date:
+                quote_schedule.scheduled_date = scheduled_date
+                updated_fields.append("scheduled_date")
+                print(f"   📅 Updated scheduled_date: {scheduled_date}")
+        
+        # Update notes if provided
+        notes = appointment_data.get("notes")
+        if notes is not None:
+            quote_schedule.notes = notes
+            updated_fields.append("notes")
+            print(f"   📝 Updated notes: {notes}")
+        
+        # Update is_submitted if appointment status indicates it's confirmed/submitted
+        appointment_status = appointment_data.get("appointmentStatus")
+        if appointment_status:
+            # You can customize this logic based on your business rules
+            # For example, mark as submitted if status is "confirmed" or "showed"
+            if appointment_status in ["confirmed", "showed"]:
+                if not quote_schedule.is_submitted:
+                    quote_schedule.is_submitted = True
+                    updated_fields.append("is_submitted")
+                    print(f"   ✅ Updated is_submitted: True (status: {appointment_status})")
+        
+        # Only save if there were updates
+        if updated_fields:
+            quote_schedule.save(update_fields=updated_fields)
+            print(f"✅ [QUOTE SCHEDULE] Successfully updated QuoteSchedule for submission {quote_schedule.submission.id} (fields: {', '.join(updated_fields)})")
+        else:
+            print(f"ℹ️ [QUOTE SCHEDULE] No fields to update for QuoteSchedule {quote_schedule.id}")
+        
+    except Exception as e:
+        print(f"❌ [QUOTE SCHEDULE] Error updating QuoteSchedule from appointment webhook: {str(e)}")
+        import traceback
+        traceback.print_exc()
 
 
 @shared_task
