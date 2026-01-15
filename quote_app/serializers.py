@@ -239,6 +239,7 @@ class CustomerSubmissionDetailSerializer(serializers.ModelSerializer):
     custom_products = CustomServiceSerializer(many=True, read_only=True)
     address = AddressSerializer(read_only=True)
     quote_schedule = QuoteScheduleSerializer(read_only=True)
+    quoted_by_details = serializers.SerializerMethodField()
     print("erererereererrerere")
     
     class Meta:
@@ -248,7 +249,8 @@ class CustomerSubmissionDetailSerializer(serializers.ModelSerializer):
             'house_sqft',
             'status', 'total_base_price', 'total_adjustments',
             'total_surcharges', 'final_total', 'created_at','quote_surcharge_applicable',
-            'expires_at', 'service_selections','additional_data','contact','address','custom_products','custom_service_total','quote_schedule'
+            'expires_at', 'service_selections','additional_data','contact','address','custom_products','custom_service_total','quote_schedule',
+            'quoted_by', 'quoted_by_details'
         ]
     
     def get_service_selections(self, obj):
@@ -258,6 +260,19 @@ class CustomerSubmissionDetailSerializer(serializers.ModelSerializer):
             'question_responses__sub_question_responses'
         )
         return CustomerServiceSelectionDetailSerializer(selections, many=True).data
+    
+    def get_quoted_by_details(self, obj):
+        """Return quoted_by user details"""
+        if obj.quoted_by:
+            return {
+                'id': obj.quoted_by.id,
+                'username': obj.quoted_by.username,
+                'email': obj.quoted_by.email,
+                'first_name': obj.quoted_by.first_name,
+                'last_name': obj.quoted_by.last_name,
+                'full_name': obj.quoted_by.get_full_name() or obj.quoted_by.username,
+            }
+        return None
     
     def get_fields(self):
         fields = super().get_fields()
