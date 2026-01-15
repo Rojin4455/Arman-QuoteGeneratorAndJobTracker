@@ -15,9 +15,10 @@ from accounts.utils import (
     sync_calendars_from_ghl as sync_calendars_from_ghl_utils
 )
 from datetime import datetime, timedelta
-from django.utils import timezone
+from django.utils import timezone as django_timezone
 from django.utils.dateparse import parse_datetime
 from service_app.models import Appointment, User, User
+import pytz
 
 
 @shared_task
@@ -130,11 +131,41 @@ def update_quote_schedule_from_appointment(webhook_data: dict, appointment=None)
         # Track if any fields were updated
         updated_fields = []
         
-        # Update scheduled_date from startTime
+        # Update scheduled_date from startTime (convert to location timezone)
         start_time = appointment_data.get("startTime")
         if start_time:
             scheduled_date = parse_datetime(start_time)
             if scheduled_date:
+                # Get location_id to find timezone
+                location_id = (
+                    webhook_data.get("locationId") or 
+                    appointment_data.get("locationId") or
+                    (appointment.location_id if appointment else None)
+                )
+                
+                if location_id:
+                    try:
+                        # Get credentials for this location to get timezone
+                        credentials = GHLAuthCredentials.objects.filter(location_id=location_id).first()
+                        if credentials and credentials.timezone:
+                            timezone_str = credentials.timezone
+                            tz = pytz.timezone(timezone_str)
+                            
+                            # If scheduled_date is naive, assume it's UTC (GHL typically sends UTC)
+                            if django_timezone.is_naive(scheduled_date):
+                                scheduled_date = pytz.UTC.localize(scheduled_date)
+                            
+                            # Convert to location timezone
+                            scheduled_date = scheduled_date.astimezone(tz)
+                            
+                            # Make it naive for storage (Django will handle timezone-aware datetimes)
+                            # Or keep it timezone-aware - let's keep it aware
+                            print(f"   🌍 Converted to location timezone ({timezone_str}): {scheduled_date}")
+                        else:
+                            print(f"   ⚠️ No timezone found for location_id {location_id}, using UTC")
+                    except Exception as e:
+                        print(f"   ⚠️ Error converting timezone: {str(e)}, using original datetime")
+                
                 quote_schedule.scheduled_date = scheduled_date
                 updated_fields.append("scheduled_date")
                 print(f"   📅 Updated scheduled_date: {scheduled_date}")
@@ -217,7 +248,7 @@ def fetch_and_save_all_appointments(location_id=None):
         print(f"Found {len(user_ghl_ids)} users with ghl_user_id. Fetching appointments for each...")
         
         # Calculate time range: 1 year ago to 2 years in the future
-        now = timezone.now()
+        now = django_timezone.now()
         start_time = now - timedelta(days=365)  # 1 year ago
         end_time = now + timedelta(days=2000)    # 2 years in the future
         
