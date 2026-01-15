@@ -134,15 +134,26 @@ def update_quote_schedule_from_appointment(webhook_data: dict, appointment=None)
         # Update scheduled_date from startTime (convert to location timezone)
         start_time = appointment_data.get("startTime")
         if start_time:
+            # Get location_id to find timezone (get it first before parsing)
+            location_id = (
+                webhook_data.get("locationId") or 
+                appointment_data.get("locationId") or
+                (appointment.location_id if appointment else None)
+            )
+            
+            # Parse the datetime - handle UTC timezone from 'Z' suffix
             scheduled_date = parse_datetime(start_time)
             if scheduled_date:
-                # Get location_id to find timezone
-                location_id = (
-                    webhook_data.get("locationId") or 
-                    appointment_data.get("locationId") or
-                    (appointment.location_id if appointment else None)
-                )
+                # If the string ends with 'Z', it's UTC - ensure we treat it as UTC
+                if start_time.endswith('Z') or start_time.endswith('z'):
+                    # parse_datetime might return naive, so explicitly localize to UTC
+                    if django_timezone.is_naive(scheduled_date):
+                        scheduled_date = pytz.UTC.localize(scheduled_date)
+                    else:
+                        # If already aware, ensure it's UTC
+                        scheduled_date = scheduled_date.astimezone(pytz.UTC)
                 
+                # Convert to location timezone if location_id is available
                 if location_id:
                     try:
                         # Get credentials for this location to get timezone
@@ -151,20 +162,18 @@ def update_quote_schedule_from_appointment(webhook_data: dict, appointment=None)
                             timezone_str = credentials.timezone
                             tz = pytz.timezone(timezone_str)
                             
-                            # If scheduled_date is naive, assume it's UTC (GHL typically sends UTC)
-                            if django_timezone.is_naive(scheduled_date):
-                                scheduled_date = pytz.UTC.localize(scheduled_date)
-                            
-                            # Convert to location timezone
+                            # Convert UTC datetime to location timezone
+                            # This will give us the local time (e.g., 12:00 PM CST if input was 18:00 UTC)
                             scheduled_date = scheduled_date.astimezone(tz)
                             
-                            # Make it naive for storage (Django will handle timezone-aware datetimes)
-                            # Or keep it timezone-aware - let's keep it aware
-                            print(f"   🌍 Converted to location timezone ({timezone_str}): {scheduled_date}")
+                            print(f"   🌍 Converted UTC to location timezone ({timezone_str}): {scheduled_date}")
+                            print(f"   📅 Local time: {scheduled_date.strftime('%Y-%m-%d %I:%M %p %Z')}")
                         else:
-                            print(f"   ⚠️ No timezone found for location_id {location_id}, using UTC")
+                            print(f"   ⚠️ No timezone found for location_id {location_id}, keeping as UTC")
                     except Exception as e:
-                        print(f"   ⚠️ Error converting timezone: {str(e)}, using original datetime")
+                        print(f"   ⚠️ Error converting timezone: {str(e)}, using UTC datetime")
+                else:
+                    print(f"   ⚠️ No location_id found, keeping as UTC")
                 
                 quote_schedule.scheduled_date = scheduled_date
                 updated_fields.append("scheduled_date")
