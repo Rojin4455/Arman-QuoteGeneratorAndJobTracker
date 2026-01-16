@@ -1312,12 +1312,16 @@ class EstimateAppointmentUpdateStatusView(APIView):
                             "id": estimate_status_field.ghl_field_id,
                             "field_value": status_display
                         }]
+
+                        print(custom_fields, 'custom_fields')
+                        print(estimate_status_field, 'estimate_status_field')
                         
                         # Update GHL contact with custom field
                         update_data = {
                             "customFields": custom_fields
                         }
                         
+                        print(update_data, 'update_data')
                         url = f'https://services.leadconnectorhq.com/contacts/{ghl_contact_id}'
                         headers = {
                             'Authorization': f'Bearer {credentials.access_token}',
