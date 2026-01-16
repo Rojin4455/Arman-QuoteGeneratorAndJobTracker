@@ -1304,24 +1304,36 @@ class EstimateAppointmentUpdateStatusView(APIView):
                             is_active=True
                         )
                         
+                        # Refresh from database to ensure we have the latest value
+                        estimate_status_field.refresh_from_db()
+                        
+                        # Get the actual GHL field ID value
+                        ghl_field_id_value = estimate_status_field.ghl_field_id
+                        
+                        # Validate that we have a real field ID (not a placeholder)
+                        if not ghl_field_id_value or ghl_field_id_value == 'ghl_field_id' or len(ghl_field_id_value) < 5:
+                            print(f"❌ [ESTIMATE STATUS] Invalid ghl_field_id value: '{ghl_field_id_value}'. Please check the database.")
+                            print(f"   The field ID should be the actual GHL custom field ID, not a placeholder.")
+                            return
+                        
                         # Map estimate_status to display-friendly value
                         status_display = dict(Appointment.ESTIMATE_STATUS_CHOICES).get(estimate_status, estimate_status)
                         
-                        # Build custom fields payload
+                        # Build custom fields payload with the actual field ID
                         custom_fields = [{
-                            "id": estimate_status_field.ghl_field_id,
+                            "id": str(ghl_field_id_value),
                             "field_value": status_display
                         }]
 
-                        print(custom_fields, 'custom_fields')
-                        print(estimate_status_field, 'estimate_status_field')
+                        print(f"🔍 [ESTIMATE STATUS] Field ID: {ghl_field_id_value}")
+                        print(f"🔍 [ESTIMATE STATUS] Status: {status_display}")
+                        print(f"🔍 [ESTIMATE STATUS] Payload: {custom_fields}")
                         
                         # Update GHL contact with custom field
                         update_data = {
                             "customFields": custom_fields
                         }
                         
-                        print(update_data, 'update_data')
                         url = f'https://services.leadconnectorhq.com/contacts/{ghl_contact_id}'
                         headers = {
                             'Authorization': f'Bearer {credentials.access_token}',
@@ -1335,6 +1347,8 @@ class EstimateAppointmentUpdateStatusView(APIView):
                             print(f"✅ [ESTIMATE STATUS] Successfully updated GHL custom field 'Estimate Status' to '{status_display}'")
                         else:
                             print(f"❌ [ESTIMATE STATUS] Failed to update GHL custom field: {response.status_code} - {response.text}")
+                            print(f"   Request URL: {url}")
+                            print(f"   Request payload: {update_data}")
                     except GHLCustomField.DoesNotExist:
                         print(f"⚠️ [ESTIMATE STATUS] 'Estimate Status' custom field not found for location_id: {location_id}")
                     except Exception as e:
