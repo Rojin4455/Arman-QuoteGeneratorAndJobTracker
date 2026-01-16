@@ -45,6 +45,9 @@ urlpatterns = [
     # Step 7: Get submission details with quotes
     path('<uuid:id>/', views.SubmissionDetailView.as_view(), name='submission-detail'),
     
+    # Update additional_data for submission
+    path('<uuid:submission_id>/additional-data/', views.UpdateSubmissionAdditionalDataView.as_view(), name='update-submission-additional-data'),
+    
     # Step 8: Submit final quote
     path('<uuid:submission_id>/submit/', views.SubmitFinalQuoteView.as_view(), name='submit-quote'),
     

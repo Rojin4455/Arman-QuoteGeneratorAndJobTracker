@@ -939,6 +939,55 @@ class SubmissionDetailView(generics.RetrieveUpdateAPIView):
             id=submission_id
         )
 
+# Update additional_data for submission
+class UpdateSubmissionAdditionalDataView(APIView):
+    """
+    Update additional_data field for a customer submission.
+    
+    PATCH /api/quote/<submission_id>/additional-data/
+    Body: {"additional_data": {...}}
+    """
+    permission_classes = [AllowAny]
+    
+    def patch(self, request, submission_id):
+        try:
+            submission = CustomerSubmission.objects.get(id=submission_id)
+        except CustomerSubmission.DoesNotExist:
+            return Response(
+                {'detail': 'Submission not found.'},
+                status=status.HTTP_404_NOT_FOUND
+            )
+        
+        # Get additional_data from request
+        additional_data = request.data.get('additional_data')
+        if additional_data is None:
+            return Response(
+                {'detail': 'additional_data field is required.'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        # Validate that additional_data is a dict/JSON object
+        if not isinstance(additional_data, dict):
+            return Response(
+                {'detail': 'additional_data must be a JSON object.'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        # Update additional_data
+        # If submission already has additional_data, merge with existing data
+        if submission.additional_data:
+            # Merge existing data with new data (new data takes precedence)
+            updated_data = {**submission.additional_data, **additional_data}
+            submission.additional_data = updated_data
+        else:
+            submission.additional_data = additional_data
+        
+        submission.save(update_fields=['additional_data', 'updated_at'])
+        
+        # Return updated submission
+        serializer = CustomerSubmissionDetailSerializer(submission, context={'request': request})
+        return Response(serializer.data, status=status.HTTP_200_OK)
+
 # Step 8: Submit final quote
 class SubmitFinalQuoteView(APIView):
     """Submit the final quote"""
