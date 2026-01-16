@@ -418,6 +418,7 @@ class AppointmentCalendarView(APIView):
         
         # Exclude appointments with calendar name "Reccuring Service Calendar"
         qs = qs.exclude(calendar__name="Reccuring Service Calendar")
+        qs = qs.exclude(calendar__name="FREE On-Site Estimate")
         
         print("qs: ", qs)
         user = request.user
@@ -530,7 +531,7 @@ class AppointmentViewSet(viewsets.ModelViewSet):
         
         # Exclude appointments with calendar name "Reccuring Service Calendar"
         qs = qs.exclude(calendar__name="Reccuring Service Calendar")
-        
+        qs = qs.exclude(calendar__name="FREE On-Site Estimate")
         is_admin = getattr(user, 'is_admin', False)
         
         # Permission filtering
