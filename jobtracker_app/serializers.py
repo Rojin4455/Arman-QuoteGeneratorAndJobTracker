@@ -722,6 +722,10 @@ class JobSeriesCreateSerializer(serializers.Serializer):
     duration_hours = serializers.DecimalField(max_digits=5, decimal_places=2)
     scheduled_at = serializers.DateTimeField()
     total_price = serializers.DecimalField(max_digits=12, decimal_places=2)
+    # Contact and Address fields (optional - if provided, customer info will be auto-populated)
+    contact_id = serializers.IntegerField(required=False, allow_null=True, help_text="ID of Contact model (optional - if provided, customer info will be auto-populated)")
+    address_id = serializers.IntegerField(required=False, allow_null=True, help_text="ID of Address model (optional - if provided, customer_address will be auto-populated)")
+    # Customer info (can be manually provided or auto-populated from contact/address)
     customer_name = serializers.CharField(required=False, allow_blank=True)
     customer_phone = serializers.CharField(required=False, allow_blank=True)
     customer_email = serializers.EmailField(required=False, allow_blank=True)
@@ -749,6 +753,61 @@ class JobSeriesCreateSerializer(serializers.Serializer):
         items = validated.pop('items', [])
         assigns = validated.pop('assignments', [])
         quoted_by_raw = validated.pop('quoted_by', None)
+        
+        # Handle contact_id and address_id (for auto-populating customer fields)
+        contact_id = validated.pop('contact_id', None)
+        address_id = validated.pop('address_id', None)
+        
+        # Prepare base job data with contact/address info
+        job_data = validated.copy()
+        
+        # If contact_id is provided, get the contact and populate customer fields
+        contact_obj = None
+        if contact_id:
+            try:
+                contact_obj = Contact.objects.get(id=contact_id)
+                job_data['contact'] = contact_obj
+                
+                # Populate customer fields from contact if not already provided
+                if not job_data.get('customer_name'):
+                    # Combine first_name and last_name
+                    name_parts = [contact_obj.first_name, contact_obj.last_name]
+                    job_data['customer_name'] = ' '.join(filter(None, name_parts)) or None
+                
+                if not job_data.get('customer_phone'):
+                    job_data['customer_phone'] = contact_obj.phone
+                
+                if not job_data.get('customer_email'):
+                    job_data['customer_email'] = contact_obj.email
+                
+                if not job_data.get('ghl_contact_id'):
+                    job_data['ghl_contact_id'] = contact_obj.contact_id
+            except Contact.DoesNotExist:
+                raise serializers.ValidationError({
+                    'contact_id': f'Contact with id {contact_id} does not exist.'
+                })
+        
+        # If address_id is provided, get the address and populate customer_address
+        address_obj = None
+        if address_id:
+            try:
+                address_obj = Address.objects.get(id=address_id)
+                job_data['address'] = address_obj
+                
+                # Populate customer_address from address if not already provided
+                if not job_data.get('customer_address'):
+                    job_data['customer_address'] = address_obj.get_full_address()
+            except Address.DoesNotExist:
+                raise serializers.ValidationError({
+                    'address_id': f'Address with id {address_id} does not exist.'
+                })
+        
+        # Validate that if address is provided, it belongs to the contact (if contact is also provided)
+        if address_obj and contact_obj:
+            if address_obj.contact != contact_obj:
+                raise serializers.ValidationError({
+                    'address_id': 'The provided address does not belong to the provided contact.'
+                })
 
         request = self.context.get('request')
         creator = request.user if request and request.user.is_authenticated else None
@@ -765,8 +824,10 @@ class JobSeriesCreateSerializer(serializers.Serializer):
             qb_id = None
             if quoted_by_raw:
                 qb_id = self._resolve_user_id(quoted_by_raw)
+            
+            # Create job with all the data (including contact and address)
             job = Job.objects.create(
-                **validated,
+                **job_data,
                 scheduled_at=dt,
                 job_type='recurring',
                 repeat_every=repeat_every,
