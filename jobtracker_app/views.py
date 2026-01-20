@@ -1121,7 +1121,7 @@ class LocationJobDetailView(APIView):
 class JobImageViewSet(viewsets.ModelViewSet):
     """
     ViewSet for managing job images.
-    Only allows uploading images for completed jobs.
+    Allows uploading images for jobs in any status.
     
     Permissions:
     - Admins: Full access to all job images
@@ -1169,7 +1169,7 @@ class JobImageViewSet(viewsets.ModelViewSet):
         return context
 
     def perform_create(self, serializer):
-        """Validate that job is completed before allowing image upload"""
+        """Validate job exists and check permissions before allowing image upload"""
         job_id = self.request.data.get('job')
         if not job_id:
             from rest_framework.exceptions import ValidationError
@@ -1180,13 +1180,6 @@ class JobImageViewSet(viewsets.ModelViewSet):
         except Job.DoesNotExist:
             from rest_framework.exceptions import NotFound
             raise NotFound('Job not found')
-        
-        # Check if job is completed
-        if job.status != 'completed':
-            from rest_framework.exceptions import ValidationError
-            raise ValidationError({
-                'job': f'Images can only be uploaded for completed jobs. Current job status: {job.status}'
-            })
         
         # Check permissions
         user = self.request.user
