@@ -1,4 +1,4 @@
-from accounts.models import GHLAuthCredentials
+from accounts.models import GHLAuthCredentials, GHLCustomField
 import requests
 from decouple import config
 
@@ -65,17 +65,42 @@ def create_or_update_ghl_contact(submission, is_submit=False):
             f"&phone={submission.contact.phone}"
             f"&email={submission.contact.email}"
         )
-        custom_fields = [{
-            "id": "Bff2eZtlr82uvVQmByPh",
-            "field_value": quote_url if is_submit else booking_url
-        }]
+        
+        # Get Quote Link custom field using account and field name
+        custom_fields = []
+        try:
+            quote_link_field = GHLCustomField.objects.get(
+                account=credentials,
+                field_name='Quote Link',
+                is_active=True
+            )
+            quote_link_field.refresh_from_db()
+            
+            # Validate that we have a real field ID (not a placeholder)
+            if quote_link_field.ghl_field_id and quote_link_field.ghl_field_id != 'ghl_field_id' and len(quote_link_field.ghl_field_id) >= 5:
+                custom_fields.append({
+                    "id": str(quote_link_field.ghl_field_id),
+                    "field_value": quote_url if is_submit else booking_url
+                })
+                print(f"✅ [QUOTE LINK] Using custom field 'Quote Link' with ID: {quote_link_field.ghl_field_id}")
+            else:
+                print(f"⚠️ [QUOTE LINK] Invalid ghl_field_id value: '{quote_link_field.ghl_field_id}'. Skipping custom field update.")
+        except GHLCustomField.DoesNotExist:
+            print(f"⚠️ [QUOTE LINK] 'Quote Link' custom field not found for location_id: {location_id}")
+        except Exception as e:
+            print(f"❌ [QUOTE LINK] Error getting Quote Link field: {str(e)}")
+        
         print(f"🛠 Custom fields prepared: {custom_fields}")
 
         # Step 4: Update or create contact
         if results:
             ghl_contact_id = results[0]["id"]
             tags = results[0].get("tags", [])
-            contact_payload = {"customFields": custom_fields}
+            contact_payload = {}
+
+            # Only include customFields if we have fields to update
+            if custom_fields:
+                contact_payload["customFields"] = custom_fields
 
             if is_submit:
                 if "quote accepted" not in tags:
@@ -97,9 +122,11 @@ def create_or_update_ghl_contact(submission, is_submit=False):
                 "firstName": submission.contact.first_name,
                 "email": submission.contact.email,
                 "phone": submission.contact.phone,
-                "locationId": location_id,
-                "customFields": custom_fields
+                "locationId": location_id
             }
+            # Only include customFields if we have fields to update
+            if custom_fields:
+                contact_payload["customFields"] = custom_fields
             print(f" Creating new contact with payload: {contact_payload}")
             contact_response = requests.post(
                 "https://services.leadconnectorhq.com/contacts/",

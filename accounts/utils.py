@@ -148,7 +148,7 @@ def fetch_all_contacts(location_id: str, access_token: str = None) -> List[Dict[
     print(f"\nTotal contacts retrieved: {len(all_contacts)}")
 
     # sync_contacts_to_db(all_contacts)
-    fetch_contacts_locations(all_contacts[2160:], location_id, access_token)
+    fetch_contacts_locations(all_contacts, location_id, access_token)
     # return all_contacts
 
 
