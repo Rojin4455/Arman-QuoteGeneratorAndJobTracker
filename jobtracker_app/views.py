@@ -294,6 +294,103 @@ class JobViewSet(viewsets.ModelViewSet):
         job.payment_method = payment_method
         job.save()
         
+        # Update GHL custom field for Payment Method
+        try:
+            # Get location_id and ghl_contact_id from job
+            location_id = None
+            ghl_contact_id = None
+            
+            # Try to get location_id from job's contact
+            if job.contact:
+                location_id = job.contact.location_id
+                ghl_contact_id = job.ghl_contact_id or job.contact.contact_id
+            elif job.ghl_contact_id:
+                # Fallback: get contact by ghl_contact_id
+                contact = Contact.objects.filter(contact_id=job.ghl_contact_id).first()
+                if contact:
+                    location_id = contact.location_id
+                    ghl_contact_id = job.ghl_contact_id
+            elif job.submission and job.submission.contact:
+                # Fallback: get from submission contact
+                location_id = job.submission.contact.location_id
+                ghl_contact_id = job.ghl_contact_id or job.submission.contact.contact_id
+            
+            if not location_id or not ghl_contact_id:
+                print("⚠️ [PAYMENT METHOD] Could not resolve location_id or ghl_contact_id, skipping GHL update")
+            else:
+                # Get GHLAuthCredentials by location_id
+                try:
+                    credentials = GHLAuthCredentials.objects.get(location_id=location_id)
+                except GHLAuthCredentials.DoesNotExist:
+                    print(f"❌ [PAYMENT METHOD] No GHLAuthCredentials found for location_id: {location_id}")
+                except GHLAuthCredentials.MultipleObjectsReturned:
+                    print(f"⚠️ [PAYMENT METHOD] Multiple credentials found for location_id: {location_id}, using first")
+                    credentials = GHLAuthCredentials.objects.filter(location_id=location_id).first()
+                else:
+                    # Get Payment Method custom field
+                    try:
+                        payment_method_field = GHLCustomField.objects.get(
+                            account=credentials,
+                            field_name='Payment Method',
+                            is_active=True
+                        )
+                        
+                        # Refresh from database to ensure we have the latest value
+                        payment_method_field.refresh_from_db()
+                        
+                        # Get the actual GHL field ID value
+                        ghl_field_id_value = payment_method_field.ghl_field_id
+                        
+                        # Validate that we have a real field ID (not a placeholder)
+                        if not ghl_field_id_value or ghl_field_id_value == 'ghl_field_id' or len(ghl_field_id_value) < 5:
+                            print(f"❌ [PAYMENT METHOD] Invalid ghl_field_id value: '{ghl_field_id_value}'. Please check the database.")
+                            print(f"   The field ID should be the actual GHL custom field ID, not a placeholder.")
+                        else:
+                            # Map payment_method to display-friendly value
+                            payment_method_display = dict(Job.PAYMENT_METHOD_CHOICES).get(payment_method, payment_method)
+                            
+                            # Build custom fields payload with the actual field ID
+                            custom_fields = [{
+                                "id": str(ghl_field_id_value),
+                                "field_value": payment_method_display
+                            }]
+
+                            print(f"🔍 [PAYMENT METHOD] Field ID: {ghl_field_id_value}")
+                            print(f"🔍 [PAYMENT METHOD] Payment Method: {payment_method_display}")
+                            print(f"🔍 [PAYMENT METHOD] Payload: {custom_fields}")
+                            
+                            # Update GHL contact with custom field
+                            update_data = {
+                                "customFields": custom_fields
+                            }
+                            
+                            url = f'https://services.leadconnectorhq.com/contacts/{ghl_contact_id}'
+                            headers = {
+                                'Authorization': f'Bearer {credentials.access_token}',
+                                'Content-Type': 'application/json',
+                                'Version': '2021-07-28',
+                                'Accept': 'application/json'
+                            }
+                            
+                            response = requests.put(url, headers=headers, json=update_data)
+                            if response.status_code in [200, 201]:
+                                print(f"✅ [PAYMENT METHOD] Successfully updated GHL custom field 'Payment Method' to '{payment_method_display}'")
+                            else:
+                                print(f"❌ [PAYMENT METHOD] Failed to update GHL custom field: {response.status_code} - {response.text}")
+                                print(f"   Request URL: {url}")
+                                print(f"   Request payload: {update_data}")
+                    except GHLCustomField.DoesNotExist:
+                        print(f"⚠️ [PAYMENT METHOD] 'Payment Method' custom field not found for location_id: {location_id}")
+                    except Exception as e:
+                        print(f"❌ [PAYMENT METHOD] Error updating GHL custom field: {str(e)}")
+                        import traceback
+                        traceback.print_exc()
+        except Exception as e:
+            print(f"❌ [PAYMENT METHOD] Error in GHL custom field update process: {str(e)}")
+            import traceback
+            traceback.print_exc()
+            # Don't fail the request if GHL update fails, just log the error
+        
         serializer = self.get_serializer(job)
         return Response(serializer.data)
 

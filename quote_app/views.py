@@ -33,7 +33,8 @@ from payroll_app.models import EmployeeProfile
 
 from quote_app.helpers import create_or_update_ghl_contact
 from rest_framework.generics import ListAPIView
-from accounts.models import Contact, Address
+import requests
+from accounts.models import GHLAuthCredentials, GHLCustomField, Contact, Address
 
 from rest_framework import viewsets
 from .serializers import CustomServiceSerializer
@@ -1161,17 +1162,159 @@ class RejectQuoteView(APIView):
         
         try:
             with transaction.atomic():
+                # Collect rejection data
+                rejected_at = timezone.now()
+                rejection_reason = request.data.get('rejection_reason', '')
+                rejection_notes = request.data.get('rejection_notes', '')
+                rejected_by = request.data.get('rejected_by', '')
+                
                 # Update submission status to rejected
                 submission.status = 'rejected'
                 
                 # Store rejection details in additional_data
                 rejection_data = submission.additional_data or {}
-                rejection_data['rejected_at'] = timezone.now().isoformat()
-                rejection_data['rejection_reason'] = request.data.get('rejection_reason', '')
-                rejection_data['rejected_by'] = request.data.get('rejected_by', '')
+                rejection_data['rejected_at'] = rejected_at.isoformat()
+                rejection_data['rejection_reason'] = rejection_reason
+                rejection_data['rejection_notes'] = rejection_notes
+                rejection_data['rejected_by'] = rejected_by
                 
                 submission.additional_data = rejection_data
                 submission.save()
+                
+                # Update GHL custom fields and add "quote rejected" tag
+                try:
+                    if submission.contact:
+                        contact = submission.contact
+                        location_id = contact.location_id
+                        ghl_contact_id = contact.contact_id
+                        
+                        if location_id and ghl_contact_id:
+                            # Get credentials for this location
+                            credentials = GHLAuthCredentials.objects.filter(location_id=location_id).first()
+                            
+                            if credentials:
+                                headers = {
+                                    'Authorization': f'Bearer {credentials.access_token}',
+                                    'Content-Type': 'application/json',
+                                    'Version': '2021-07-28',
+                                    'Accept': 'application/json'
+                                }
+                                
+                                # Get contact from GHL to retrieve current tags
+                                search_url = f'https://services.leadconnectorhq.com/contacts/{ghl_contact_id}'
+                                search_response = requests.get(search_url, headers=headers)
+                                
+                                if search_response.status_code == 200:
+                                    contact_data = search_response.json()
+                                    current_tags = contact_data.get("tags", [])
+                                    
+                                    # Add "quote rejected" tag if not present (case-insensitive check)
+                                    tag_exists = any(tag.lower() == "quote rejected" for tag in current_tags)
+                                    
+                                    if not tag_exists:
+                                        current_tags.append("quote rejected")
+                                    
+                                    # Prepare custom fields payload
+                                    custom_fields = []
+                                    
+                                    # Get Decline Date custom field
+                                    try:
+                                        decline_date_field = GHLCustomField.objects.get(
+                                            account=credentials,
+                                            field_name='Decline Date',
+                                            is_active=True
+                                        )
+                                        decline_date_field.refresh_from_db()
+                                        
+                                        if decline_date_field.ghl_field_id and decline_date_field.ghl_field_id != 'ghl_field_id' and len(decline_date_field.ghl_field_id) >= 5:
+                                            # Format date as string (YYYY-MM-DD or ISO format)
+                                            decline_date_value = rejected_at.strftime('%Y-%m-%d')
+                                            custom_fields.append({
+                                                "id": str(decline_date_field.ghl_field_id),
+                                                "field_value": decline_date_value
+                                            })
+                                            print(f"✅ [QUOTE REJECTED] Added Decline Date field: {decline_date_value}")
+                                    except GHLCustomField.DoesNotExist:
+                                        print(f"⚠️ [QUOTE REJECTED] 'Decline Date' custom field not found")
+                                    except Exception as e:
+                                        print(f"❌ [QUOTE REJECTED] Error getting Decline Date field: {str(e)}")
+                                    
+                                    # Get Decline Notes custom field
+                                    try:
+                                        decline_notes_field = GHLCustomField.objects.get(
+                                            account=credentials,
+                                            field_name='Decline Notes',
+                                            is_active=True
+                                        )
+                                        decline_notes_field.refresh_from_db()
+                                        
+                                        if decline_notes_field.ghl_field_id and decline_notes_field.ghl_field_id != 'ghl_field_id' and len(decline_notes_field.ghl_field_id) >= 5:
+                                            custom_fields.append({
+                                                "id": str(decline_notes_field.ghl_field_id),
+                                                "field_value": rejection_notes
+                                            })
+                                            print(f"✅ [QUOTE REJECTED] Added Decline Notes field: {rejection_notes}")
+                                    except GHLCustomField.DoesNotExist:
+                                        print(f"⚠️ [QUOTE REJECTED] 'Decline Notes' custom field not found")
+                                    except Exception as e:
+                                        print(f"❌ [QUOTE REJECTED] Error getting Decline Notes field: {str(e)}")
+                                    
+                                    # Get Decline Reason custom field
+                                    try:
+                                        decline_reason_field = GHLCustomField.objects.get(
+                                            account=credentials,
+                                            field_name='Decline Reason',
+                                            is_active=True
+                                        )
+                                        decline_reason_field.refresh_from_db()
+                                        
+                                        if decline_reason_field.ghl_field_id and decline_reason_field.ghl_field_id != 'ghl_field_id' and len(decline_reason_field.ghl_field_id) >= 5:
+                                            custom_fields.append({
+                                                "id": str(decline_reason_field.ghl_field_id),
+                                                "field_value": rejection_reason
+                                            })
+                                            print(f"✅ [QUOTE REJECTED] Added Decline Reason field: {rejection_reason}")
+                                    except GHLCustomField.DoesNotExist:
+                                        print(f"⚠️ [QUOTE REJECTED] 'Decline Reason' custom field not found")
+                                    except Exception as e:
+                                        print(f"❌ [QUOTE REJECTED] Error getting Decline Reason field: {str(e)}")
+                                    
+                                    # Update contact with tags and custom fields
+                                    update_url = f'https://services.leadconnectorhq.com/contacts/{ghl_contact_id}'
+                                    update_payload = {}
+                                    
+                                    if not tag_exists:
+                                        update_payload["tags"] = current_tags
+                                    
+                                    if custom_fields:
+                                        update_payload["customFields"] = custom_fields
+                                    
+                                    if update_payload:
+                                        update_response = requests.put(update_url, headers=headers, json=update_payload)
+                                        
+                                        if update_response.status_code in [200, 201]:
+                                            if not tag_exists:
+                                                print(f"✅ [QUOTE REJECTED] Successfully added 'quote rejected' tag to contact {ghl_contact_id}")
+                                            if custom_fields:
+                                                print(f"✅ [QUOTE REJECTED] Successfully updated GHL custom fields for contact {ghl_contact_id}")
+                                        else:
+                                            print(f"❌ [QUOTE REJECTED] Failed to update contact: {update_response.status_code} - {update_response.text}")
+                                    else:
+                                        if tag_exists:
+                                            print(f"ℹ️ [QUOTE REJECTED] Contact {ghl_contact_id} already has 'quote rejected' tag and no custom fields to update")
+                                else:
+                                    print(f"⚠️ [QUOTE REJECTED] Failed to fetch contact from GHL: {search_response.status_code} - {search_response.text}")
+                            else:
+                                print(f"⚠️ [QUOTE REJECTED] No credentials found for location_id: {location_id}")
+                        else:
+                            print(f"⚠️ [QUOTE REJECTED] Missing location_id or ghl_contact_id for contact")
+                    else:
+                        print(f"⚠️ [QUOTE REJECTED] Submission has no contact linked")
+                except Exception as e:
+                    print(f"❌ [QUOTE REJECTED] Error updating GHL contact: {str(e)}")
+                    import traceback
+                    traceback.print_exc()
+                    # Don't fail the request if GHL update fails
                 
                 return Response({
                     'message': 'Quote rejected successfully',
