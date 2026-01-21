@@ -214,24 +214,24 @@ def sync_contacts_to_db(contact_data):
 
 
 
-def create_ghl_location_index(location_id: str):
+def create_ghl_location_index(location_id: str, location_index: dict):
     """
     Create GHLLocationIndex entries for a given location_id
     """
 
-    location_index = {
-        "address_0": 0,
-        "QmYk134LkK2hownvL1sE": 1,
-        "6K2aY5ghsAeCNhNJBCt": 2,
-        "4vx8hTmhneL3aHhQOobV": 3,
-        "ou8hGYQTDuijrxtCD2Bhs": 4,
-        "IVh5iKD6A7xB6J0CqocG": 5,
-        "vsrkHtczxuyyIg9CG80p": 6,
-        "tt28EWemd1DyWpzqQKA3": 7,
-        "1ERLsUjWpMrUfHZx1oIr": 8,
-        "cCpLI0tAY2q2MfCM5yco": 9,
-        "cDlPlyq0J77lx2G1U88G": 10,
-    }
+    # location_index = {
+    #     "address_0": 0,
+    #     "QmYk134LkK2hownvL1sE": 1,
+    #     "6K2aY5ghsAeCNhNJBCt": 2,
+    #     "4vx8hTmhneL3aHhQOobV": 3,
+    #     "ou8hGYQTDuijrxtCD2Bhs": 4,
+    #     "IVh5iKD6A7xB6J0CqocG": 5,
+    #     "vsrkHtczxuyyIg9CG80p": 6,
+    #     "tt28EWemd1DyWpzqQKA3": 7,
+    #     "1ERLsUjWpMrUfHZx1oIr": 8,
+    #     "cCpLI0tAY2q2MfCM5yco": 9,
+    #     "cDlPlyq0J77lx2G1U88G": 10,
+    # }
 
     # Fetch credentials
     credentials = GHLAuthCredentials.objects.filter(
