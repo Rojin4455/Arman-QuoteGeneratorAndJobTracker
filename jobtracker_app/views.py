@@ -1211,15 +1211,14 @@ class JobImageViewSet(viewsets.ModelViewSet):
 class EstimateAppointmentListView(APIView):
     """
     Get all estimate appointments (appointments with calendar name "FREE On-Site Estimate").
+    Returns all matching records (no pagination).
     
     Query params:
     - status: filter by estimate_status (comma-separated list)
-    - assigned_user_ids: filter by assigned user IDs (comma-separated list)
+    - assigned_user_ids: filter by assigned user IDs (comma-separated list) [REQUIRED]
     - start_date: filter by start_time >= date (YYYY-MM-DD format)
     - end_date: filter by start_time <= date (YYYY-MM-DD format)
     - search: search in title and notes (case-insensitive)
-    - page: page number (default: 1)
-    - page_size: number of items per page (default: 20, max: 100)
     
     Permissions:
     - Admins: Full access to all estimate appointments
@@ -1230,6 +1229,11 @@ class EstimateAppointmentListView(APIView):
     def get(self, request):
         user = request.user
         if not user.is_authenticated:
+            return Response([], status=200)
+        
+        # Check if assigned_user_ids is provided - if not, return empty result
+        assigned_user_ids = request.query_params.get('assigned_user_ids')
+        if not assigned_user_ids:
             return Response([], status=200)
         
         # Filter by calendar name "FREE On-Site Estimate"
@@ -1256,7 +1260,6 @@ class EstimateAppointmentListView(APIView):
                 qs = qs.filter(estimate_status__in=status_list)
         
         # Filter by assigned_user_ids (comma-separated list of IDs, UUIDs, or emails)
-        assigned_user_ids = request.query_params.get('assigned_user_ids')
         if assigned_user_ids:
             assigned_list = [a.strip() for a in assigned_user_ids.split(',') if a.strip()]
             if assigned_list:
@@ -1296,15 +1299,9 @@ class EstimateAppointmentListView(APIView):
         # Order by start_time
         qs = qs.order_by('-start_time', '-created_at')
         
-        # Apply pagination
-        paginator = PageNumberPagination()
-        paginator.page_size = 20
-        paginator.page_size_query_param = 'page_size'
-        paginator.max_page_size = 100
-        
-        paginated_qs = paginator.paginate_queryset(qs, request)
-        serializer = AppointmentSerializer(paginated_qs, many=True, context={'request': request})
-        return paginator.get_paginated_response(serializer.data)
+        # Return all records (no pagination)
+        serializer = AppointmentSerializer(qs, many=True, context={'request': request})
+        return Response(serializer.data, status=200)
 
 
 class EstimateAppointmentUpdateStatusView(APIView):

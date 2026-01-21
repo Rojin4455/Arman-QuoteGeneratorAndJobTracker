@@ -591,6 +591,47 @@ class JobSerializer(serializers.ModelSerializer):
     def update(self, instance, validated_data):
         items_data = validated_data.pop('items', None)
         assignments_data = validated_data.pop('assignments', None)
+        
+        # Handle contact_id and address_id (write-only fields) from initial_data
+        contact_id = self.initial_data.get('contact_id')
+        address_id = self.initial_data.get('address_id')
+        
+        # If contact_id is provided and not empty, get the contact and populate customer fields
+        if contact_id:
+            try:
+                contact = Contact.objects.get(id=contact_id)
+                validated_data['contact'] = contact
+                
+                # Override customer fields from contact
+                name_parts = [contact.first_name, contact.last_name]
+                validated_data['customer_name'] = ' '.join(filter(None, name_parts)) or None
+                validated_data['customer_phone'] = contact.phone
+                validated_data['customer_email'] = contact.email
+                validated_data['ghl_contact_id'] = contact.contact_id
+            except Contact.DoesNotExist:
+                raise serializers.ValidationError({
+                    'contact_id': f'Contact with id {contact_id} does not exist.'
+                })
+        
+        # If address_id is provided and not empty, get the address and populate customer_address
+        if address_id:
+            try:
+                address = Address.objects.get(id=address_id)
+                validated_data['address'] = address
+                
+                # Override customer_address from address
+                validated_data['customer_address'] = address.get_full_address()
+            except Address.DoesNotExist:
+                raise serializers.ValidationError({
+                    'address_id': f'Address with id {address_id} does not exist.'
+                })
+        
+        # Validate that if address is provided, it belongs to the contact (if contact is also provided)
+        if validated_data.get('address') and validated_data.get('contact'):
+            if validated_data['address'].contact != validated_data['contact']:
+                raise serializers.ValidationError({
+                    'address_id': 'The provided address does not belong to the provided contact.'
+                })
 
         for attr, value in validated_data.items():
             setattr(instance, attr, value)
