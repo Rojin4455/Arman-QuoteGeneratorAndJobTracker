@@ -5,7 +5,7 @@ from typing import List, Dict, Any, Optional
 from django.utils.dateparse import parse_datetime
 from django.db import transaction
 from django.core.exceptions import ObjectDoesNotExist
-from accounts.models import GHLAuthCredentials, Contact, Address, Calendar
+from accounts.models import GHLAuthCredentials, Contact, Address, Calendar, GHLLocationIndex
 from service_app.models import User, Appointment
 
 
@@ -212,6 +212,52 @@ def sync_contacts_to_db(contact_data):
 
 
 
+
+
+def create_ghl_location_index(location_id: str):
+    """
+    Create GHLLocationIndex entries for a given location_id
+    """
+
+    location_index = {
+        "address_0": 0,
+        "QmYk134LkK2hownvL1sE": 1,
+        "6K2aY5ghsAeCNhNJBCt": 2,
+        "4vx8hTmhneL3aHhQOobV": 3,
+        "ou8hGYQTDuijrxtCD2Bhs": 4,
+        "IVh5iKD6A7xB6J0CqocG": 5,
+        "vsrkHtczxuyyIg9CG80p": 6,
+        "tt28EWemd1DyWpzqQKA3": 7,
+        "1ERLsUjWpMrUfHZx1oIr": 8,
+        "cCpLI0tAY2q2MfCM5yco": 9,
+        "cDlPlyq0J77lx2G1U88G": 10,
+    }
+
+    # Fetch credentials
+    credentials = GHLAuthCredentials.objects.filter(
+        location_id=location_id
+    ).first()
+
+    if not credentials:
+        raise ValueError(f"No GHL credentials found for location_id: {location_id}")
+
+    location_objects = []
+
+    for parent_id, order in location_index.items():
+        location_objects.append(
+            GHLLocationIndex(
+                account=credentials,
+                parent_id=parent_id,
+                order=order,
+                name=f"Address {order}"
+            )
+        )
+
+    GHLLocationIndex.objects.bulk_create(location_objects)
+
+    return len(location_objects)
+
+
 def fetch_contacts_locations(contact_data: list, location_id: str, access_token: str) -> dict:
     # Fetch location custom fields
     location_custom_fields = fetch_location_custom_fields(location_id, access_token)
@@ -263,7 +309,7 @@ def fetch_contacts_locations(contact_data: list, location_id: str, access_token:
             # --- Custom fields addresses ---
             custom_fields = contact_detail.get('customFields', [])
             if custom_fields and any(cf.get('value') for cf in custom_fields):
-                create_address_from_custom_fields(contact_id, custom_fields, location_custom_fields)
+                create_address_from_custom_fields(contact_id, custom_fields, location_custom_fields, location_id)
                 # Add a small delay to be respectful to the API
             time.sleep(0.2)
 
@@ -309,32 +355,47 @@ def fetch_location_custom_fields(location_id: str, access_token: str) -> dict:
         raise Exception(f"Failed to fetch custom fields: {e}")
 
 
-def create_address_from_custom_fields(contact_id: str, custom_fields_list: list, location_custom_fields: dict):
+def create_address_from_custom_fields(contact_id: str, custom_fields_list: list, location_custom_fields: dict, location_id: str = None):
     """
     Create Address instances in the DB from a contact's custom fields dict, using the location_custom_fields mapping.
     Args:
         contact_id (str): The contact's unique ID (should exist in Contact model)
         custom_fields_list (list): List of dicts with 'id' and 'value' for each custom field
-        location_id (str): The location ID for the subaccount
-        access_token (str): Bearer token for authentication
+        location_custom_fields (dict): Mapping of field IDs to their metadata
+        location_id (str, optional): The location ID for the subaccount (used to fetch location_index from model)
     Returns:
         None (prints sync summary)
     """
-
-    # Define location_index (parentId to order)
-    location_index = {
-        "address_0": 0,
-        "QmYk134LkK2hownvL1sE": 1,
-        "6K2aY5ghsAeCNhNJBcTt": 2,
-        "4Vx8hTmhneL3aHhQOobV": 3,
-        "ou8hGYQTDuirxtCD2Bhs": 4,
-        "IVh5iKD6A7xB6JOCqocG": 5,
-        "vsrkHtczxuyyIg9CG8Op": 6,
-        "tt28EWemd1DyWpzqQKA3": 7,
-        "1ERLsUjWpMrUfHZx1oIr": 8,
-        "cCplI0tAY2q2MfCM5yco": 9,
-        "cdIPlyq0J77lx2GlU88G": 10
-    }
+    
+    # Get location_index from model using location_id
+    location_index = {}
+    if location_id:
+        try:
+            # Get credentials for this location
+            credentials = GHLAuthCredentials.objects.filter(location_id=location_id).first()
+            if credentials:
+                # Fetch all active location indices for this account, ordered by order
+                location_indices = GHLLocationIndex.objects.filter(
+                    account=credentials,
+                    is_active=True
+                ).order_by('order')
+                
+                # Build location_index dictionary from model
+                for loc_idx in location_indices:
+                    location_index[loc_idx.parent_id] = loc_idx.order
+                
+                if location_index:
+                    print(f"✅ [LOCATION INDEX] Loaded {len(location_index)} location indices from model for location_id: {location_id}")
+                else:
+                    print(f"⚠️ [LOCATION INDEX] No location indices found in model for location_id: {location_id}, using empty dict")
+            else:
+                print(f"⚠️ [LOCATION INDEX] No credentials found for location_id: {location_id}, using empty dict")
+        except Exception as e:
+            print(f"❌ [LOCATION INDEX] Error fetching location_index from model: {str(e)}")
+            import traceback
+            traceback.print_exc()
+    else:
+        print("⚠️ [LOCATION INDEX] No location_id provided, using empty dict")
 
     # Group custom fields by parentId (location)
     address_fields = {pid: {} for pid in location_index}

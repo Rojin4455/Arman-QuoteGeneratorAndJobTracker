@@ -167,3 +167,45 @@ class Calendar(models.Model):
 
     def __str__(self):
         return f"{self.name} ({self.ghl_calendar_id})"
+
+
+class GHLLocationIndex(models.Model):
+    """Store location index mappings (parentId to order) for each GHL account"""
+    account = models.ForeignKey(
+        GHLAuthCredentials,
+        on_delete=models.CASCADE,
+        related_name='location_indices',
+        help_text="The GHL account this location index belongs to"
+    )
+    parent_id = models.CharField(
+        max_length=255,
+        help_text="GHL custom field parent ID (e.g., 'address_0', 'QmYk134LkK2hownvL1sE')"
+    )
+    order = models.PositiveIntegerField(
+        help_text="Order/position of this location (0, 1, 2, etc.)"
+    )
+    name = models.CharField(
+        max_length=255,
+        blank=True,
+        null=True,
+        help_text="Optional name/description for this location index"
+    )
+    is_active = models.BooleanField(
+        default=True,
+        help_text="Whether this location index mapping is currently active"
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = 'ghl_location_indices'
+        unique_together = ['account', 'parent_id']
+        ordering = ['account', 'order']
+        indexes = [
+            models.Index(fields=['account', 'is_active']),
+            models.Index(fields=['account', 'order']),
+            models.Index(fields=['parent_id']),
+        ]
+
+    def __str__(self):
+        return f"{self.account.user_id} - {self.parent_id} (Order: {self.order})"
