@@ -7,16 +7,13 @@ Usage:
 """
 
 from django.core.management.base import BaseCommand, CommandError
-from accounts.models import Contact, GHLAuthCredentials
+from accounts.models import Contact, GHLAuthCredentials, GHLCustomField
 import requests
 import openpyxl
 
 
 class Command(BaseCommand):
     help = 'Update contact custom field with quote link from Excel file'
-
-    # Custom field ID to update
-    CUSTOM_FIELD_ID = "Bff2eZtlr82uvVQmByPh"
 
     def add_arguments(self, parser):
         parser.add_argument(
@@ -46,6 +43,25 @@ class Command(BaseCommand):
         """
         Update a contact's custom field via GHL API
         """
+        # Get Quote Link custom field ID dynamically
+        try:
+            quote_link_field = GHLCustomField.objects.get(
+                account=credentials,
+                field_name='Quote Link',
+                is_active=True
+            )
+            quote_link_field.refresh_from_db()
+            
+            # Validate that we have a real field ID (not a placeholder)
+            if not quote_link_field.ghl_field_id or quote_link_field.ghl_field_id == 'ghl_field_id' or len(quote_link_field.ghl_field_id) < 5:
+                return False, f"Invalid Quote Link field ID in database: '{quote_link_field.ghl_field_id}'"
+            
+            custom_field_id = quote_link_field.ghl_field_id
+        except GHLCustomField.DoesNotExist:
+            return False, "Quote Link custom field not found for this account. Please create it in the database."
+        except Exception as e:
+            return False, f"Error fetching Quote Link field: {str(e)}"
+        
         url = f'https://services.leadconnectorhq.com/contacts/{contact_id}'
         headers = {
             'Authorization': f'Bearer {credentials.access_token}',
@@ -57,7 +73,7 @@ class Command(BaseCommand):
         update_data = {
             "customFields": [
                 {
-                    "id": self.CUSTOM_FIELD_ID,
+                    "id": str(custom_field_id),
                     "field_value": field_value
                 }
             ]

@@ -5,7 +5,7 @@ from typing import List, Dict, Any, Optional
 from django.utils.dateparse import parse_datetime
 from django.db import transaction
 from django.core.exceptions import ObjectDoesNotExist
-from accounts.models import GHLAuthCredentials, Contact, Address, Calendar, GHLLocationIndex
+from accounts.models import GHLAuthCredentials, Contact, Address, Calendar, GHLLocationIndex, GHLCustomField
 from service_app.models import User, Appointment
 
 
@@ -267,6 +267,25 @@ def fetch_contacts_locations(contact_data: list, location_id: str, access_token:
         "Authorization": f"Bearer {access_token}",
         "Version": "2021-07-28"
     }
+    
+    # Get Property Sqft custom field ID dynamically (once before the loop)
+    property_sqft_field_id = None
+    try:
+        credentials = GHLAuthCredentials.objects.filter(location_id=location_id).first()
+        if credentials:
+            property_sqft_field = GHLCustomField.objects.filter(
+                account=credentials,
+                field_name='Property Sqft',
+                is_active=True
+            ).first()
+            if property_sqft_field:
+                property_sqft_field.refresh_from_db()
+                if property_sqft_field.ghl_field_id and property_sqft_field.ghl_field_id != 'ghl_field_id' and len(property_sqft_field.ghl_field_id) >= 5:
+                    property_sqft_field_id = property_sqft_field.ghl_field_id
+                    print(f"✅ [PROPERTY SQFT] Using custom field 'Property Sqft' with ID: {property_sqft_field_id}")
+    except Exception as e:
+        print(f"⚠️ [PROPERTY SQFT] Error fetching Property Sqft field: {str(e)}")
+    
     total_contacts = len(contact_data)
 
     for idx, contact in enumerate(contact_data, 1):
@@ -297,10 +316,12 @@ def fetch_contacts_locations(contact_data: list, location_id: str, access_token:
                 'contact_id': contact_id
             }
 
-            for field in contact_detail.get("customFields", []):
-                if field.get("id") == "KYALsCnk6LD648bhbvjo":
-                    address_fields["property_sqft"] = field.get("value")
-                    break
+            # Extract property_sqft from custom fields if field ID is found
+            if property_sqft_field_id:
+                for field in contact_detail.get("customFields", []):
+                    if field.get("id") == property_sqft_field_id:
+                        address_fields["property_sqft"] = field.get("value")
+                        break
 
             
             # Only save if at least one address field is present
