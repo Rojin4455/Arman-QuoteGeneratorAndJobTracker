@@ -13,6 +13,7 @@ from accounts.tasks import fetch_all_contacts_task,handle_webhook_event
 from accounts.utils import sync_all_users_to_db
 from accounts.tasks import sync_calendars_from_ghl_task
 from dashboard_app.tasks import sync_single_invoice_task,delete_invoice_task
+from accounts.utils import fetch_location_custom_fields
 
 
 
@@ -82,6 +83,8 @@ def tokens(request):
             }
         )
         fetch_all_contacts_task.delay(response_data.get("locationId"), response_data.get("access_token"))
+        fetch_location_custom_fields(response_data.get("locationId"), response_data.get("access_token"))
+        sync_all_users_to_db(response_data.get("locationId"), response_data.get("access_token"))
         sync_calendars_from_ghl_task.delay(response_data.get("locationId"), response_data.get("access_token"))
         return JsonResponse({
             "message": "Authentication successful",
