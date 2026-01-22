@@ -179,17 +179,10 @@ SIMPLE_JWT = {
 
 
 
-CORS_ALLOWED_ORIGINS = [
-    "http://localhost:3000",  # React dev server
-    "http://localhost:8080",  # React dev server
-    "http://localhost:8080",  # React dev server
-    "http://127.0.0.1:3000",
-    "http://localhost:3001",  # Alternative React port
-    "http://127.0.0.1:3001",
-    "http://3.141.107.85",
-    "https://quotenew.theservicepilot.com",
-    "https://services.theservicepilot.com",
-]
+CORS_ALLOWED_ORIGINS = config(
+    'CORS_ALLOWED_ORIGINS',
+    default='http://localhost:3000,http://localhost:8080,http://127.0.0.1:3000,http://localhost:3001,http://127.0.0.1:3001,http://3.141.107.85,https://quotenew.theservicepilot.com,https://services.theservicepilot.com'
+).split(',')
 
 CORS_ALLOW_CREDENTIALS = True
 
