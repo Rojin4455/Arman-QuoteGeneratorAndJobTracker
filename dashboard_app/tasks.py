@@ -1,10 +1,7 @@
 from celery import shared_task
 from dashboard_app.services import invoice_sync
 from dashboard_app.models import Invoice
-
-# @shared_task
-# def sync_invoices_daily():
-#     invoice_sync()
+from accounts.models import GHLAuthCredentials
 
 @shared_task
 def sync_single_invoice_task(location_id, invoice_id):
@@ -49,3 +46,78 @@ def delete_invoice_task(invoice_id):
     except Exception as e:
         print(f"Error deleting invoice {invoice_id}: {str(e)}")
         raise
+
+@shared_task
+def sync_all_invoices_periodic():
+    """
+    Periodic Celery task to sync all invoices from GHL for all locations.
+    Runs every 10 minutes via Celery Beat.
+    """
+    try:
+        print("🔄 [PERIODIC SYNC] Starting periodic invoice sync for all locations...")
+        
+        # Get all active GHL credentials (each has a location_id)
+        credentials_list = GHLAuthCredentials.objects.all()
+        
+        if not credentials_list.exists():
+            print("⚠️ [PERIODIC SYNC] No GHL credentials found. Skipping sync.")
+            return {
+                "success": False,
+                "message": "No GHL credentials found",
+                "locations_synced": 0
+            }
+        
+        total_synced = 0
+        total_created = 0
+        total_updated = 0
+        total_deleted = 0
+        errors = []
+        
+        for credentials in credentials_list:
+            location_id = credentials.location_id
+            if not location_id:
+                print(f"⚠️ [PERIODIC SYNC] Credentials {credentials.id} has no location_id. Skipping.")
+                continue
+            
+            try:
+                print(f"📦 [PERIODIC SYNC] Syncing invoices for location_id: {location_id}")
+                result = invoice_sync.sync_invoices(location_id, invoice_id=None)
+                
+                if result:
+                    total_synced += result.get("total", 0)
+                    total_created += result.get("created", 0)
+                    total_updated += result.get("updated", 0)
+                    total_deleted += result.get("deleted", 0)
+                    print(f"✅ [PERIODIC SYNC] Location {location_id}: {result.get('total', 0)} invoices synced")
+                else:
+                    print(f"⚠️ [PERIODIC SYNC] Location {location_id}: No result returned from sync")
+                    
+            except Exception as e:
+                error_msg = f"Error syncing invoices for location {location_id}: {str(e)}"
+                print(f"❌ [PERIODIC SYNC] {error_msg}")
+                errors.append(error_msg)
+                continue
+        
+        summary = {
+            "success": len(errors) == 0,
+            "locations_processed": credentials_list.count(),
+            "total_synced": total_synced,
+            "total_created": total_created,
+            "total_updated": total_updated,
+            "total_deleted": total_deleted,
+            "errors": errors if errors else None
+        }
+        
+        print(f"✅ [PERIODIC SYNC] Completed. Summary: {summary}")
+        return summary
+        
+    except Exception as e:
+        error_msg = f"Critical error in periodic invoice sync: {str(e)}"
+        print(f"❌ [PERIODIC SYNC] {error_msg}")
+        import traceback
+        traceback.print_exc()
+        return {
+            "success": False,
+            "message": error_msg,
+            "locations_synced": 0
+        }

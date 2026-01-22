@@ -263,11 +263,13 @@ class InvoiceSyncService:
 
         data = self.fetch_invoice_by_id(invoice_id)
         if not data:
-            print(f"Failed to fetch invoice {invoice_id}")
+            print(f"❌ [INVOICE SYNC] Failed to fetch invoice {invoice_id} from GHL API")
             return None
 
         invoice, created = self.save_invoice(data)
-        print(f"Invoice {invoice.invoice_number or invoice.invoice_id} {'created' if created else 'updated'} successfully")
+        action = 'created' if created else 'updated'
+        print(f"✅ [INVOICE SYNC] Invoice {invoice.invoice_number or invoice.invoice_id} {action} successfully")
+        print(f"   Status: {invoice.status}, Amount Due: ${invoice.amount_due}, Due Date: {invoice.due_date}")
         return invoice
 
     def sync_all_invoices(self):

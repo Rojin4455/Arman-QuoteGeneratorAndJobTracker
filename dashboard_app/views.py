@@ -94,20 +94,18 @@ class InvoiceFilter(filters.FilterSet):
             status_filters |= Q(status__in=regular_statuses)
         
         if has_due:
-            # Due: invoices with due_date >= today, amount_due > 0, status='sent'
+            # Due: invoices with due_date >= today, amount_due > 0, status not paid/void
             status_filters |= Q(
                 due_date__gte=now,
                 amount_due__gt=0,
-                status='sent'
-            )
+            ) & ~Q(status__in=['paid', 'void'])
         
         if has_overdue:
-            # Overdue: invoices with due_date < today, amount_due > 0, status='sent'
+            # Overdue: invoices with due_date < today, amount_due > 0, status not paid/void
             status_filters |= Q(
                 due_date__lt=now,
                 amount_due__gt=0,
-                status='sent'
-            )
+            ) & ~Q(status__in=['paid', 'void'])
         
         return queryset.filter(status_filters)
     
@@ -275,13 +273,13 @@ class InvoiceViewSet(viewsets.ModelViewSet):
         
         # Calculate Due and Overdue dynamically based on due_date
         # Due: invoices with due_date >= today and amount_due > 0, status not paid/void
+        # Include all statuses except 'paid' and 'void' (e.g., sent, partially_paid, payment_processing, draft)
         due_queryset = queryset.filter(
             due_date__gte=now,
             amount_due__gt=0,
-            status='sent',
-        )
+        ).exclude(status__in=['paid', 'void'])
         due_count = due_queryset.count()
-        due_total = due_queryset.aggregate(Sum("total"))["total__sum"] or 0
+        due_total = due_queryset.aggregate(Sum("amount_due"))["amount_due__sum"] or 0
         status_distribution["due"] = {
             "label": "Due",
             "count": due_count,
@@ -289,13 +287,13 @@ class InvoiceViewSet(viewsets.ModelViewSet):
         }
         
         # Overdue: invoices with due_date < today and amount_due > 0, status not paid/void
+        # Include all statuses except 'paid' and 'void'
         overdue_queryset = queryset.filter(
             due_date__lt=now,
             amount_due__gt=0,
-            status='sent'
-        )
+        ).exclude(status__in=['paid', 'void'])
         overdue_count = overdue_queryset.count()
-        overdue_total = overdue_queryset.aggregate(Sum("total"))["total__sum"] or 0
+        overdue_total = overdue_queryset.aggregate(Sum("amount_due"))["amount_due__sum"] or 0
         status_distribution["overdue"] = {
             "label": "Overdue",
             "count": overdue_count,
