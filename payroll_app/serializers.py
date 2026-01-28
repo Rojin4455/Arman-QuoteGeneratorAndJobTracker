@@ -193,7 +193,7 @@ class TimeEntrySerializer(serializers.ModelSerializer):
             'check_in_time', 'check_in_time_local', 'check_out_time', 'check_out_time_local',
             'total_hours', 'notes', 'status', 'created_at', 'updated_at'
         ]
-        read_only_fields = ['id', 'total_hours', 'status', 'created_at', 'updated_at']
+        read_only_fields = ['id', 'status', 'created_at', 'updated_at']
     
     def get_employee_timezone(self, obj):
         """Get employee's timezone"""
@@ -284,7 +284,24 @@ class TimeEntrySerializer(serializers.ModelSerializer):
             else:
                 validated_data['check_out_time'] = check_out.astimezone(pytz.UTC)
         
-        return super().update(instance, validated_data)
+        # If total_hours is explicitly provided, use it
+        # Otherwise, if check_in_time or check_out_time changed, recalculate
+        total_hours_provided = 'total_hours' in validated_data
+        times_changed = 'check_in_time' in validated_data or 'check_out_time' in validated_data
+        
+        # Update the instance
+        updated_instance = super().update(instance, validated_data)
+        
+        # If times changed but total_hours wasn't explicitly provided, recalculate
+        if times_changed and not total_hours_provided:
+            # Refresh from DB to get updated times
+            updated_instance.refresh_from_db()
+            calculated_hours = updated_instance.calculate_hours()
+            if calculated_hours is not None:
+                updated_instance.total_hours = calculated_hours
+                updated_instance.save(update_fields=['total_hours'])
+        
+        return updated_instance
 
 
 class PayoutSerializer(serializers.ModelSerializer):
