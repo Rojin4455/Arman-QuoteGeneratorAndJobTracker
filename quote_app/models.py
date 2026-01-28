@@ -275,3 +275,38 @@ class CustomerPackageQuote(models.Model):
             # Round to nearest integer
             self.total_price = self.total_price.quantize(Decimal("1"), rounding=ROUND_HALF_UP)
         super().save(*args, **kwargs)
+
+
+class CustomerSubmissionImage(models.Model):
+    """Model to store images uploaded for customer submissions"""
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    submission = models.ForeignKey(
+        CustomerSubmission, 
+        on_delete=models.CASCADE, 
+        related_name='images'
+    )
+    image = models.ImageField(upload_to='submission_images/%Y/%m/%d/')
+    caption = models.CharField(
+        max_length=255, 
+        blank=True, 
+        null=True, 
+        help_text="Optional caption for the image"
+    )
+    uploaded_by = models.ForeignKey(
+        User, 
+        on_delete=models.SET_NULL, 
+        null=True, 
+        blank=True, 
+        related_name='uploaded_submission_images'
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ['-created_at']
+        verbose_name = 'Customer Submission Image'
+        verbose_name_plural = 'Customer Submission Images'
+        db_table = 'customer_submission_images'
+
+    def __str__(self):
+        return f"Image for submission {self.submission.id} - {self.created_at}"

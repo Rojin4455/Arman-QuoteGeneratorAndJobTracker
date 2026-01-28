@@ -1,9 +1,10 @@
 # user_views.py - Views for user-side functionality
-from rest_framework import generics, status
+from rest_framework import generics, status, permissions
 from rest_framework.decorators import api_view, permission_classes
 from rest_framework.response import Response
 from rest_framework.views import APIView
 from rest_framework.permissions import AllowAny
+from rest_framework.exceptions import PermissionDenied, NotFound, ValidationError
 from django.shortcuts import get_object_or_404
 from django.db import transaction
 from django.db.models import Q, Prefetch
@@ -18,14 +19,14 @@ from service_app.models import (
 )
 from .models import (
     CustomerSubmission, CustomerServiceSelection, CustomerQuestionResponse,
-    CustomerOptionResponse, CustomerSubQuestionResponse, CustomerPackageQuote,CustomService, QuoteSchedule
+    CustomerOptionResponse, CustomerSubQuestionResponse, CustomerPackageQuote,CustomService, QuoteSchedule, CustomerSubmissionImage
 )
 from .serializers import (
     LocationPublicSerializer, ServicePublicSerializer, PackagePublicSerializer,
     QuestionPublicSerializer, GlobalSizePackagePublicSerializer,
     CustomerSubmissionCreateSerializer, CustomerSubmissionDetailSerializer,AddressSerializer,
     ServiceQuestionResponseSerializer, PricingCalculationRequestSerializer,SubmitFinalQuoteSerializer,ContactSerializer,
-    ConditionalQuestionRequestSerializer, CustomerPackageQuoteSerializer,ConditionalQuestionResponseSerializer,ServiceResponseSubmissionSerializer,QuoteScheduleUpdateSerializer
+    ConditionalQuestionRequestSerializer, CustomerPackageQuoteSerializer,ConditionalQuestionResponseSerializer,ServiceResponseSubmissionSerializer,QuoteScheduleUpdateSerializer, CustomerSubmissionImageSerializer
 )
 from service_app.serializers import GlobalBasePriceSerializer, UserSerializer
 from service_app.models import User
@@ -44,6 +45,7 @@ from rest_framework.pagination import PageNumberPagination
 
 import json
 import re
+import uuid
 from django.http import JsonResponse
 from django.utils.dateparse import parse_datetime
 
@@ -1557,3 +1559,63 @@ class GlobalSettingsView(APIView):
         settings, _ = GlobalBasePrice.objects.get_or_create(id=1)
         serializer = GlobalBasePriceSerializer(settings)
         return Response(serializer.data)
+
+
+class CustomerSubmissionImageViewSet(viewsets.ModelViewSet):
+    """
+    ViewSet for managing customer submission images.
+    Allows uploading, updating, and deleting images for customer submissions.
+    
+    Permissions:
+    - Authenticated users: Can upload and manage images for submissions
+    
+    Endpoints:
+    - POST /api/quote/submission-images/ - Upload a new image (requires submission_id in request)
+    - GET /api/quote/submission-images/ - List all images (filter by submission_id query param)
+    - GET /api/quote/submission-images/{id}/ - Retrieve a specific image
+    - PATCH /api/quote/submission-images/{id}/ - Update image caption
+    - PUT /api/quote/submission-images/{id}/ - Update image (full update)
+    - DELETE /api/quote/submission-images/{id}/ - Delete an image
+    """
+    serializer_class = CustomerSubmissionImageSerializer
+    # Allow anyone (including unauthenticated) to upload and manage images
+    permission_classes = [permissions.AllowAny]
+
+    def get_queryset(self):
+        """
+        Return all images, optionally filtered by submission_id.
+        No user-based permission filtering so that anyone can view images.
+        """
+        qs = CustomerSubmissionImage.objects.select_related('submission', 'uploaded_by').all()
+
+        # Filter by submission_id if provided
+        submission_id = self.request.query_params.get('submission_id')
+        if submission_id:
+            try:
+                submission_uuid = uuid.UUID(submission_id)
+                qs = qs.filter(submission_id=submission_uuid)
+            except (ValueError, TypeError):
+                return CustomerSubmissionImage.objects.none()
+
+        return qs.order_by('-created_at')
+
+    def get_serializer_context(self):
+        """Add request to serializer context for building absolute URLs"""
+        context = super().get_serializer_context()
+        context['request'] = self.request
+        return context
+
+    def perform_create(self, serializer):
+        """Validate submission exists before allowing image upload"""
+        submission_id = self.request.data.get('submission')
+        if not submission_id:
+            raise ValidationError({'submission': 'submission field is required'})
+        
+        try:
+            CustomerSubmission.objects.get(id=submission_id)
+        except CustomerSubmission.DoesNotExist:
+            raise NotFound('Customer submission not found')
+
+        # Save with uploaded_by set to current user if authenticated, else None
+        user = self.request.user if self.request.user.is_authenticated else None
+        serializer.save(uploaded_by=user)

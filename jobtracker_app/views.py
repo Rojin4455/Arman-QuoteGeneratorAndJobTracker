@@ -625,10 +625,16 @@ class AppointmentViewSet(viewsets.ModelViewSet):
         qs = Appointment.objects.select_related(
             'assigned_user', 'contact', 'calendar'
         ).prefetch_related('users').all()
-        
-        # Exclude appointments with calendar name "Reccuring Service Calendar"
+
+        # Exclude recurring service calendar appointments from all actions
         qs = qs.exclude(calendar__name="Reccuring Service Calendar")
-        qs = qs.exclude(calendar__name="FREE On-Site Estimate")
+
+        # For list views, also hide estimate appointments from the main list.
+        # For retrieve / update / delete, we still want to be able to find
+        # estimate appointments by ID so they can be deleted with the same endpoint.
+        action = getattr(self, "action", None)
+        if action == "list":
+            qs = qs.exclude(calendar__name="FREE On-Site Estimate")
         is_admin = getattr(user, 'is_admin', False)
         
         # Permission filtering

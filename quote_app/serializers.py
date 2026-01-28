@@ -8,7 +8,7 @@ from service_app.models import (
 )
 from .models import (
     CustomerSubmission, CustomerServiceSelection, CustomerQuestionResponse,
-    CustomerOptionResponse, CustomerSubQuestionResponse, CustomerPackageQuote,CustomService, QuoteSchedule
+    CustomerOptionResponse, CustomerSubQuestionResponse, CustomerPackageQuote,CustomService, QuoteSchedule, CustomerSubmissionImage
 )
 
 from accounts.models import Address, Contact
@@ -232,6 +232,37 @@ class QuoteScheduleSerializer(serializers.ModelSerializer):
         model = QuoteSchedule
         fields = "__all__"
 
+
+class CustomerSubmissionImageSerializer(serializers.ModelSerializer):
+    """Serializer for customer submission images"""
+    image_url = serializers.SerializerMethodField()
+    uploaded_by_name = serializers.SerializerMethodField()
+    submission_id = serializers.UUIDField(source='submission.id', read_only=True)
+
+    class Meta:
+        model = CustomerSubmissionImage
+        fields = [
+            'id', 'submission', 'submission_id', 'image', 'image_url', 'caption',
+            'uploaded_by', 'uploaded_by_name', 'created_at', 'updated_at'
+        ]
+        read_only_fields = ['id', 'uploaded_by', 'created_at', 'updated_at']
+
+    def get_image_url(self, obj):
+        """Return the full URL of the image"""
+        if obj.image:
+            request = self.context.get('request')
+            if request:
+                return request.build_absolute_uri(obj.image.url)
+            return obj.image.url
+        return None
+
+    def get_uploaded_by_name(self, obj):
+        """Return the name of the user who uploaded the image"""
+        if obj.uploaded_by:
+            return obj.uploaded_by.get_full_name() or obj.uploaded_by.username
+        return None
+
+
 class CustomerSubmissionDetailSerializer(serializers.ModelSerializer):
     """Detailed serializer for customer submissions"""
     service_selections = serializers.SerializerMethodField()
@@ -240,6 +271,7 @@ class CustomerSubmissionDetailSerializer(serializers.ModelSerializer):
     address = AddressSerializer(read_only=True)
     quote_schedule = QuoteScheduleSerializer(read_only=True)
     quoted_by_details = serializers.SerializerMethodField()
+    images = CustomerSubmissionImageSerializer(many=True, read_only=True)
     print("erererereererrerere")
     
     class Meta:
@@ -250,7 +282,7 @@ class CustomerSubmissionDetailSerializer(serializers.ModelSerializer):
             'status', 'total_base_price', 'total_adjustments',
             'total_surcharges', 'final_total', 'created_at','quote_surcharge_applicable',
             'expires_at', 'service_selections','additional_data','contact','address','custom_products','custom_service_total','quote_schedule',
-            'quoted_by', 'quoted_by_details'
+            'quoted_by', 'quoted_by_details', 'images'
         ]
     
     def get_service_selections(self, obj):

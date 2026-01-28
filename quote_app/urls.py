@@ -3,10 +3,11 @@ from django.urls import path
 from . import views
 from django.urls import path, include
 from rest_framework.routers import DefaultRouter
-from .views import CustomServiceViewSet
+from .views import CustomServiceViewSet, CustomerSubmissionImageViewSet
 
 router = DefaultRouter()
 router.register(r'custom-services', CustomServiceViewSet, basename='customservice')
+router.register(r'submission-images', CustomerSubmissionImageViewSet, basename='submission-image')
 urlpatterns = [
 
     path('', include(router.urls)),
