@@ -76,7 +76,8 @@ class AppointmentCalendarSerializer(serializers.ModelSerializer):
         fields = [
             'appointment_id', 'title', 'start_time', 'end_time', 
             'appointment_status', 'assigned_user_name', 'contact_name',
-            'address', 'notes', 'source', 'users_count','calendar'
+            'address', 'notes', 'source', 'users_count', 'calendar',
+            'ghl_contact_id'
         ]
 
     def get_assigned_user_name(self, obj):
