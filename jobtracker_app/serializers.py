@@ -52,14 +52,20 @@ class OccurrenceEventSerializer(serializers.ModelSerializer):
 class CalendarEventSerializer(serializers.ModelSerializer):
     """Serializer for calendar view - works with Job model directly (supports both one-time and recurring series instances)"""
     job_id = serializers.UUIDField(source='id')
+    company_name = serializers.SerializerMethodField()
 
     class Meta:
         model = Job
         fields = [
             'job_id', 'title', 'scheduled_at', 'status', 'priority',
-            'duration_hours', 'total_price', 'customer_name',
-            'series_id', 'series_sequence','job_type'
+            'duration_hours', 'total_price', 'customer_name', 'company_name',
+            'series_id', 'series_sequence', 'job_type'
         ]
+
+    def get_company_name(self, obj):
+        if obj.contact:
+            return obj.contact.company_name or None
+        return None
 
 
 class AppointmentCalendarSerializer(serializers.ModelSerializer):

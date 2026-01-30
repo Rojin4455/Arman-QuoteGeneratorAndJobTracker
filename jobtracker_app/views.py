@@ -479,7 +479,10 @@ class OccurrenceListView(APIView):
         # Apply additional filters
         qs = apply_job_filters(qs, request, skip_assignee_ids=skip_assignee_ids_in_filter)
 
-        data = CalendarEventSerializer(qs.order_by('scheduled_at', 'series_sequence'), many=True).data
+        data = CalendarEventSerializer(
+            qs.select_related('contact').order_by('scheduled_at', 'series_sequence'),
+            many=True
+        ).data
         return Response(data)
 
 
