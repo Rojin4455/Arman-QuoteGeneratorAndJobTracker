@@ -225,10 +225,10 @@ CELERY_BEAT_SCHEDULE = {
         'task': 'jobtracker_app.tasks.update_jobs_to_service_due',
         'schedule': timedelta(hours=5),  # Run every 5 hours
     },
-    'sync-all-invoices-periodic': {
-        'task': 'dashboard_app.tasks.sync_all_invoices_periodic',
-        'schedule': timedelta(minutes=10),  # Run every 10 minutes
-    },
+    # 'sync-all-invoices-periodic': {
+    #     'task': 'dashboard_app.tasks.sync_all_invoices_periodic',
+    #     'schedule': timedelta(minutes=10),  # Run every 10 minutes
+    # },
 }
 
 # AWS S3 Configuration
