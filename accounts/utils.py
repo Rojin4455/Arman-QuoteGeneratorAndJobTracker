@@ -124,7 +124,7 @@ def fetch_all_contacts(location_id: str, access_token: str = None) -> List[Dict[
             if total_count > 0 and len(all_contacts) >= total_count:
                 print(f"Retrieved all {total_count} contacts.")
                 break
-                
+            # break
             # If we got fewer contacts than the limit, we're likely at the end
             if len(contacts) < 100:
                 print("Retrieved fewer contacts than limit, likely at end.")
@@ -148,8 +148,10 @@ def fetch_all_contacts(location_id: str, access_token: str = None) -> List[Dict[
     print(f"\nTotal contacts retrieved: {len(all_contacts)}")
 
     sync_contacts_to_db(all_contacts)
-    fetch_contacts_locations(all_contacts, location_id, access_token)
+    # fetch_contacts_locations(all_contacts, location_id, access_token)
     # return all_contacts
+
+
 
 
 
@@ -176,6 +178,7 @@ def sync_contacts_to_db(contact_data):
             dnd=item.get("dnd", False),
             country=item.get("country"),
             date_added=date_added,
+            company_name=item.get("companyName"),
             tags=item.get("tags", []),
             custom_fields=item.get("customFields", []),
             location_id=item.get("locationId"),
@@ -192,6 +195,7 @@ def sync_contacts_to_db(contact_data):
                 country=contact_obj.country,
                 date_added=contact_obj.date_added,
                 tags=contact_obj.tags,
+                company_name=contact_obj.company_name,
                 custom_fields=contact_obj.custom_fields,
                 location_id=contact_obj.location_id,
                 timestamp=contact_obj.timestamp
@@ -199,19 +203,174 @@ def sync_contacts_to_db(contact_data):
         else:
             contacts_to_create.append(contact_obj)
 
-    if contacts_to_create:
-        with transaction.atomic():
-            Contact.objects.bulk_create(contacts_to_create, ignore_conflicts=True)
+    # if contacts_to_create:
+    #     with transaction.atomic():
+    #         Contact.objects.bulk_create(contacts_to_create, ignore_conflicts=True)
 
-    # Delete contacts not present in the incoming data
-    deleted_count, _ = Contact.objects.exclude(contact_id__in=incoming_ids).delete()
+    # # Delete contacts not present in the incoming data
+    # deleted_count, _ = Contact.objects.exclude(contact_id__in=incoming_ids).delete()
 
     print(f"{len(contacts_to_create)} new contacts created.")
     print(f"{len(existing_ids)} existing contacts updated.")
-    print(f"{deleted_count} contacts deleted as they were not present in the latest data.")
+    # print(f"{deleted_count} contacts deleted as they were not present in the latest data.")
 
 
 
+def sync_contacts_to_db1(contact_data):
+    """
+    Updates existing Contact records in bulk.
+    - NO create
+    - NO delete
+    """
+
+    
+
+    if not contact_data:
+        return
+
+    incoming_ids = {c.get("id") for c in contact_data if c.get("id")}
+
+    # Fetch existing contacts in one query
+    existing_contacts = Contact.objects.filter(contact_id__in=incoming_ids)
+    existing_map = {c.contact_id: c for c in existing_contacts}
+
+    to_update = []
+
+    for item in contact_data:
+        contact_id = item.get("id")
+        if not contact_id:
+            continue
+
+        obj = existing_map.get(contact_id)
+        if not obj:
+            # skip non-existing contacts (no create)
+            continue
+
+        date_added = parse_datetime(item.get("dateAdded")) if item.get("dateAdded") else None
+
+        # update fields in memory
+        obj.first_name = item.get("firstName")
+        obj.last_name = item.get("lastName")
+        obj.phone = item.get("phone")
+        obj.email = item.get("email")
+        obj.dnd = item.get("dnd", False)
+        obj.country = item.get("country")
+        obj.date_added = date_added
+        obj.company_name = item.get("companyName")
+        obj.tags = item.get("tags", [])
+        obj.custom_fields = item.get("customFields", [])
+        obj.location_id = item.get("locationId")
+        obj.timestamp = date_added
+
+        to_update.append(obj)
+
+    if not to_update:
+        return
+
+    with transaction.atomic():
+        Contact.objects.bulk_update(
+            to_update,
+            fields=[
+                "first_name",
+                "last_name",
+                "phone",
+                "email",
+                "dnd",
+                "country",
+                "date_added",
+                "company_name",
+                "tags",
+                "custom_fields",
+                "location_id",
+                "timestamp",
+            ],
+            batch_size=1000,
+        )
+
+    print(f"Updated {len(to_update)} contacts")
+
+
+def call():
+    contacts = [
+        {
+            "id": "dtckYfkQYBBq2P8zRaAk",
+            "dateAdded": "2026-01-22T19:37:45.229Z",
+            "type": "lead",
+            "locationId": "b8qvo7VooP3JD3dIZU42",
+            "firstName": "test321",
+            "firstNameLowerCase": "test321",
+            "fullNameLowerCase": "test321 test",
+            "lastName": "test",
+            "lastNameLowerCase": "test",
+            "email": "test321@test.com",
+            "emailLowerCase": "test321@test.com",
+            "phone": "+13343322134",
+            "country": "US",
+            "timezone": "Pacific/Midway",
+            "attributionSource": {
+            "sessionSource": "CRM UI",
+            "medium": "manual",
+            },
+            "createdBy": {
+            "source": "WEB_USER",
+            "channel": "APP",
+            "sourceId": "qS7XxuUlhlrcyUUtmdGU",
+            "sourceName": "Roshan Raj",
+            "timestamp": "2026-01-22T19:37:45.229Z"
+            },
+            "city": "city",
+            "address1": "test address",
+            "state": "state",
+            "postalCode": "postal code",
+            "followers": [],
+            "assignedTo": "bJkBvMdEmHcDyoXawvTA",
+            "dndSettings": {
+            "Call": {
+                "status": "inactive"
+            },
+            "Email": {
+                "status": "inactive"
+            },
+            "SMS": {
+                "status": "active",
+                "message": "Updated by 'Roshan Raj' at 2026-01-27T19:10:23.571Z",
+                "code": "103"
+            }
+            },
+            "tags": [
+            "quoted",
+            "active-nurture",
+            "dnd"
+            ],
+            "dateUpdated": "2026-01-30T14:02:52.058Z",
+            "companyName": "Test business name",
+            "customFields": [
+            {
+                "id": "4Y8sW8JKNFAMbuH1jcun",
+                "value": 2
+            },
+            {
+                "id": "KYALsCnk6LD648bhbvjo",
+                "value": 3422
+            },
+            {
+                "id": "QJ3ojljITTgfjhZFNR5J",
+                "value": "gate code"
+            },
+            {
+                "id": "hjldr9D9gslDruVBcerF",
+                "value": "Residential"
+            },
+            {
+                "id": "Bff2eZtlr82uvVQmByPh",
+                "value": "https://services.theservicepilot.com/booking?submission_id=b9899874-12a2-46d0-89fa-0fa9cc6d7c44"
+            }
+            ],
+            "additionalEmails": [],
+            "additionalPhones": []
+        },
+    ]
+    sync_contacts_to_db1(contacts)
 
 
 def create_ghl_location_index(location_id: str, location_index: dict):
@@ -554,6 +713,7 @@ def create_or_update_contact(data):
                 "last_name": contact_data.get("lastName"),
                 "email": contact_data.get("email"),
                 "phone": contact_data.get("phone"),
+                "company_name": contact_data.get("companyName", ""),
                 "dnd": dnd_value,  # Ensure this is always a boolean, never None
                 "country": contact_data.get("country"),
                 "date_added": date_added,

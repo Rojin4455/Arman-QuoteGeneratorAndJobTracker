@@ -3,6 +3,7 @@ from datetime import datetime
 from zoneinfo import ZoneInfo
 
 from accounts.models import GHLAuthCredentials, Contact
+from jobtracker_app.models import Job
 
 
 def get_or_create_product(access_token, location_id, product_name, custom_data=None):
@@ -473,3 +474,51 @@ def create_or_update_ghl_contact_from_job(job, location_id):
     except Exception as e:
         print(f"🔥 [GHL CONTACT] Error syncing contact: {e}")
         return None
+
+
+def link_jobs_to_contacts_by_ghl_id():
+    """
+    Find jobs that have no related Contact but do have ghl_contact_id,
+    look up the Contact in the accounts Contact table by contact_id (= GHL ID),
+    and set job.contact to that Contact.
+
+    Returns:
+        tuple: (jobs_updated_count, jobs_skipped_no_contact_in_db)
+    """
+    # Jobs with contact=None and non-empty ghl_contact_id
+    jobs_missing_contact = Job.objects.filter(
+        contact__isnull=True
+    ).exclude(
+        ghl_contact_id__isnull=True
+    ).exclude(
+        ghl_contact_id=""
+    )
+    
+    print("jobs_missing_contact: ", jobs_missing_contact.count())
+    ghl_ids = list(
+        jobs_missing_contact.values_list("ghl_contact_id", flat=True).distinct()
+    )
+    if not ghl_ids:
+        return 0, 0
+
+    total_jobs = jobs_missing_contact.count()
+
+    # Fetch matching Contacts by contact_id (GHL ID)
+    contacts_by_ghl_id = {
+        c.contact_id: c
+        for c in Contact.objects.filter(contact_id__in=ghl_ids)
+    }
+
+    to_update = []
+    for job in jobs_missing_contact:
+        contact = contacts_by_ghl_id.get(job.ghl_contact_id)
+        if contact:
+            job.contact = contact
+            to_update.append(job)
+
+    if to_update:
+        Job.objects.bulk_update(to_update, ["contact"], batch_size=500)
+
+    linked = len(to_update)
+    skipped = total_jobs - linked
+    return linked, skipped

@@ -18,6 +18,10 @@ from .serializers import (
     TimeEntrySerializer, PayoutSerializer, PayrollSettingsSerializer
 )
 
+# Minimum duration (in hours) to include in today_entries API. Entries with total_hours
+# below this are excluded from the response (e.g. accidental check-in/out within 60 seconds).
+MIN_DURATION_HOURS_FOR_TODAY = Decimal('1') / 60  # 60 seconds = 1 minute
+
 
 class IsAdminOrEmployeePermission(permissions.BasePermission):
     """Permission for admin or employee access"""
@@ -409,6 +413,8 @@ class TimeEntryViewSet(viewsets.ModelViewSet):
             
             queryset = TimeEntry.objects.filter(
                 check_in_time__date=today
+            ).filter(
+                Q(total_hours__isnull=True) | Q(total_hours__gte=MIN_DURATION_HOURS_FOR_TODAY)
             ).select_related('employee').order_by('-check_in_time')
             
             if employee_id:
@@ -425,6 +431,8 @@ class TimeEntryViewSet(viewsets.ModelViewSet):
             queryset = TimeEntry.objects.filter(
                 employee=user,
                 check_in_time__date=today
+            ).filter(
+                Q(total_hours__isnull=True) | Q(total_hours__gte=MIN_DURATION_HOURS_FOR_TODAY)
             ).select_related('employee').order_by('-check_in_time')
         
         serializer = self.get_serializer(queryset, many=True)

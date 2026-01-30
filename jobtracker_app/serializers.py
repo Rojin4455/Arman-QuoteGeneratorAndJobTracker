@@ -67,6 +67,7 @@ class AppointmentCalendarSerializer(serializers.ModelSerializer):
     appointment_id = serializers.UUIDField(source='id')
     assigned_user_name = serializers.SerializerMethodField()
     contact_name = serializers.SerializerMethodField()
+    contact_company_name = serializers.SerializerMethodField()
     users_count = serializers.SerializerMethodField()
     calendar = serializers.SerializerMethodField()
 
@@ -76,7 +77,7 @@ class AppointmentCalendarSerializer(serializers.ModelSerializer):
         fields = [
             'appointment_id', 'title', 'start_time', 'end_time', 
             'appointment_status', 'assigned_user_name', 'contact_name',
-            'address', 'notes', 'source', 'users_count', 'calendar',
+            'contact_company_name', 'address', 'notes', 'source', 'users_count', 'calendar',
             'ghl_contact_id'
         ]
 
@@ -92,6 +93,11 @@ class AppointmentCalendarSerializer(serializers.ModelSerializer):
 
     def get_users_count(self, obj):
         return obj.users.count()
+    
+    def get_contact_company_name(self, obj):
+        if obj.contact:
+            return obj.contact.company_name or None
+        return None
     
     def get_calendar(self, obj):
         """Return full calendar information"""
@@ -359,6 +365,7 @@ class JobSerializer(serializers.ModelSerializer):
                 'contact_id': obj.contact.contact_id,
                 'first_name': obj.contact.first_name,
                 'last_name': obj.contact.last_name,
+                'company_name': obj.contact.company_name,
                 'email': obj.contact.email,
                 'phone': obj.contact.phone,
             }

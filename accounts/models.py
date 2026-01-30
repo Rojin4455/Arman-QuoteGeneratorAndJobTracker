@@ -86,6 +86,7 @@ class Contact(models.Model):
     email = models.EmailField(blank=True, null=True)
     dnd = models.BooleanField(default=False)
     country = models.CharField(max_length=50, blank=True, null=True)
+    company_name = models.CharField(max_length=100, blank=True, null=True)
     date_added = models.DateTimeField(blank=True, null=True)
     tags = models.JSONField(default=list, blank=True)
     custom_fields = models.JSONField(default=list, blank=True)
@@ -93,7 +94,7 @@ class Contact(models.Model):
     timestamp = models.DateTimeField(blank=True, null=True)
 
     def __str__(self):
-        return f"{self.first_name} {self.last_name} ({self.email})"
+        return f"{self.first_name} {self.last_name} ({self.email}) - {self.contact_id}"
     
 
 class Webhook(models.Model):
