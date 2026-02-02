@@ -937,7 +937,8 @@ class SubmissionDetailView(generics.RetrieveUpdateAPIView):
                 'customerserviceselection_set__package_quotes__package',
                 'customerserviceselection_set__question_responses__question',
                 'customerserviceselection_set__question_responses__option_responses__option',
-                'customerserviceselection_set__question_responses__sub_question_responses__sub_question'
+                'customerserviceselection_set__question_responses__sub_question_responses__sub_question',
+                'images',
             ),
             id=submission_id
         )
