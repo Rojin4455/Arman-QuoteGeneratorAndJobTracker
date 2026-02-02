@@ -78,6 +78,48 @@ class GHLCustomField(models.Model):
         return f"{self.account.user_id} - {self.field_name} ({self.ghl_field_id})"
 
 
+class GHLMediaStorage(models.Model):
+    """Store GHL media storage name and GHL ID linked to GHLAuthCredentials (location)"""
+    credentials = models.ForeignKey(
+        GHLAuthCredentials,
+        on_delete=models.CASCADE,
+        related_name='media_storages',
+        help_text="The GHL credentials (location) this media storage belongs to"
+    )
+    name = models.CharField(
+        max_length=255,
+        help_text="Display name of the media storage"
+    )
+    ghl_id = models.CharField(
+        max_length=255,
+        help_text="The GHL media storage ID used in API calls"
+    )
+    location_id = models.CharField(
+        max_length=255,
+        blank=True,
+        null=True,
+        help_text="GHL location ID (often same as credentials.location_id)"
+    )
+    is_active = models.BooleanField(
+        default=True,
+        help_text="Whether this media storage mapping is currently active"
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = 'ghl_media_storages'
+        unique_together = ['credentials', 'ghl_id']
+        ordering = ['name']
+        indexes = [
+            models.Index(fields=['credentials', 'is_active']),
+            models.Index(fields=['ghl_id']),
+        ]
+
+    def __str__(self):
+        return f"{self.credentials.user_id} - {self.name} ({self.ghl_id})"
+
+
 class Contact(models.Model):
     contact_id = models.CharField(max_length=100, unique=True)
     first_name = models.CharField(max_length=100, blank=True, null=True)

@@ -3,6 +3,7 @@ import uuid
 import requests
 from collections import defaultdict
 from datetime import datetime, timedelta
+from io import BytesIO
 
 from django.db.models import Count, Sum, Min, Q
 from django.db.models.functions import Coalesce
@@ -17,6 +18,11 @@ from rest_framework.pagination import PageNumberPagination
 from rest_framework.response import Response
 
 from accounts.models import Webhook, GHLAuthCredentials, GHLCustomField, Contact
+from accounts.utils import (
+    get_ghl_media_storage_for_location,
+    upload_file_to_ghl_media,
+    delete_ghl_media,
+)
 from service_app.models import User, Appointment
 from .models import Job, JobOccurrence, JobServiceItem, JobAssignment, JobImage
 from .ghl_appointment_sync import delete_appointment_from_ghl
@@ -1178,28 +1184,63 @@ class JobImageViewSet(viewsets.ModelViewSet):
         return context
 
     def perform_create(self, serializer):
-        """Validate job exists and check permissions before allowing image upload"""
+        """Validate job, upload image to GHL only (not S3), then save record with ghl_file_id/ghl_file_url."""
+        from rest_framework.exceptions import ValidationError, NotFound
+
         job_id = self.request.data.get('job')
         if not job_id:
-            from rest_framework.exceptions import ValidationError
             raise ValidationError({'job': 'job field is required'})
-        
+
+        uploaded_file = self.request.FILES.get('image')
+        if not uploaded_file:
+            raise ValidationError({'image': 'image file is required'})
+
         try:
             job = Job.objects.get(id=job_id)
         except Job.DoesNotExist:
-            from rest_framework.exceptions import NotFound
             raise NotFound('Job not found')
-        
-        # Check permissions
+
         user = self.request.user
         is_admin = getattr(user, 'is_admin', False)
-        if not is_admin:
-            # Normal users: must be assigned to the job
-            if not job.assignments.filter(user=user).exists():
-                raise PermissionDenied("You do not have permission to upload images for this job.")
-        
-        # Save with uploaded_by set to current user
-        serializer.save(uploaded_by=user)
+        if not is_admin and not job.assignments.filter(user=user).exists():
+            raise PermissionDenied("You do not have permission to upload images for this job.")
+
+        location_id = None
+        if job.contact:
+            location_id = getattr(job.contact, 'location_id', None)
+        if not location_id:
+            creds = GHLAuthCredentials.objects.first()
+            location_id = creds.location_id if creds else None
+        if not location_id:
+            raise ValidationError({'detail': 'No GHL location available for media upload.'})
+
+        credentials, media_storage = get_ghl_media_storage_for_location(location_id, storage_name='Job Images')
+        if not credentials or not media_storage:
+            raise ValidationError({'detail': 'GHL media storage not configured for this location.'})
+
+        name = self.request.data.get('caption') or getattr(uploaded_file, 'name', 'job-image')
+        if isinstance(name, str) and '/' in name:
+            name = name.split('/')[-1]
+        file_ref = BytesIO(uploaded_file.read())
+        file_ref.name = name
+        result = upload_file_to_ghl_media(
+            credentials.access_token,
+            location_id,
+            media_storage.ghl_id,
+            name,
+            file_ref,
+            file_content_type=getattr(uploaded_file, 'content_type', None),
+        )
+        if not result:
+            raise ValidationError({'detail': 'Failed to upload image to GHL media.'})
+
+        serializer.save(
+            uploaded_by=user,
+            image=None,
+            ghl_file_id=result.get('fileId'),
+            ghl_file_url=result.get('url'),
+        )
+
 
     def get_object(self):
         """Override to check permissions on individual object"""
@@ -1215,6 +1256,24 @@ class JobImageViewSet(viewsets.ModelViewSet):
             raise PermissionDenied("You do not have permission to access this image.")
         
         return obj
+
+    def perform_destroy(self, instance):
+        """Delete from GHL media if we have ghl_file_id, then delete local record."""
+        if instance.ghl_file_id:
+            location_id = None
+            if instance.job.contact:
+                location_id = getattr(instance.job.contact, 'location_id', None)
+            if not location_id:
+                creds = GHLAuthCredentials.objects.first()
+                location_id = creds.location_id if creds else None
+            if location_id:
+                try:
+                    creds = GHLAuthCredentials.objects.filter(location_id=location_id).first()
+                    if creds:
+                        delete_ghl_media(creds.access_token, instance.ghl_file_id, location_id)
+                except Exception:
+                    pass
+        instance.delete()
 
 
 class EstimateAppointmentListView(APIView):

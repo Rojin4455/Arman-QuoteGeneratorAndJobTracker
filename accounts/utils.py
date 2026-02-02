@@ -5,8 +5,138 @@ from typing import List, Dict, Any, Optional
 from django.utils.dateparse import parse_datetime
 from django.db import transaction
 from django.core.exceptions import ObjectDoesNotExist
-from accounts.models import GHLAuthCredentials, Contact, Address, Calendar, GHLLocationIndex, GHLCustomField
+from accounts.models import GHLAuthCredentials, Contact, Address, Calendar, GHLLocationIndex, GHLCustomField, GHLMediaStorage
 from service_app.models import User, Appointment
+
+# --- GHL Media Storage (upload/update/delete) ---
+
+GHL_MEDIA_BASE = "https://services.leadconnectorhq.com/medias"
+GHL_API_VERSION = "2021-07-28"
+
+
+def get_ghl_media_storage_for_location(location_id: str, storage_name: Optional[str] = None):
+    """
+    Get GHLAuthCredentials and GHLMediaStorage for a location.
+    Returns (credentials, media_storage) or (None, None) if not found.
+    """
+    try:
+        credentials = GHLAuthCredentials.objects.filter(location_id=location_id).first()
+        if not credentials:
+            return None, None
+        qs = GHLMediaStorage.objects.filter(credentials=credentials, is_active=True)
+        if storage_name:
+            qs = qs.filter(name=storage_name)
+        media_storage = qs.first()
+        return credentials, media_storage
+    except Exception:
+        return None, None
+
+
+def upload_file_to_ghl_media(
+    access_token: str,
+    location_id: str,
+    parent_id: str,
+    name: str,
+    file_path_or_file,
+    file_content_type: Optional[str] = None,
+) -> Optional[Dict[str, Any]]:
+    """
+    Upload a file to GHL media storage.
+    Args:
+        access_token: GHL Bearer token
+        location_id: GHL location ID (for reference)
+        parent_id: GHL media storage ID (parentId in API)
+        name: Display name for the file
+        file_path_or_file: Path (str) or file-like object
+        file_content_type: Optional MIME type (e.g. image/jpeg)
+    Returns:
+        dict with fileId, url, traceId or None on failure
+    """
+    url = f"{GHL_MEDIA_BASE}/upload-file"
+    headers = {
+        "Accept": "application/json",
+        "Version": GHL_API_VERSION,
+        "Authorization": f"Bearer {access_token}",
+    }
+    try:
+        def _content_type_for_filename(filename, explicit):
+            if explicit:
+                return explicit
+            if not filename:
+                return "application/octet-stream"
+            ext = filename.lower().split(".")[-1] if "." in filename else ""
+            return {
+                "webp": "image/webp", "jpg": "image/jpeg", "jpeg": "image/jpeg",
+                "png": "image/png", "gif": "image/gif",
+            }.get(ext, "application/octet-stream")
+
+        if isinstance(file_path_or_file, str):
+            with open(file_path_or_file, "rb") as f:
+                filename = file_path_or_file.split("/")[-1].split("\\")[-1]
+                ct = _content_type_for_filename(filename, file_content_type)
+                files = {"file": (filename, f, ct)}
+                data = {"parentId": parent_id, "name": name}
+                resp = requests.post(url, headers=headers, data=data, files=files, timeout=60)
+        else:
+            # file-like object
+            filename = getattr(file_path_or_file, "name", "file") or "file"
+            if hasattr(file_path_or_file, "seek"):
+                file_path_or_file.seek(0)
+            content_type = _content_type_for_filename(filename, file_content_type)
+            files = {"file": (filename, file_path_or_file, content_type)}
+            data = {"parentId": parent_id, "name": name}
+            resp = requests.post(url, headers=headers, data=data, files=files, timeout=60)
+        if resp.status_code in (200, 201):
+            return resp.json()
+        # Log failure so we can see GHL error message
+        try:
+            err_body = resp.text
+            if len(err_body) > 500:
+                err_body = err_body[:500] + "..."
+            print(f"[GHL media upload] HTTP {resp.status_code}: {err_body}")
+        except Exception:
+            print(f"[GHL media upload] HTTP {resp.status_code}")
+        return None
+    except Exception as e:
+        print(f"[GHL media upload] Exception: {e}")
+        return None
+
+
+def update_ghl_media(
+    access_token: str,
+    document_id: str,
+    location_id: str,
+    name: str,
+) -> bool:
+    """Update a GHL media document (e.g. rename). Returns True on success."""
+    url = f"{GHL_MEDIA_BASE}/{document_id}"
+    headers = {
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+        "Version": GHL_API_VERSION,
+        "Authorization": f"Bearer {access_token}",
+    }
+    payload = {"name": name, "altType": "location", "altId": location_id}
+    try:
+        resp = requests.put(url, headers=headers, json=payload, timeout=30)
+        return resp.status_code in (200, 201)
+    except Exception:
+        return False
+
+
+def delete_ghl_media(access_token: str, document_id: str, location_id: str) -> bool:
+    """Delete a GHL media document. Returns True on success."""
+    url = f"{GHL_MEDIA_BASE}/{document_id}"
+    params = {"altType": "location", "altId": location_id}
+    headers = {
+        "Version": GHL_API_VERSION,
+        "Authorization": f"Bearer {access_token}",
+    }
+    try:
+        resp = requests.delete(url, headers=headers, params=params, timeout=30)
+        return resp.status_code in (200, 204)
+    except Exception:
+        return False
 
 
 def fetch_all_contacts(location_id: str, access_token: str = None) -> List[Dict[str, Any]]:

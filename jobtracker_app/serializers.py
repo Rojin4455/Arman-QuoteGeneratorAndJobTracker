@@ -293,7 +293,8 @@ class AppointmentSerializer(serializers.ModelSerializer):
         return instance
         
 class JobImageSerializer(serializers.ModelSerializer):
-    """Serializer for job images"""
+    """Serializer for job images (stored in GHL only; image field not persisted to S3)."""
+    image = serializers.ImageField(required=False, allow_null=True)
     image_url = serializers.SerializerMethodField()
     uploaded_by_name = serializers.SerializerMethodField()
     job_title = serializers.CharField(source='job.title', read_only=True)
@@ -302,12 +303,15 @@ class JobImageSerializer(serializers.ModelSerializer):
         model = JobImage
         fields = [
             'id', 'job', 'job_title', 'image', 'image_url', 'caption',
+            'ghl_file_id', 'ghl_file_url',
             'uploaded_by', 'uploaded_by_name', 'created_at', 'updated_at'
         ]
-        read_only_fields = ['id', 'uploaded_by', 'created_at', 'updated_at']
+        read_only_fields = ['id', 'uploaded_by', 'created_at', 'updated_at', 'ghl_file_id', 'ghl_file_url']
 
     def get_image_url(self, obj):
-        """Return the full URL of the image"""
+        """Return GHL URL when stored in GHL only, else local/S3 URL."""
+        if obj.ghl_file_url:
+            return obj.ghl_file_url
         if obj.image:
             request = self.context.get('request')
             if request:
