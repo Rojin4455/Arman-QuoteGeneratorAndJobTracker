@@ -1643,12 +1643,24 @@ class CustomerSubmissionImageViewSet(viewsets.ModelViewSet):
         if not credentials or not media_storage:
             raise ValidationError({'detail': 'GHL media storage not configured for this location.'})
 
-        name = self.request.data.get('caption') or getattr(uploaded_file, 'name', 'submission-image')
-        if isinstance(name, str) and '/' in name:
-            name = name.split('/')[-1]
+        # Allowed types: PNG, JPG, JPEG, GIF, WEBP (matches UI and GHL support)
+        allowed_extensions = {'png', 'jpg', 'jpeg', 'gif', 'webp'}
+        original_name = getattr(uploaded_file, 'name', '') or ''
+        ext = original_name.lower().split('.')[-1] if '.' in original_name else ''
+        if ext not in allowed_extensions:
+            raise ValidationError({
+                'image': f'Only PNG, JPG, GIF, and WEBP images are supported. Got: {ext or "unknown"}.'
+            })
+        # Sanitize filename: strip path, limit length, keep safe chars
+        name = self.request.data.get('caption') or original_name or 'submission-image'
+        if isinstance(name, str):
+            name = name.split('/')[-1].split('\\')[-1].strip()
+            name = re.sub(r'[^\w\s\-\.]', '_', name)[:200] or 'submission-image'
+        if not name.lower().endswith(f'.{ext}'):
+            name = f"{name.rsplit('.', 1)[0] if '.' in name else name}.{ext}"
         file_ref = BytesIO(uploaded_file.read())
         file_ref.name = name
-        result = upload_file_to_ghl_media(
+        result, error_message = upload_file_to_ghl_media(
             credentials.access_token,
             location_id,
             media_storage.ghl_id,
@@ -1657,9 +1669,12 @@ class CustomerSubmissionImageViewSet(viewsets.ModelViewSet):
             file_content_type=getattr(uploaded_file, 'content_type', None),
         )
         if not result:
-            raise ValidationError({'detail': 'Failed to upload image to GHL media.'})
+            raise ValidationError({
+                'detail': error_message or 'Failed to upload image to GHL media.'
+            })
 
         serializer.save(
+            submission=submission,
             uploaded_by=user,
             image=None,
             ghl_file_id=result.get('fileId'),

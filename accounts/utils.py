@@ -1,7 +1,7 @@
 import requests
 import time
 import re
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Tuple
 from django.utils.dateparse import parse_datetime
 from django.db import transaction
 from django.core.exceptions import ObjectDoesNotExist
@@ -39,7 +39,7 @@ def upload_file_to_ghl_media(
     name: str,
     file_path_or_file,
     file_content_type: Optional[str] = None,
-) -> Optional[Dict[str, Any]]:
+) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
     """
     Upload a file to GHL media storage.
     Args:
@@ -50,7 +50,8 @@ def upload_file_to_ghl_media(
         file_path_or_file: Path (str) or file-like object
         file_content_type: Optional MIME type (e.g. image/jpeg)
     Returns:
-        dict with fileId, url, traceId or None on failure
+        (result_dict, error_message). On success: (dict with fileId, url, traceId), None.
+        On failure: None, human-readable error string for the client.
     """
     url = f"{GHL_MEDIA_BASE}/upload-file"
     headers = {
@@ -87,19 +88,31 @@ def upload_file_to_ghl_media(
             data = {"parentId": parent_id, "name": name}
             resp = requests.post(url, headers=headers, data=data, files=files, timeout=60)
         if resp.status_code in (200, 201):
-            return resp.json()
-        # Log failure so we can see GHL error message
+            return resp.json(), None
+        # Build client-safe error message from GHL response
+        err_body = resp.text
         try:
-            err_body = resp.text
-            if len(err_body) > 500:
-                err_body = err_body[:500] + "..."
-            print(f"[GHL media upload] HTTP {resp.status_code}: {err_body}")
+            err_json = resp.json()
+            msg = err_json.get("message") or err_json.get("error") or err_body
         except Exception:
-            print(f"[GHL media upload] HTTP {resp.status_code}")
-        return None
+            msg = err_body if err_body else f"HTTP {resp.status_code}"
+        if len(msg) > 300:
+            msg = msg[:300] + "..."
+        print(f"[GHL media upload] HTTP {resp.status_code}: {err_body[:500]}")
+        if resp.status_code == 401:
+            return None, "Authentication failed. Please reconnect your account."
+        if resp.status_code == 413:
+            return None, "File is too large for GHL media."
+        return None, msg or f"Upload failed (HTTP {resp.status_code})."
+    except requests.exceptions.Timeout:
+        print("[GHL media upload] Request timed out")
+        return None, "Upload timed out. Try a smaller image."
+    except requests.exceptions.RequestException as e:
+        print(f"[GHL media upload] Request error: {e}")
+        return None, "Network error during upload. Please try again."
     except Exception as e:
         print(f"[GHL media upload] Exception: {e}")
-        return None
+        return None, str(e) if str(e) else "Upload failed."
 
 
 def update_ghl_media(
