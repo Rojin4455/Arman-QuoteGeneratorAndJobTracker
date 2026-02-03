@@ -5,7 +5,7 @@ from collections import defaultdict
 from datetime import datetime, timedelta
 from io import BytesIO
 
-from django.db.models import Count, Sum, Min, Q
+from django.db.models import Count, Sum, Min, Q, Prefetch
 from django.db.models.functions import Coalesce
 from django.http import JsonResponse
 from django.shortcuts import get_object_or_404
@@ -17,7 +17,7 @@ from rest_framework.exceptions import PermissionDenied
 from rest_framework.pagination import PageNumberPagination
 from rest_framework.response import Response
 
-from accounts.models import Webhook, GHLAuthCredentials, GHLCustomField, Contact
+from accounts.models import Webhook, GHLAuthCredentials, GHLCustomField, Contact, Address
 from accounts.utils import (
     get_ghl_media_storage_for_location,
     upload_file_to_ghl_media,
@@ -633,7 +633,10 @@ class AppointmentViewSet(viewsets.ModelViewSet):
         
         qs = Appointment.objects.select_related(
             'assigned_user', 'contact', 'calendar'
-        ).prefetch_related('users').all()
+        ).prefetch_related(
+            'users',
+            Prefetch('contact__contact_location', queryset=Address.objects.order_by('order')),
+        ).all()
 
         # Exclude recurring service calendar appointments from all actions
         qs = qs.exclude(calendar__name="Reccuring Service Calendar")
@@ -1284,8 +1287,8 @@ class EstimateAppointmentListView(APIView):
     Query params:
     - status: filter by estimate_status (comma-separated list)
     - assigned_user_ids: filter by assigned user IDs (comma-separated list) [REQUIRED]
-    - start_date: filter by start_time >= date (YYYY-MM-DD format)
-    - end_date: filter by start_time <= date (YYYY-MM-DD format)
+    - start or start_date: filter by start_time >= (ISO datetime or YYYY-MM-DD)
+    - end or end_date: filter by start_time < (ISO datetime or YYYY-MM-DD; end_date is exclusive)
     - search: search in title and notes (case-insensitive)
     
     Permissions:
@@ -1309,7 +1312,10 @@ class EstimateAppointmentListView(APIView):
             calendar__name="FREE On-Site Estimate"
         ).select_related(
             'assigned_user', 'contact', 'calendar'
-        ).prefetch_related('users').all()
+        ).prefetch_related(
+            'users',
+            Prefetch('contact__contact_location', queryset=Address.objects.order_by('order')),
+        ).all()
         
         is_admin = getattr(user, 'is_admin', False)
         
@@ -1339,22 +1345,27 @@ class EstimateAppointmentListView(APIView):
                 if user_ids:
                     qs = qs.filter(assigned_user__id__in=user_ids)
         
-        # Filter by date range
-        start_date = request.query_params.get('start_date')
-        if start_date:
-            try:
-                start_dt = datetime.strptime(start_date, '%Y-%m-%d')
+        # Filter by date range (support start/end ISO or start_date/end_date YYYY-MM-DD)
+        start_param = request.query_params.get('start') or request.query_params.get('start_date')
+        end_param = request.query_params.get('end') or request.query_params.get('end_date')
+        if start_param:
+            start_dt = parse_datetime(start_param)
+            if not start_dt and len(start_param) >= 10:
+                try:
+                    start_dt = datetime.strptime(start_param[:10], '%Y-%m-%d')
+                except ValueError:
+                    pass
+            if start_dt:
                 qs = qs.filter(start_time__gte=start_dt)
-            except ValueError:
-                pass
-        
-        end_date = request.query_params.get('end_date')
-        if end_date:
-            try:
-                end_dt = datetime.strptime(end_date, '%Y-%m-%d') + timedelta(days=1)
+        if end_param:
+            end_dt = parse_datetime(end_param)
+            if not end_dt and len(end_param) >= 10:
+                try:
+                    end_dt = datetime.strptime(end_param[:10], '%Y-%m-%d') + timedelta(days=1)
+                except ValueError:
+                    pass
+            if end_dt:
                 qs = qs.filter(start_time__lt=end_dt)
-            except ValueError:
-                pass
         
         # Search filter (title and notes)
         search = request.query_params.get('search')
@@ -1387,7 +1398,10 @@ class EstimateAppointmentUpdateStatusView(APIView):
 
     def patch(self, request, appointment_id):
         try:
-            appointment = Appointment.objects.select_related('calendar', 'assigned_user', 'contact').prefetch_related('users').get(id=appointment_id)
+            appointment = Appointment.objects.select_related('calendar', 'assigned_user', 'contact').prefetch_related(
+                'users',
+                Prefetch('contact__contact_location', queryset=Address.objects.order_by('order')),
+            ).get(id=appointment_id)
         except Appointment.DoesNotExist:
             return Response({'detail': 'Appointment not found.'}, status=404)
         

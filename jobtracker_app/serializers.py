@@ -134,6 +134,8 @@ class AppointmentSerializer(serializers.ModelSerializer):
     contact_id = serializers.CharField(source='contact.contact_id', read_only=True)
     contact_name = serializers.SerializerMethodField()
     contact_email = serializers.EmailField(source='contact.email', read_only=True)
+    contact_phone = serializers.SerializerMethodField()
+    contact_full_address = serializers.SerializerMethodField()
     calendar_id = serializers.SerializerMethodField()
     calendar = serializers.SerializerMethodField()
     users = serializers.SerializerMethodField()
@@ -153,7 +155,7 @@ class AppointmentSerializer(serializers.ModelSerializer):
             'ghl_contact_id', 'group_id',
             'assigned_user_id', 'assigned_user_name', 'assigned_user_email', 'assigned_user_uuid',
             'ghl_assigned_user_id',
-            'contact_id', 'contact_name', 'contact_email',
+            'contact_id', 'contact_name', 'contact_email', 'contact_phone', 'contact_full_address',
             'users', 'users_list', 'users_ghl_ids',
             'created_at', 'updated_at'
         ]
@@ -170,6 +172,19 @@ class AppointmentSerializer(serializers.ModelSerializer):
     def get_contact_name(self, obj):
         if obj.contact:
             return f"{obj.contact.first_name or ''} {obj.contact.last_name or ''}".strip() or None
+        return None
+
+    def get_contact_phone(self, obj):
+        if obj.contact:
+            return obj.contact.phone or None
+        return None
+
+    def get_contact_full_address(self, obj):
+        """Return the full address string from the contact's first address (by order)."""
+        if obj.contact:
+            first_address = obj.contact.contact_location.order_by('order').first()
+            if first_address:
+                return first_address.get_full_address() or None
         return None
 
     def get_calendar_id(self, obj):

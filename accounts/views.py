@@ -10,7 +10,7 @@ from django.views import View
 from django.utils.decorators import method_decorator
 import traceback
 from accounts.tasks import fetch_all_contacts_task,handle_webhook_event
-from accounts.utils import sync_all_users_to_db
+from accounts.utils import sync_all_users_to_db,sync_custom_fields_to_db
 from accounts.tasks import sync_calendars_from_ghl_task
 from dashboard_app.tasks import sync_single_invoice_task,delete_invoice_task
 from accounts.utils import fetch_location_custom_fields
@@ -86,6 +86,14 @@ def tokens(request):
         # fetch_location_custom_fields(response_data.get("locationId"), response_data.get("access_token"))
         # sync_all_users_to_db(response_data.get("locationId"), response_data.get("access_token"))
         # sync_calendars_from_ghl_task.delay(response_data.get("locationId"), response_data.get("access_token"))
+
+        location_id = response_data.get("locationId")
+        access_token = response_data.get("access_token")
+        
+        fetch_all_contacts_task.delay(location_id, access_token)
+        sync_custom_fields_to_db(location_id, access_token)
+        sync_all_users_to_db(location_id, access_token)
+        sync_calendars_from_ghl_task.delay(location_id, access_token)
         return JsonResponse({
             "message": "Authentication successful",
             "access_token": response_data.get('access_token'),
@@ -138,7 +146,10 @@ def webhook_handler(request):
         event_type = data.get("type")
         handle_webhook_event.delay(data, event_type)
 
-        invoice_events = ["InvoiceCreate", "InvoiceUpdate", "InvoiceDelete"]
+        invoice_events = [
+            "InvoiceCreate", "InvoiceUpdate", "InvoiceDelete",
+            "InvoicePaid", "InvoicePartiallyPaid", "InvoiceSent", "InvoiceVoid",
+        ]
         if event_type in invoice_events:
             # Extract location_id - could be at root or in nested structure
             location_id = data.get("locationId")
@@ -171,14 +182,14 @@ def webhook_handler(request):
             print(f"Invoice webhook - event_type: {event_type}, location_id: {location_id}, invoice_id: {invoice_id}")
             
             if location_id and invoice_id:
-                if event_type in ["InvoiceCreate", "InvoiceUpdate"]:
-                    # Sync invoice for create and update events
-                    sync_single_invoice_task.delay(location_id, invoice_id)
-                    print(f"✅ Triggered invoice sync for {event_type}: invoice_id={invoice_id}, location_id={location_id}")
-                elif event_type == "InvoiceDelete":
+                if event_type == "InvoiceDelete":
                     # Delete invoice for delete event
                     delete_invoice_task.delay(invoice_id)
                     print(f"✅ Triggered invoice deletion for {event_type}: invoice_id={invoice_id}")
+                else:
+                    # Sync invoice for create, update, paid, partially paid, sent, void
+                    sync_single_invoice_task.delay(location_id, invoice_id)
+                    print(f"✅ Triggered invoice sync for {event_type}: invoice_id={invoice_id}, location_id={location_id}")
             else:
                 missing = []
                 if not location_id:
@@ -193,12 +204,12 @@ def webhook_handler(request):
                     if credentials and credentials.location_id:
                         location_id = credentials.location_id
                         print(f"⚠️ Using location_id from credentials: {location_id}")
-                        if event_type in ["InvoiceCreate", "InvoiceUpdate"]:
-                            sync_single_invoice_task.delay(location_id, invoice_id)
-                            print(f"✅ Triggered invoice sync with fallback location_id")
-                        elif event_type == "InvoiceDelete":
+                        if event_type == "InvoiceDelete":
                             delete_invoice_task.delay(invoice_id)
                             print(f"✅ Triggered invoice deletion")
+                        else:
+                            sync_single_invoice_task.delay(location_id, invoice_id)
+                            print(f"✅ Triggered invoice sync with fallback location_id")
 
         return JsonResponse({"message": "Webhook received"}, status=200)
 
