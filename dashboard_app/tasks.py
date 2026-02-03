@@ -1,4 +1,6 @@
 from celery import shared_task
+from django.utils import timezone
+
 from dashboard_app.services import invoice_sync
 from dashboard_app.models import Invoice
 from accounts.models import GHLAuthCredentials
@@ -121,3 +123,32 @@ def sync_all_invoices_periodic():
             "message": error_msg,
             "locations_synced": 0
         }
+
+
+# Statuses that can become overdue (not yet paid, void, or already overdue)
+STATUSES_ELIGIBLE_FOR_OVERDUE = ['draft', 'sent', 'payment_processing', 'partial']
+
+
+@shared_task
+def mark_overdue_invoices_task():
+    """
+    Celery task to mark invoices as overdue when due_date has passed.
+    Runs every hour via Celery Beat. Only updates invoices that are still
+    in draft/sent/payment_processing/partial (not paid, void, or already overdue).
+    """
+    try:
+        now = timezone.now()
+        qs = Invoice.objects.filter(
+            due_date__lt=now,
+            due_date__isnull=False,
+            status__in=STATUSES_ELIGIBLE_FOR_OVERDUE,
+        )
+        count = qs.update(status='overdue')
+        if count:
+            print(f"✅ [OVERDUE] Marked {count} invoice(s) as overdue.")
+        return {"success": True, "marked_overdue": count}
+    except Exception as e:
+        print(f"❌ [OVERDUE] Error marking overdue invoices: {e}")
+        import traceback
+        traceback.print_exc()
+        return {"success": False, "message": str(e), "marked_overdue": 0}
