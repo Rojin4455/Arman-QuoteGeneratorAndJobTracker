@@ -1,3 +1,4 @@
+import io
 import requests
 import time
 import re
@@ -12,6 +13,56 @@ from service_app.models import User, Appointment
 
 GHL_MEDIA_BASE = "https://services.leadconnectorhq.com/medias"
 GHL_API_VERSION = "2021-07-28"
+
+# Image compression before GHL upload: only compress if larger than this (bytes) or dimension > MAX_DIMENSION
+_COMPRESS_SIZE_THRESHOLD = 400 * 1024  # 400 KB
+_MAX_DIMENSION = 1920
+_JPEG_QUALITY = 85
+
+
+def compress_image_for_upload(file_like, filename: str):
+    """
+    Compress/resize image for faster upload to GHL. Only compresses if file is large or dimensions exceed MAX_DIMENSION.
+    Returns (file_like, content_type, filename) to upload, or (None, None, None) to use original file.
+    """
+    try:
+        from PIL import Image
+    except ImportError:
+        return None, None, None
+    try:
+        if hasattr(file_like, "seek"):
+            file_like.seek(0)
+        raw = file_like.read() if hasattr(file_like, "read") else file_like
+        size_bytes = len(raw) if isinstance(raw, (bytes, bytearray)) else getattr(file_like, "size", 0)
+        if hasattr(file_like, "seek"):
+            file_like.seek(0)
+        img = Image.open(io.BytesIO(raw))
+        # GIF: skip compression to preserve animation
+        if getattr(img, "format", "") == "GIF":
+            return None, None, None
+        # Skip if already small and within dimensions
+        w, h = img.size
+        if size_bytes <= _COMPRESS_SIZE_THRESHOLD and max(w, h) <= _MAX_DIMENSION:
+            return None, None, None
+        # Convert RGBA/P to RGB for JPEG
+        if img.mode in ("RGBA", "P"):
+            img = img.convert("RGB")
+        elif img.mode != "RGB":
+            img = img.convert("RGB")
+        # Resize to max dimension
+        if max(w, h) > _MAX_DIMENSION:
+            ratio = _MAX_DIMENSION / max(w, h)
+            new_size = (int(w * ratio), int(h * ratio))
+            img = img.resize(new_size, Image.Resampling.LANCZOS)
+        out = io.BytesIO()
+        base = filename.rsplit(".", 1)[0] if "." in filename else filename
+        out_name = f"{base[:180]}.jpg"
+        img.save(out, format="JPEG", quality=_JPEG_QUALITY, optimize=True)
+        out.seek(0)
+        return out, "image/jpeg", out_name
+    except Exception as e:
+        print(f"[GHL media] Image compression skipped: {e}")
+        return None, None, None
 
 
 def get_ghl_media_storage_for_location(location_id: str, storage_name: Optional[str] = None):
@@ -39,6 +90,7 @@ def upload_file_to_ghl_media(
     name: str,
     file_path_or_file,
     file_content_type: Optional[str] = None,
+    filename_override: Optional[str] = None,
 ) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
     """
     Upload a file to GHL media storage.
@@ -80,7 +132,7 @@ def upload_file_to_ghl_media(
                 resp = requests.post(url, headers=headers, data=data, files=files, timeout=60)
         else:
             # file-like object
-            filename = getattr(file_path_or_file, "name", "file") or "file"
+            filename = filename_override or getattr(file_path_or_file, "name", "file") or "file"
             if hasattr(file_path_or_file, "seek"):
                 file_path_or_file.seek(0)
             content_type = _content_type_for_filename(filename, file_content_type)

@@ -10,7 +10,6 @@ from django.db import transaction
 from django.db.models import Q, Prefetch
 from decimal import Decimal
 from datetime import timedelta
-from io import BytesIO
 from django.utils import timezone
 from service_app.models import ServiceSettings
 from service_app.models import (
@@ -38,6 +37,7 @@ from accounts.utils import (
     get_ghl_media_storage_for_location,
     upload_file_to_ghl_media,
     delete_ghl_media,
+    compress_image_for_upload,
 )
 from rest_framework.generics import ListAPIView
 import requests
@@ -1658,15 +1658,25 @@ class CustomerSubmissionImageViewSet(viewsets.ModelViewSet):
             name = re.sub(r'[^\w\s\-\.]', '_', name)[:200] or 'submission-image'
         if not name.lower().endswith(f'.{ext}'):
             name = f"{name.rsplit('.', 1)[0] if '.' in name else name}.{ext}"
-        file_ref = BytesIO(uploaded_file.read())
-        file_ref.name = name
+        # Compress large images for faster upload; otherwise pass file directly (no BytesIO copy)
+        uploaded_file.seek(0)
+        file_to_upload, content_type, upload_filename = compress_image_for_upload(uploaded_file, name)
+        if file_to_upload is not None:
+            upload_name = upload_filename
+            upload_ct = content_type
+        else:
+            uploaded_file.seek(0)
+            file_to_upload = uploaded_file
+            upload_name = name
+            upload_ct = getattr(uploaded_file, 'content_type', None)
         result, error_message = upload_file_to_ghl_media(
             credentials.access_token,
             location_id,
             media_storage.ghl_id,
-            name,
-            file_ref,
-            file_content_type=getattr(uploaded_file, 'content_type', None),
+            upload_name,
+            file_to_upload,
+            file_content_type=upload_ct,
+            filename_override=upload_name,
         )
         if not result:
             raise ValidationError({
