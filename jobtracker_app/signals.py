@@ -266,6 +266,18 @@ def _update_ghl_custom_fields_on_job_change(sender, instance, created, **kwargs)
         custom_fields_mapping['job_status'] = job_status_field.ghl_field_id
     except GHLCustomField.DoesNotExist:
         print("⚠️ [GHL CUSTOM FIELDS] 'Job Status' custom field not found")
+
+    # Technician Name: used only when status is 'on_the_way' (lookup by field name + account/location)
+    if status_changed and instance.status == 'on_the_way':
+        try:
+            technician_name_field = GHLCustomField.objects.get(
+                account=credentials,
+                field_name='Technician Name',
+                is_active=True
+            )
+            custom_fields_mapping['technician_name'] = technician_name_field.ghl_field_id
+        except GHLCustomField.DoesNotExist:
+            print("⚠️ [GHL CUSTOM FIELDS] 'Technician Name' custom field not found")
     
     if not custom_fields_mapping:
         print("❌ [GHL CUSTOM FIELDS] No custom field mappings found, skipping update")
@@ -299,6 +311,24 @@ def _update_ghl_custom_fields_on_job_change(sender, instance, created, **kwargs)
             "field_value": status_display
         })
         print(f"   📊 Adding Job Status: {status_display}")
+
+    # Add Technician Name only when status is on_the_way (first assignee only)
+    if 'technician_name' in custom_fields_mapping and instance.status == 'on_the_way':
+        first_assignment = (
+            instance.assignments.select_related('user').order_by('created_at').first()
+        )
+        if first_assignment and first_assignment.user:
+            technician_display = (
+                first_assignment.user.get_full_name() or first_assignment.user.username or ''
+            ).strip()
+            if technician_display:
+                custom_fields.append({
+                    "id": custom_fields_mapping['technician_name'],
+                    "field_value": technician_display
+                })
+                print(f"   👤 Adding Technician Name: {technician_display}")
+        else:
+            print("   ⚠️ [GHL CUSTOM FIELDS] No assignee found for job, skipping Technician Name")
     
     if not custom_fields:
         print("⚠️ [GHL CUSTOM FIELDS] No custom fields to update")
