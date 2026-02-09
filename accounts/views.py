@@ -13,6 +13,7 @@ from accounts.tasks import fetch_all_contacts_task,handle_webhook_event
 from accounts.utils import sync_all_users_to_db,sync_custom_fields_to_db
 from accounts.tasks import sync_calendars_from_ghl_task
 from dashboard_app.tasks import sync_single_invoice_task,delete_invoice_task
+from dashboard_app.models import Invoice
 from accounts.utils import fetch_location_custom_fields
 
 
@@ -20,6 +21,14 @@ from accounts.utils import fetch_location_custom_fields
 
 
 logger = logging.getLogger(__name__)
+
+# Map GHL invoice webhook event types to local Invoice status values
+INVOICE_EVENT_STATUS_MAP = {
+    "InvoicePaid": "paid",
+    "InvoicePartiallyPaid": "partially_paid",
+    "InvoiceSent": "sent",
+    "InvoiceVoid": "void",
+}
 
 
 GHL_CLIENT_ID = config("GHL_CLIENT_ID")
@@ -187,6 +196,19 @@ def webhook_handler(request):
                     delete_invoice_task.delay(invoice_id)
                     print(f"✅ Triggered invoice deletion for {event_type}: invoice_id={invoice_id}")
                 else:
+                    # Update local invoice status immediately for status-specific events
+                    if event_type in INVOICE_EVENT_STATUS_MAP:
+                        try:
+                            invoice = Invoice.objects.filter(
+                                invoice_id=invoice_id, location_id=location_id
+                            ).first()
+                            if invoice:
+                                new_status = INVOICE_EVENT_STATUS_MAP[event_type]
+                                invoice.status = new_status
+                                invoice.save(update_fields=["status"])
+                                print(f"✅ Updated invoice status to '{new_status}' for {event_type}: invoice_id={invoice_id}")
+                        except Exception as e:
+                            print(f"⚠️ Could not update invoice status for {event_type}: {e}")
                     # Sync invoice for create, update, paid, partially paid, sent, void
                     sync_single_invoice_task.delay(location_id, invoice_id)
                     print(f"✅ Triggered invoice sync for {event_type}: invoice_id={invoice_id}, location_id={location_id}")
@@ -208,6 +230,18 @@ def webhook_handler(request):
                             delete_invoice_task.delay(invoice_id)
                             print(f"✅ Triggered invoice deletion")
                         else:
+                            if event_type in INVOICE_EVENT_STATUS_MAP:
+                                try:
+                                    invoice = Invoice.objects.filter(
+                                        invoice_id=invoice_id, location_id=location_id
+                                    ).first()
+                                    if invoice:
+                                        new_status = INVOICE_EVENT_STATUS_MAP[event_type]
+                                        invoice.status = new_status
+                                        invoice.save(update_fields=["status"])
+                                        print(f"✅ Updated invoice status to '{new_status}' for {event_type}: invoice_id={invoice_id}")
+                                except Exception as e:
+                                    print(f"⚠️ Could not update invoice status for {event_type}: {e}")
                             sync_single_invoice_task.delay(location_id, invoice_id)
                             print(f"✅ Triggered invoice sync with fallback location_id")
 

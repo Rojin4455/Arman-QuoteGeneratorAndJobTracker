@@ -9,6 +9,7 @@ from django.db.models.functions import TruncDate, TruncWeek, TruncMonth
 from django.utils import timezone
 from django.utils.dateparse import parse_datetime
 from datetime import datetime, timedelta, time
+import pytz
 
 from django_filters import rest_framework as filters
 
@@ -229,6 +230,8 @@ class InvoiceViewSet(viewsets.ModelViewSet):
         """
         queryset = self.filter_queryset(self.get_queryset())
 
+        central_tz = pytz.timezone("America/Chicago")
+
         # === Query Params ===
         start_date = request.query_params.get("start_date")
         end_date = request.query_params.get("end_date")
@@ -245,7 +248,7 @@ class InvoiceViewSet(viewsets.ModelViewSet):
             end_date = parse_datetime(end_date)
             queryset = queryset.filter(created_at__lte=end_date)
         else:
-            end_date = timezone.now()
+            end_date = timezone.now().astimezone(central_tz)
 
         # === Base Stats ===
         total_invoices = queryset.count()
@@ -254,9 +257,11 @@ class InvoiceViewSet(viewsets.ModelViewSet):
         total_due = queryset.aggregate(Sum("amount_due"))["amount_due__sum"] or 0
 
         overdue_qs = queryset.filter(
-            due_date__lt=timezone.now(),
-            amount_due__gt=0
-        ).exclude(status__in=["paid", "void"])
+            # due_date__lt=timezone.now().astimezone(central_tz),
+            amount_due__gt=0,
+            status__in=['overdue']
+        )
+        # .exclude(status__in=["paid", "void"])
         overdue_count = overdue_qs.count()
         overdue_total = overdue_qs.aggregate(Sum("amount_due"))["amount_due__sum"] or 0
 
@@ -269,7 +274,7 @@ class InvoiceViewSet(viewsets.ModelViewSet):
 
         # === Status Distribution ===
         status_distribution = {}
-        now = timezone.now()
+        now = timezone.now().astimezone(central_tz)
         
         # Calculate Due and Overdue dynamically based on due_date
         # Due: invoices with due_date >= today and amount_due > 0, status not paid/void
@@ -277,8 +282,12 @@ class InvoiceViewSet(viewsets.ModelViewSet):
         due_queryset = queryset.filter(
             due_date__gte=now,
             amount_due__gt=0,
-        ).exclude(status__in=['paid', 'void'])
+            status__in=['sent']
+        ).exclude(status__in=['paid', 'void', 'overdue', 'partially_paid', 'partial','payment_processing','draft'])
         due_count = due_queryset.count()
+
+        for due in due_queryset:
+            print(due.invoice_number)
         due_total = due_queryset.aggregate(Sum("amount_due"))["amount_due__sum"] or 0
         status_distribution["due"] = {
             "label": "Due",
@@ -291,7 +300,7 @@ class InvoiceViewSet(viewsets.ModelViewSet):
         overdue_queryset = queryset.filter(
             due_date__lt=now,
             amount_due__gt=0,
-        ).exclude(status__in=['paid', 'void'])
+        ).exclude(status__in=['paid', 'void', 'partially_paid', 'partial'])
         overdue_count = overdue_queryset.count()
         overdue_total = overdue_queryset.aggregate(Sum("amount_due"))["amount_due__sum"] or 0
         status_distribution["overdue"] = {

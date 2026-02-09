@@ -126,7 +126,7 @@ def sync_all_invoices_periodic():
 
 
 # Statuses that can become overdue (not yet paid, void, or already overdue)
-STATUSES_ELIGIBLE_FOR_OVERDUE = ['draft', 'sent', 'payment_processing', 'partial']
+STATUSES_ELIGIBLE_FOR_OVERDUE = ['sent']
 
 
 @shared_task
