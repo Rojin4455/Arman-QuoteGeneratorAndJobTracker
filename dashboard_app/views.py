@@ -266,10 +266,10 @@ class InvoiceViewSet(viewsets.ModelViewSet):
         overdue_total = overdue_qs.aggregate(Sum("amount_due"))["amount_due__sum"] or 0
 
         # === Paid vs Unpaid ===
-        paid_count = queryset.filter(status__in=["paid","payment_processing"]).count()
+        paid_count = queryset.filter(status__in=["paid"]).count()
         unpaid_count = queryset.exclude(status__in=["paid","payment_processing"]).count()
 
-        paid_total = queryset.filter(status__in=["paid","payment_processing"]).aggregate(Sum("total"))["total__sum"] or 0
+        paid_total = queryset.filter(status__in=["paid"]).aggregate(Sum("total"))["total__sum"] or 0
         unpaid_total = queryset.exclude(status__in=["paid","payment_processing"]).aggregate(Sum("total"))["total__sum"] or 0
 
         # === Status Distribution ===
