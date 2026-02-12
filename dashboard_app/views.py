@@ -8,7 +8,7 @@ from django.db.models import Q, Sum, Count
 from django.db.models.functions import TruncDate, TruncWeek, TruncMonth
 from django.utils import timezone
 from django.utils.dateparse import parse_datetime
-from datetime import datetime, timedelta, time
+from datetime import datetime, timedelta, time, date
 import pytz
 
 from django_filters import rest_framework as filters
@@ -387,6 +387,7 @@ class InvoiceViewSet(viewsets.ModelViewSet):
         """
         Lead Funnel Report endpoint.
         Returns comprehensive metrics for the sales funnel including leads, estimates, and jobs.
+        Supports date range filter via start_date and end_date (default: current year).
         """
         user = request.user
         location_id = request.query_params.get('location_id')
@@ -399,83 +400,117 @@ class InvoiceViewSet(viewsets.ModelViewSet):
             location_filter['location_id'] = location_id
         
         now = timezone.now()
-        seven_days_ago = now - timedelta(days=7)
+        # Date range filter: default current year (01-01 to 31-12)
+        start_date_param = request.query_params.get('start_date')
+        end_date_param = request.query_params.get('end_date')
+        try:
+            if start_date_param:
+                start_dt = timezone.make_aware(
+                    datetime.strptime(start_date_param[:10], '%Y-%m-%d'),
+                    timezone.get_current_timezone()
+                )
+            else:
+                start_dt = timezone.make_aware(datetime(now.year, 1, 1), timezone.get_current_timezone())
+            if end_date_param:
+                end_dt = timezone.make_aware(
+                    datetime.strptime(end_date_param[:10], '%Y-%m-%d') + timedelta(days=1),
+                    timezone.get_current_timezone()
+                ) - timedelta(microseconds=1)
+            else:
+                end_dt = timezone.make_aware(datetime(now.year, 12, 31, 23, 59, 59, 999999), timezone.get_current_timezone())
+        except (ValueError, TypeError):
+            start_dt = timezone.make_aware(datetime(now.year, 1, 1), timezone.get_current_timezone())
+            end_dt = timezone.make_aware(datetime(now.year, 12, 31, 23, 59, 59, 999999), timezone.get_current_timezone())
         
-        # 1. New Lead Count (contacts created in last 7 days)
+        # 1. New Lead Count (contacts created in date range)
         contacts_qs = Contact.objects.all()
         if location_filter:
             contacts_qs = contacts_qs.filter(**location_filter)
         new_leads_count = contacts_qs.filter(
-            date_added__gte=seven_days_ago
+            date_added__gte=start_dt,
+            date_added__lte=end_dt
         ).count()
         
-        # 2. Open Estimate (submissions with status: draft, responses_completed, packages_selected)
+        # 2. Open Estimate (submissions with status: draft, responses_completed, packages_selected) — no amount
         open_statuses = ['draft', 'responses_completed', 'packages_selected']
         submissions_qs = CustomerSubmission.objects.all()
         if location_filter:
-            # Filter by contact's location_id
             submissions_qs = submissions_qs.filter(contact__location_id=location_filter['location_id'])
+        submissions_qs = submissions_qs.filter(created_at__gte=start_dt, created_at__lte=end_dt)
         open_estimate_count = submissions_qs.filter(status__in=open_statuses).count()
-        
-        # Get open estimate details with total value
-        open_estimates = submissions_qs.filter(status__in=open_statuses)
-        open_estimate_total_value = open_estimates.aggregate(Sum('final_total'))['final_total__sum'] or 0
         
         # 3. Rejected Estimate (status: rejected)
         rejected_estimate_count = submissions_qs.filter(status='rejected').count()
         rejected_estimates = submissions_qs.filter(status='rejected')
         rejected_estimate_total_value = rejected_estimates.aggregate(Sum('final_total'))['final_total__sum'] or 0
         
-        # 4. Accepted Estimate (status: accepted)
-        accepted_estimate_count = submissions_qs.filter(status='accepted').count()
-        accepted_estimates = submissions_qs.filter(status='accepted')
+        # 4. Accepted Estimate (quote status = submitted — when customer accepts/signs)
+        accepted_estimate_count = submissions_qs.filter(status='submitted').count()
+        accepted_estimates = submissions_qs.filter(status='submitted')
         accepted_estimate_total_value = accepted_estimates.aggregate(Sum('final_total'))['final_total__sum'] or 0
         
-        # 5. Estimate to Convert (jobs with status: to_convert)
-        jobs_qs = Job.objects.all()
+        # 5. Scheduled Quotes (submissions with status: accepted, within date range)
+        scheduled_quotes_qs = submissions_qs.filter(status='accepted')
+        scheduled_quotes_count = scheduled_quotes_qs.count()
+        scheduled_quotes_total_value = scheduled_quotes_qs.aggregate(Sum('final_total'))['final_total__sum'] or 0
+        
+        # Jobs queryset with location and date filter
+        jobs_qs = Job.objects.filter(created_at__gte=start_dt, created_at__lte=end_dt)
         if location_filter:
-            # Jobs don't have location_id directly, filter through submissions
             jobs_qs = jobs_qs.filter(submission__contact__location_id=location_filter['location_id'])
         
+        # 6. Estimate to Convert (jobs with status: to_convert)
         estimate_to_convert_jobs_qs = jobs_qs.filter(status='to_convert')
         estimate_to_convert_count = estimate_to_convert_jobs_qs.count()
         estimate_to_convert_total_value = estimate_to_convert_jobs_qs.aggregate(Sum('total_price'))['total_price__sum'] or 0
         
-        # 6. Scheduled Job (upcoming jobs, excluding to_convert and cancelled)
-        scheduled_jobs_qs = jobs_qs.exclude(status__in=['to_convert', 'cancelled']).filter(
-            scheduled_at__gte=now
+        # 7. Scheduled Jobs (pending, confirmed, on_the_way, service_due) — upcoming jobs from now to end_date
+        scheduled_job_statuses = ['pending', 'confirmed', 'on_the_way', 'service_due']
+        scheduled_jobs_qs = Job.objects.filter(
+            status__in=scheduled_job_statuses,
+            scheduled_at__isnull=False,
+            scheduled_at__gte=now,
+            scheduled_at__lte=end_dt
         )
+        if location_filter:
+            scheduled_jobs_qs = scheduled_jobs_qs.filter(submission__contact__location_id=location_filter['location_id'])
         scheduled_job_count = scheduled_jobs_qs.count()
         scheduled_job_total_value = scheduled_jobs_qs.aggregate(Sum('total_price'))['total_price__sum'] or 0
         
-        # 7. Closed Jobs (status: completed)
+        # 8. In Progress Jobs
+        in_progress_jobs_qs = jobs_qs.filter(status='in_progress')
+        in_progress_job_count = in_progress_jobs_qs.count()
+        in_progress_job_total_value = in_progress_jobs_qs.aggregate(Sum('total_price'))['total_price__sum'] or 0
+        
+        # 9. Cancelled Jobs
+        cancelled_jobs_qs = jobs_qs.filter(status='cancelled')
+        cancelled_job_count = cancelled_jobs_qs.count()
+        cancelled_job_total_value = cancelled_jobs_qs.aggregate(Sum('total_price'))['total_price__sum'] or 0
+        
+        # 10. Closed Jobs (status: completed)
         closed_jobs_qs = jobs_qs.filter(status='completed')
         closed_job_count = closed_jobs_qs.count()
         closed_job_total_value = closed_jobs_qs.aggregate(Sum('total_price'))['total_price__sum'] or 0
         
-        # Additional metrics for better insights
-        # Total pipeline value (open estimates + scheduled jobs)
-        pipeline_value = float(open_estimate_total_value) + float(scheduled_job_total_value)
-        
-        # Conversion rates
+        # Summary metrics (pipeline: open estimates + scheduled jobs; no amount on open estimates)
+        pipeline_value = float(scheduled_job_total_value)
         total_estimates = open_estimate_count + rejected_estimate_count + accepted_estimate_count
         acceptance_rate = (accepted_estimate_count / total_estimates * 100) if total_estimates > 0 else 0
         rejection_rate = (rejected_estimate_count / total_estimates * 100) if total_estimates > 0 else 0
         
         return Response({
             'report_period': {
-                'start_date': seven_days_ago.isoformat(),
-                'end_date': now.isoformat(),
-                'period_days': 7
+                'start_date': start_dt.date().isoformat(),
+                'end_date': end_dt.date().isoformat(),
+                'filter_description': 'Date range filter applied to all counts (default: current year)'
             },
             'lead_funnel': {
                 'new_leads': {
                     'count': new_leads_count,
-                    'label': 'New Leads (Last 7 Days)'
+                    'label': 'New Leads'
                 },
                 'open_estimates': {
                     'count': open_estimate_count,
-                    'total_value': float(open_estimate_total_value),
                     'label': 'Open Estimates',
                     'statuses': open_statuses
                 },
@@ -487,7 +522,14 @@ class InvoiceViewSet(viewsets.ModelViewSet):
                 'accepted_estimates': {
                     'count': accepted_estimate_count,
                     'total_value': float(accepted_estimate_total_value),
-                    'label': 'Accepted Estimates'
+                    'label': 'Accepted Estimates (Submitted)',
+                    'status': 'submitted'
+                },
+                'scheduled_quotes': {
+                    'count': scheduled_quotes_count,
+                    'total_value': float(scheduled_quotes_total_value),
+                    'label': 'Scheduled Quotes (Accepted)',
+                    'status': 'accepted'
                 },
                 'estimate_to_convert': {
                     'count': estimate_to_convert_count,
@@ -497,7 +539,19 @@ class InvoiceViewSet(viewsets.ModelViewSet):
                 'scheduled_jobs': {
                     'count': scheduled_job_count,
                     'total_value': float(scheduled_job_total_value),
-                    'label': 'Scheduled Jobs (Upcoming)'
+                    'label': 'Scheduled Jobs (Upcoming through end date)',
+                    'statuses': scheduled_job_statuses,
+                    'scheduled_at_range': {'from': now.isoformat(), 'to': end_dt.isoformat()}
+                },
+                'in_progress_jobs': {
+                    'count': in_progress_job_count,
+                    'total_value': float(in_progress_job_total_value),
+                    'label': 'In Progress Jobs'
+                },
+                'cancelled_jobs': {
+                    'count': cancelled_job_count,
+                    'total_value': float(cancelled_job_total_value),
+                    'label': 'Cancelled Jobs'
                 },
                 'closed_jobs': {
                     'count': closed_job_count,
@@ -517,277 +571,140 @@ class InvoiceViewSet(viewsets.ModelViewSet):
     @action(detail=False, methods=['get'])
     def sales_forecasting(self, request):
         """
-        Sales Forecasting endpoint.
-        Returns revenue forecasts for weekly, monthly, quarterly, and yearly periods
-        based on historical invoice data.
+        Sales Forecasting endpoint (Job-based).
+        Timeline: Previous 3 months (Actual) + Next 6 months (Forecast).
+        Forecast per month = (Average of same month from previous 5 years, from completed jobs)
+                            + (Total scheduled jobs for that month).
+        Data source: Job table only (no Invoice). Actual = completed job revenue; scheduled = non-cancelled jobs.
         """
         user = request.user
         location_id = request.query_params.get('location_id')
-        
-        # Apply location filter
         location_filter = {}
         if hasattr(user, 'location_id') and user.location_id:
             location_filter['location_id'] = user.location_id
         elif location_id:
             location_filter['location_id'] = location_id
-        
+
         now = timezone.now()
-        
-        # Get historical invoice data (paid invoices for accurate revenue)
-        invoices_qs = Invoice.objects.filter(status='paid')
-        if location_filter:
-            invoices_qs = invoices_qs.filter(**location_filter)
-        
-        # Get historical data for the last 2 years for better forecasting
-        two_years_ago = now - timedelta(days=730)
-        historical_invoices = invoices_qs.filter(
-            created_at__gte=two_years_ago,
-            created_at__lte=now
-        ).exclude(total__isnull=True).exclude(total=0)
-        
-        # Weekly Forecast
-        weekly_data = list(
-            historical_invoices.annotate(week=TruncWeek('created_at'))
-            .values('week')
-            .annotate(total_revenue=Sum('total'), invoice_count=Count('id'))
-            .order_by('week')
-        )
-        
-        # Calculate forecast using recent data and trend
-        weekly_base = 0
-        weekly_trend = 0
-        weekly_count_base = 0
-        weekly_count_trend = 0
-        if weekly_data:
-            weekly_totals = [float(item['total_revenue']) for item in weekly_data]
-            weekly_counts = [item['invoice_count'] for item in weekly_data]
-            
-            # Use recent 8 weeks for base average (or all if less than 8)
-            recent_weeks = min(8, len(weekly_totals))
-            recent_totals = weekly_totals[-recent_weeks:] if len(weekly_totals) >= recent_weeks else weekly_totals
-            recent_counts = weekly_counts[-recent_weeks:] if len(weekly_counts) >= recent_weeks else weekly_counts
-            weekly_base = sum(recent_totals) / len(recent_totals) if recent_totals else 0
-            weekly_count_base = sum(recent_counts) / len(recent_counts) if recent_counts else 0
-            
-            # Calculate revenue trend (average of last 4 weeks vs previous 4 weeks)
-            if len(weekly_totals) >= 8:
-                recent_4_avg = sum(weekly_totals[-4:]) / 4
-                previous_4_avg = sum(weekly_totals[-8:-4]) / 4
-                weekly_trend = (recent_4_avg - previous_4_avg) / 4 if previous_4_avg > 0 else 0
-                
-                # Calculate invoice count trend
-                recent_4_count_avg = sum(weekly_counts[-4:]) / 4
-                previous_4_count_avg = sum(weekly_counts[-8:-4]) / 4
-                weekly_count_trend = (recent_4_count_avg - previous_4_count_avg) / 4 if previous_4_count_avg > 0 else 0
-            elif len(weekly_totals) >= 4:
-                # If less than 8 weeks, use last 2 vs previous 2
-                recent_2_avg = sum(weekly_totals[-2:]) / 2
-                previous_2_avg = sum(weekly_totals[-4:-2]) / 2
-                weekly_trend = (recent_2_avg - previous_2_avg) / 2 if previous_2_avg > 0 else 0
-                
-                recent_2_count_avg = sum(weekly_counts[-2:]) / 2
-                previous_2_count_avg = sum(weekly_counts[-4:-2]) / 2
-                weekly_count_trend = (recent_2_count_avg - previous_2_count_avg) / 2 if previous_2_count_avg > 0 else 0
-        
-        # Generate next 8 weeks forecast with trend
-        next_8_weeks = []
-        for i in range(1, 9):
-            week_start = now + timedelta(weeks=i)
-            # Apply trend: each week grows/declines by trend amount
-            forecasted_revenue = weekly_base + (weekly_trend * i)
-            forecasted_revenue = max(0, forecasted_revenue)  # Ensure non-negative
-            
-            forecasted_count = weekly_count_base + (weekly_count_trend * i)
-            forecasted_count = max(0, forecasted_count)  # Ensure non-negative
-            
-            next_8_weeks.append({
-                'week': week_start.isoformat(),
-                'week_number': i,
-                'forecasted_revenue': round(float(forecasted_revenue), 2),
-                'forecasted_invoice_count': round(forecasted_count) if forecasted_count > 0 else 0
+        current_year, current_month = now.year, now.month
+
+        def jobs_base():
+            qs = Job.objects.all()
+            if location_filter:
+                qs = qs.filter(submission__contact__location_id=location_filter['location_id'])
+            return qs
+
+        def first_day_tz(y, m):
+            return timezone.make_aware(datetime(y, m, 1), timezone.get_current_timezone())
+
+        def last_day_tz(y, m):
+            if m == 12:
+                next_first = datetime(y + 1, 1, 1)
+            else:
+                next_first = datetime(y, m + 1, 1)
+            return timezone.make_aware(next_first, timezone.get_current_timezone()) - timedelta(microseconds=1)
+
+        # Historical: (sum of same month total completed job revenue for previous 5 years) / 5.
+        # E.g. March 2026 → (Mar2021 + Mar2022 + Mar2023 + Mar2024 + Mar2025) / 5. Years with no data = 0.
+        # Attribute by scheduled_at: completed jobs whose scheduled_at falls in that month (matches calendar).
+        YEARS_FOR_AVERAGE = 5
+
+        def historical_average_for_month(month_num):
+            totals = []
+            for y in range(current_year - YEARS_FOR_AVERAGE, current_year):
+                if y < 2000:
+                    continue
+                start = first_day_tz(y, month_num)
+                end = last_day_tz(y, month_num)
+                agg = (
+                    jobs_base()
+                    .filter(status='completed', scheduled_at__isnull=False, scheduled_at__gte=start, scheduled_at__lte=end)
+                    .aggregate(s=Sum('total_price'))
+                )
+                val = agg['s']
+                totals.append(float(val) if val is not None else 0.0)
+            # Always divide by 5 (total of last 5 years / 5)
+            return sum(totals) / YEARS_FOR_AVERAGE if totals else 0.0
+
+        # Scheduled revenue for (year, month): only jobs scheduled for that month with status in:
+        # pending, confirmed, on_the_way, completed, in_progress, service_due. Exclude cancelled and to_convert.
+        SCHEDULED_STATUSES = ['pending', 'confirmed', 'on_the_way', 'completed', 'in_progress', 'service_due']
+
+        def scheduled_revenue_for_month(year, month):
+            start = first_day_tz(year, month)
+            end = last_day_tz(year, month)
+            agg = (
+                jobs_base()
+                .filter(
+                    status__in=SCHEDULED_STATUSES,
+                    scheduled_at__isnull=False,
+                    scheduled_at__gte=start,
+                    scheduled_at__lte=end,
+                )
+                .aggregate(s=Sum('total_price'))
+            )
+            return float(agg['s'] or 0)
+
+        # Actual revenue for (year, month): completed jobs whose scheduled_at falls in that month (same as calendar)
+        def actual_revenue_for_month(year, month):
+            start = first_day_tz(year, month)
+            end = last_day_tz(year, month)
+            agg = (
+                jobs_base()
+                .filter(status='completed', scheduled_at__isnull=False, scheduled_at__gte=start, scheduled_at__lte=end)
+                .aggregate(s=Sum('total_price'))
+            )
+            return float(agg['s'] or 0)
+
+        MONTH_NAMES = ['', 'January', 'February', 'March', 'April', 'May', 'June',
+                       'July', 'August', 'September', 'October', 'November', 'December']
+
+        # Build timeline: previous 3 months (actual) + next 6 months (forecast)
+        months_list = []
+        # Previous 3 months
+        for i in range(3, 0, -1):
+            m = current_month - i
+            y = current_year
+            while m <= 0:
+                m += 12
+                y -= 1
+            months_list.append(('actual', y, m))
+        # Next 6 months (including current month as first “forecast” month)
+        for i in range(6):
+            m = current_month + i
+            y = current_year
+            while m > 12:
+                m -= 12
+                y += 1
+            months_list.append(('forecast', y, m))
+
+        result_months = []
+        for kind, y, m in months_list:
+            hist_avg = historical_average_for_month(m)
+            sched = scheduled_revenue_for_month(y, m)
+            forecast_val = hist_avg + sched
+            actual_val = actual_revenue_for_month(y, m) if (y < current_year or (y == current_year and m <= current_month)) else None
+            month_label = f"{MONTH_NAMES[m]} {y}"
+            result_months.append({
+                'type': kind,
+                'year': y,
+                'month': m,
+                'month_label': month_label,
+                'historical_average': round(hist_avg, 2),
+                'scheduled_revenue': round(sched, 2),
+                'forecast': round(forecast_val, 2),
+                'actual': round(actual_val, 2) if actual_val is not None else None,
             })
-        
-        # Monthly Forecast
-        monthly_data = list(
-            historical_invoices.annotate(month=TruncMonth('created_at'))
-            .values('month')
-            .annotate(total_revenue=Sum('total'), invoice_count=Count('id'))
-            .order_by('month')
-        )
-        
-        # Calculate forecast using recent data and trend
-        monthly_base = 0
-        monthly_trend = 0
-        monthly_count_base = 0
-        monthly_count_trend = 0
-        if monthly_data:
-            monthly_totals = [float(item['total_revenue']) for item in monthly_data]
-            monthly_counts = [item['invoice_count'] for item in monthly_data]
-            
-            # Use recent 6 months for base average (or all if less than 6)
-            recent_months = min(6, len(monthly_totals))
-            recent_totals = monthly_totals[-recent_months:] if len(monthly_totals) >= recent_months else monthly_totals
-            recent_counts = monthly_counts[-recent_months:] if len(monthly_counts) >= recent_months else monthly_counts
-            monthly_base = sum(recent_totals) / len(recent_totals) if recent_totals else 0
-            monthly_count_base = sum(recent_counts) / len(recent_counts) if recent_counts else 0
-            
-            # Calculate revenue trend (average of last 3 months vs previous 3 months)
-            if len(monthly_totals) >= 6:
-                recent_3_avg = sum(monthly_totals[-3:]) / 3
-                previous_3_avg = sum(monthly_totals[-6:-3]) / 3
-                monthly_trend = (recent_3_avg - previous_3_avg) / 3 if previous_3_avg > 0 else 0
-                
-                # Calculate invoice count trend
-                recent_3_count_avg = sum(monthly_counts[-3:]) / 3
-                previous_3_count_avg = sum(monthly_counts[-6:-3]) / 3
-                monthly_count_trend = (recent_3_count_avg - previous_3_count_avg) / 3 if previous_3_count_avg > 0 else 0
-            elif len(monthly_totals) >= 3:
-                # If less than 6 months, use last 2 vs previous 1
-                recent_2_avg = sum(monthly_totals[-2:]) / 2
-                previous_avg = monthly_totals[-3] if len(monthly_totals) >= 3 else monthly_totals[0]
-                monthly_trend = (recent_2_avg - previous_avg) / 2 if previous_avg > 0 else 0
-                
-                recent_2_count_avg = sum(monthly_counts[-2:]) / 2
-                previous_count_avg = monthly_counts[-3] if len(monthly_counts) >= 3 else monthly_counts[0]
-                monthly_count_trend = (recent_2_count_avg - previous_count_avg) / 2 if previous_count_avg > 0 else 0
-        
-        # Generate next 12 months forecast with trend
-        next_12_months = []
-        for i in range(1, 13):
-            month = now.month + i
-            year = now.year
-            while month > 12:
-                month -= 12
-                year += 1
-            month_start = datetime(year, month, 1, tzinfo=now.tzinfo)
-            
-            # Apply trend: each month grows/declines by trend amount
-            forecasted_revenue = monthly_base + (monthly_trend * i)
-            forecasted_revenue = max(0, forecasted_revenue)  # Ensure non-negative
-            
-            forecasted_count = monthly_count_base + (monthly_count_trend * i)
-            forecasted_count = max(0, forecasted_count)  # Ensure non-negative
-            
-            next_12_months.append({
-                'month': month_start.isoformat(),
-                'month_number': i,
-                'forecasted_revenue': round(float(forecasted_revenue), 2),
-                'forecasted_invoice_count': round(forecasted_count) if forecasted_count > 0 else 0
-            })
-        
-        # Quarterly Forecast (based on monthly forecast, sum 3 months)
-        quarterly_base = monthly_base * 3
-        quarterly_trend = monthly_trend * 3
-        next_4_quarters = []
-        current_quarter = ((now.month - 1) // 3) + 1
-        for i in range(1, 5):
-            target_quarter = current_quarter + i
-            target_year = now.year
-            while target_quarter > 4:
-                target_quarter -= 4
-                target_year += 1
-            quarter_start_month = (target_quarter - 1) * 3 + 1
-            quarter_start = datetime(target_year, quarter_start_month, 1, tzinfo=now.tzinfo)
-            
-            # Calculate which months (relative to now) this quarter spans
-            # Sum the forecasted revenue and counts for the 3 months in this quarter
-            quarter_revenue = 0
-            quarter_count = 0
-            for month_in_quarter in range(3):
-                # Calculate the month index relative to now (1 = next month, 2 = month after, etc.)
-                months_from_now = ((target_year - now.year) * 12) + (quarter_start_month + month_in_quarter - now.month)
-                if months_from_now > 0:
-                    forecasted_revenue = monthly_base + (monthly_trend * months_from_now)
-                    forecasted_revenue = max(0, forecasted_revenue)
-                    quarter_revenue += forecasted_revenue
-                    
-                    forecasted_count = monthly_count_base + (monthly_count_trend * months_from_now)
-                    forecasted_count = max(0, forecasted_count)
-                    quarter_count += forecasted_count
-            
-            quarter_revenue = max(0, quarter_revenue) if quarter_revenue > 0 else (quarterly_base + (quarterly_trend * i))
-            quarter_revenue = max(0, quarter_revenue)
-            
-            next_4_quarters.append({
-                'quarter': quarter_start.isoformat(),
-                'quarter_number': i,
-                'quarter_label': f'Q{target_quarter} {target_year}',
-                'forecasted_revenue': round(float(quarter_revenue), 2),
-                'forecasted_invoice_count': round(quarter_count) if quarter_count > 0 else 0
-            })
-        
-        # Yearly Forecast (sum 12 months from monthly forecast)
-        yearly_base = monthly_base * 12
-        yearly_trend = monthly_trend * 12
-        next_2_years = []
-        for i in range(1, 3):
-            year_start = datetime(now.year + i, 1, 1, tzinfo=now.tzinfo)
-            
-            # Sum 12 months for the year
-            year_revenue = 0
-            year_count = 0
-            for month_offset in range(1, 13):
-                month_idx = ((i - 1) * 12) + month_offset
-                forecasted_revenue = monthly_base + (monthly_trend * month_idx)
-                forecasted_revenue = max(0, forecasted_revenue)
-                year_revenue += forecasted_revenue
-                
-                forecasted_count = monthly_count_base + (monthly_count_trend * month_idx)
-                forecasted_count = max(0, forecasted_count)
-                year_count += forecasted_count
-            
-            year_revenue = max(0, year_revenue)
-            
-            next_2_years.append({
-                'year': year_start.isoformat(),
-                'year_number': i,
-                'year_label': str(now.year + i),
-                'forecasted_revenue': round(float(year_revenue), 2),
-                'forecasted_invoice_count': round(year_count) if year_count > 0 else 0
-            })
-        
-        # Historical summary
-        total_historical_revenue = historical_invoices.aggregate(Sum('total'))['total__sum'] or 0
-        total_historical_invoices = historical_invoices.count()
-        
+
         return Response({
             'forecast_generated_at': now.isoformat(),
-            'historical_period': {
-                'start_date': two_years_ago.isoformat(),
-                'end_date': now.isoformat(),
-                'total_revenue': float(total_historical_revenue),
-                'total_invoices': total_historical_invoices
+            'data_source': 'Job table only',
+            'forecast_formula': 'Forecast = scheduled_revenue + historical_average. historical_average = (sum of same month completed job revenue for previous 5 years) / 5. scheduled_revenue = jobs scheduled for that month with status in: pending, confirmed, on_the_way, completed, in_progress, service_due (cancelled and to_convert excluded).',
+            'timeline': {
+                'previous_3_months_actual': [r for r in result_months if r['type'] == 'actual'],
+                'next_6_months_forecast': [r for r in result_months if r['type'] == 'forecast'],
             },
-            'forecasts': {
-                'weekly': {
-                    'base_revenue_per_week': round(float(weekly_base), 2),
-                    'trend_per_week': round(float(weekly_trend), 2),
-                    'periods': next_8_weeks,
-                    'total_forecasted_revenue_8_weeks': round(sum([p['forecasted_revenue'] for p in next_8_weeks]), 2)
-                },
-                'monthly': {
-                    'base_revenue_per_month': round(float(monthly_base), 2),
-                    'trend_per_month': round(float(monthly_trend), 2),
-                    'periods': next_12_months,
-                    'total_forecasted_revenue_12_months': round(sum([p['forecasted_revenue'] for p in next_12_months]), 2)
-                },
-                'quarterly': {
-                    'base_revenue_per_quarter': round(float(quarterly_base), 2),
-                    'trend_per_quarter': round(float(quarterly_trend), 2),
-                    'periods': next_4_quarters,
-                    'total_forecasted_revenue_4_quarters': round(sum([p['forecasted_revenue'] for p in next_4_quarters]), 2)
-                },
-                'yearly': {
-                    'base_revenue_per_year': round(float(yearly_base), 2),
-                    'trend_per_year': round(float(yearly_trend), 2),
-                    'periods': next_2_years,
-                    'total_forecasted_revenue_2_years': round(sum([p['forecasted_revenue'] for p in next_2_years]), 2)
-                }
-            },
-            'historical_data_summary': {
-                'weekly_trends': weekly_data[-12:] if len(weekly_data) > 12 else weekly_data,  # Last 12 weeks
-                'monthly_trends': monthly_data[-12:] if len(monthly_data) > 12 else monthly_data  # Last 12 months
-            }
+            'months': result_months,
         })
 
 

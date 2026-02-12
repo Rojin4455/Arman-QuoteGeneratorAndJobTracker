@@ -181,8 +181,12 @@ SIMPLE_JWT = {
 
 CORS_ALLOWED_ORIGINS = config(
     'CORS_ALLOWED_ORIGINS',
-    default='http://localhost:3000,http://localhost:8080,http://127.0.0.1:3000,http://localhost:3001,http://127.0.0.1:3001,http://3.141.107.85,https://quotenew.theservicepilot.com,https://services.theservicepilot.com'
+    default='http://localhost:3000,http://localhost:8080,http://127.0.0.1:3000,http://localhost:3001,http://127.0.0.1:3001,http://3.141.107.85,https://quotenew.theservicepilot.com,https://services.theservicepilot.com,https://374c-223-181-10-74.ngrok-free.app'
 ).split(',')
+
+CORS_ALLOWED_ORIGIN_REGEXES = [
+    r"^https://.*\.ngrok-free\.app$",
+]
 
 CORS_ALLOW_CREDENTIALS = True
 
