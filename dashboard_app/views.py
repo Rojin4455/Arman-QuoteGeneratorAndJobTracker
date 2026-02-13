@@ -517,8 +517,11 @@ class InvoiceViewSet(viewsets.ModelViewSet):
         
         # Summary metrics (pipeline: open estimates + scheduled jobs; no amount on open estimates)
         pipeline_value = float(scheduled_job_total_value)
-        total_estimates = open_estimate_count + rejected_estimate_count + accepted_estimate_count
-        acceptance_rate = (accepted_estimate_count / total_estimates * 100) if total_estimates > 0 else 0
+        # Acceptance rate = (Accepted Estimates (submitted) + Scheduled Quotes) / all estimates in range
+        # Denominator: open + rejected + accepted (submitted) + scheduled = all estimates we're showing
+        total_estimates = open_estimate_count + rejected_estimate_count + accepted_estimate_count + scheduled_quotes_count
+        accepted_count = accepted_estimate_count + scheduled_quotes_count
+        acceptance_rate = (accepted_count / total_estimates * 100) if total_estimates > 0 else 0
         rejection_rate = (rejected_estimate_count / total_estimates * 100) if total_estimates > 0 else 0
         
         return Response({
