@@ -14,6 +14,7 @@ import pytz
 from django_filters import rest_framework as filters
 
 from jobtracker_app.models import Job
+from jobtracker_app.views import resolve_user_identifier
 from accounts.models import Contact
 from quote_app.models import CustomerSubmission
 
@@ -265,12 +266,14 @@ class InvoiceViewSet(viewsets.ModelViewSet):
         overdue_count = overdue_qs.count()
         overdue_total = overdue_qs.aggregate(Sum("amount_due"))["amount_due__sum"] or 0
 
-        # === Paid vs Unpaid ===
+        # === Paid vs Unpaid vs Payment Processing ===
         paid_count = queryset.filter(status__in=["paid"]).count()
-        unpaid_count = queryset.exclude(status__in=["paid","payment_processing"]).count()
+        payment_processing_count = queryset.filter(status="payment_processing").count()
+        payment_processing_total = queryset.filter(status="payment_processing").aggregate(Sum("total"))["total__sum"] or 0
+        unpaid_count = queryset.exclude(status__in=["paid", "payment_processing"]).count()
 
         paid_total = queryset.filter(status__in=["paid"]).aggregate(Sum("total"))["total__sum"] or 0
-        unpaid_total = queryset.exclude(status__in=["paid","payment_processing"]).aggregate(Sum("total"))["total__sum"] or 0
+        unpaid_total = queryset.exclude(status__in=["paid", "payment_processing"]).aggregate(Sum("total"))["total__sum"] or 0
 
         # === Status Distribution ===
         status_distribution = {}
@@ -285,14 +288,11 @@ class InvoiceViewSet(viewsets.ModelViewSet):
             status__in=['sent']
         ).exclude(status__in=['paid', 'void', 'overdue', 'partially_paid', 'partial','payment_processing','draft'])
         due_count = due_queryset.count()
-
-        for due in due_queryset:
-            print(due.invoice_number)
         due_total = due_queryset.aggregate(Sum("amount_due"))["amount_due__sum"] or 0
         status_distribution["due"] = {
             "label": "Due",
             "count": due_count,
-            "total": due_total,
+            "total": float(due_total),
         }
         
         # Overdue: invoices with due_date < today and amount_due > 0, status not paid/void
@@ -339,10 +339,30 @@ class InvoiceViewSet(viewsets.ModelViewSet):
                 total_paid=Sum("amount_paid"),
                 total_due=Sum("amount_due"),
                 paid_count=Count("id", filter=Q(status="paid")),
-                unpaid_count=Count("id", filter=~Q(status="paid")),
+                payment_processing_count=Count("id", filter=Q(status="payment_processing")),
+                payment_processing_total=Sum("total", filter=Q(status="payment_processing")),
+                unpaid_count=Count("id", filter=~Q(status__in=["paid", "payment_processing"])),
+                unpaid_total=Sum("total", filter=~Q(status__in=["paid", "payment_processing"])),
             )
             .order_by("period")
         )
+        # Serialize trends for JSON: period as ISO string, decimals as float
+        trends_data = []
+        for row in trends:
+            period = row["period"]
+            period_str = period.isoformat() if hasattr(period, "isoformat") else str(period)
+            trends_data.append({
+                "period": period_str,
+                "total_invoices": row["total_invoices"],
+                "total_amount": float(row["total_amount"] or 0),
+                "total_paid": float(row["total_paid"] or 0),
+                "total_due": float(row["total_due"] or 0),
+                "paid_count": row["paid_count"],
+                "payment_processing_count": row["payment_processing_count"],
+                "payment_processing_total": float(row["payment_processing_total"] or 0),
+                "unpaid_count": row["unpaid_count"],
+                "unpaid_total": float(row["unpaid_total"] or 0),
+            })
 
         # === Top Customers (by total invoiced) ===
         top_customers = (
@@ -359,18 +379,21 @@ class InvoiceViewSet(viewsets.ModelViewSet):
         return Response({
             "summary": {
                 "total_invoices": total_invoices,
-                "total_amount": total_amount,
-                "total_paid": total_paid,
-                "total_due": total_due,
+                "total_amount": float(total_amount),
+                "total_paid": float(total_paid),
+                "total_due": float(total_due),
                 "overdue_count": overdue_count,
-                "overdue_total": overdue_total,
+                "overdue_total": float(overdue_total),
+                "payment_processing_count": payment_processing_count,
+                "payment_processing_total": float(payment_processing_total),
             },
             "paid_unpaid_overview": {
-                "paid": {"count": paid_count, "total": paid_total},
-                "unpaid": {"count": unpaid_count, "total": unpaid_total},
+                "paid": {"count": paid_count, "total": float(paid_total)},
+                "payment_processing": {"count": payment_processing_count, "total": float(payment_processing_total)},
+                "unpaid": {"count": unpaid_count, "total": float(unpaid_total)},
             },
             "status_distribution": status_distribution,
-            "trends": list(trends),
+            "trends": trends_data,
             "top_customers": list(top_customers),
         })
     
@@ -576,6 +599,8 @@ class InvoiceViewSet(viewsets.ModelViewSet):
         Forecast per month = (Average of same month from previous 5 years, from completed jobs)
                             + (Total scheduled jobs for that month).
         Data source: Job table only (no Invoice). Actual = completed job revenue; scheduled = non-cancelled jobs.
+        Optional assignee_ids (comma-separated user IDs): when provided, only jobs assigned to those users
+        are included, so scheduled/forecast totals match the calendar view (job/occurrences with same filter).
         """
         user = request.user
         location_id = request.query_params.get('location_id')
@@ -585,6 +610,15 @@ class InvoiceViewSet(viewsets.ModelViewSet):
         elif location_id:
             location_filter['location_id'] = location_id
 
+        # Optional assignee filter (same as calendar occurrences) so scheduled totals match calendar view
+        assignee_ids_param = request.query_params.get('assignee_ids')
+        assignee_user_ids = []
+        if assignee_ids_param:
+            for assignee in (a.strip() for a in assignee_ids_param.split(',') if a.strip()):
+                uid = resolve_user_identifier(assignee)
+                if uid is not None:
+                    assignee_user_ids.append(uid)
+
         now = timezone.now()
         current_year, current_month = now.year, now.month
 
@@ -592,6 +626,8 @@ class InvoiceViewSet(viewsets.ModelViewSet):
             qs = Job.objects.all()
             if location_filter:
                 qs = qs.filter(submission__contact__location_id=location_filter['location_id'])
+            if assignee_user_ids:
+                qs = qs.filter(assignments__user_id__in=assignee_user_ids).distinct()
             return qs
 
         def first_day_tz(y, m):
