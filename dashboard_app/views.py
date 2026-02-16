@@ -643,16 +643,20 @@ class InvoiceViewSet(viewsets.ModelViewSet):
                 next_first = datetime(y, m + 1, 1)
             return timezone.make_aware(next_first, timezone.get_current_timezone()) - timedelta(microseconds=1)
 
-        # Historical: (sum of same month total completed job revenue for previous 5 years) / 5.
-        # E.g. March 2026 → (Mar2021 + Mar2022 + Mar2023 + Mar2024 + Mar2025) / 5. Years with no data = 0.
-        # Attribute by scheduled_at: completed jobs whose scheduled_at falls in that month (matches calendar).
-        YEARS_FOR_AVERAGE = 5
+        # Historical: average of same month completed job revenue over previous years.
+        # Includes current year for months that have already passed (so e.g. Jan 2026 counts for January).
+        # Years used dynamically: last 5 years + current year when month_num <= current_month. Divide by count.
+        YEARS_BACK = 5
 
         def historical_average_for_month(month_num):
+            years_included = list(range(current_year - YEARS_BACK, current_year))
+            if month_num <= current_month:
+                years_included.append(current_year)
+            years_included = [y for y in years_included if y >= 2000]
+            if not years_included:
+                return 0.0
             totals = []
-            for y in range(current_year - YEARS_FOR_AVERAGE, current_year):
-                if y < 2000:
-                    continue
+            for y in years_included:
                 start = first_day_tz(y, month_num)
                 end = last_day_tz(y, month_num)
                 agg = (
@@ -662,8 +666,7 @@ class InvoiceViewSet(viewsets.ModelViewSet):
                 )
                 val = agg['s']
                 totals.append(float(val) if val is not None else 0.0)
-            # Always divide by 5 (total of last 5 years / 5)
-            return sum(totals) / YEARS_FOR_AVERAGE if totals else 0.0
+            return sum(totals) / len(years_included)
 
         # Scheduled revenue for (year, month): only jobs scheduled for that month with status in:
         # pending, confirmed, on_the_way, completed, in_progress, service_due. Exclude cancelled and to_convert.
