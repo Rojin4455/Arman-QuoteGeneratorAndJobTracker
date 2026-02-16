@@ -403,15 +403,16 @@ def create_ghl_appointment_from_job(job) -> Optional[Appointment]:
         print("⚠️ [CREATE APPOINTMENT FROM JOB] No GHL contact ID found for job")
         # We can still create the appointment without contact_id, but it's not ideal
     
-    # Get assigned user GHL ID from job assignments
-    assigned_user_ghl_id = None
+    # Get all assigned user GHL IDs from job assignments (create same appointment for each assignee)
+    assigned_user_ghl_ids = []
     if job.assignments.exists():
-        assigned_user = job.assignments.first().user
-        if assigned_user and assigned_user.ghl_user_id:
-            assigned_user_ghl_id = assigned_user.ghl_user_id
-            print(f"📍 [CREATE APPOINTMENT FROM JOB] Assigned user GHL ID: {assigned_user_ghl_id}")
+        for assignment in job.assignments.select_related('user').all():
+            if assignment.user and assignment.user.ghl_user_id:
+                assigned_user_ghl_ids.append(assignment.user.ghl_user_id)
+        if assigned_user_ghl_ids:
+            print(f"📍 [CREATE APPOINTMENT FROM JOB] Creating appointment for {len(assigned_user_ghl_ids)} assignee(s): {assigned_user_ghl_ids}")
         else:
-            print("⚠️ [CREATE APPOINTMENT FROM JOB] No assigned user found")
+            print("⚠️ [CREATE APPOINTMENT FROM JOB] No assigned users with GHL ID found")
     else:
         print("⚠️ [CREATE APPOINTMENT FROM JOB] No assignments found")
     
@@ -502,20 +503,28 @@ def create_ghl_appointment_from_job(job) -> Optional[Appointment]:
     if ghl_contact_id:
         payload["contactId"] = ghl_contact_id
     
-    if assigned_user_ghl_id:
-        payload["assignedUserId"] = assigned_user_ghl_id
-    
-    # Make API call to create appointment in GHL
+    # Create one appointment per assignee (same details, different assignedUserId); if no assignees, create one without assignee
     headers = get_ghl_headers(credentials.access_token)
     url = 'https://services.leadconnectorhq.com/calendars/events/appointments'
-    
+    assignee_ids_to_use = assigned_user_ghl_ids if assigned_user_ghl_ids else [None]
+    created_any = False
     try:
-        print(f"📤 [CREATE APPOINTMENT FROM JOB] Creating appointment in GHL for job {job.id}")
-        response = requests.post(url, json=payload, headers=headers)
+        for assigned_user_ghl_id in assignee_ids_to_use:
+            req_payload = {**payload}
+            if assigned_user_ghl_id:
+                req_payload["assignedUserId"] = assigned_user_ghl_id
+            print(f"📤 [CREATE APPOINTMENT FROM JOB] Creating appointment in GHL for job {job.id}" + (f" (assignee: {assigned_user_ghl_id})" if assigned_user_ghl_id else " (no assignee)"))
+            response = requests.post(url, json=req_payload, headers=headers)
+            
+            if response.status_code in [200, 201]:
+                data = response.json()
+                print(f"✅ [CREATE APPOINTMENT FROM JOB] GHL API response: {data}")
+                created_any = True
+            else:
+                print(f"❌ [CREATE APPOINTMENT FROM JOB] Failed to create appointment in GHL for assignee {assigned_user_ghl_id}: {response.status_code} - {response.text}")
         
-        if response.status_code in [200, 201]:
-            data = response.json()
-            print(f"✅ [CREATE APPOINTMENT FROM JOB] GHL API response: {data}")
+        if not created_any:
+            return None
             
             # Extract GHL appointment ID from response
             # ghl_appointment_id = None
@@ -572,10 +581,6 @@ def create_ghl_appointment_from_job(job) -> Optional[Appointment]:
             
             # print(f"✅ [CREATE APPOINTMENT FROM JOB] Created appointment {appointment.id} for job {job.id}")
             # return appointment
-            
-        else:
-            print(f"❌ [CREATE APPOINTMENT FROM JOB] Failed to create appointment in GHL: {response.status_code} - {response.text}")
-            return None
             
     except Exception as e:
         print(f"❌ [CREATE APPOINTMENT FROM JOB] Error creating appointment in GHL: {str(e)}")

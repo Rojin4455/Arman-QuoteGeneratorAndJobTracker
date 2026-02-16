@@ -97,22 +97,38 @@ def _trigger_invoice_on_completion(sender, instance, created, **kwargs):
             return
 
         # --------------------------------------------------
-        # Resolve location_id
+        # Resolve location_id from job: contact, submission.contact, or lookup by customer_email
         # --------------------------------------------------
         location_id = "b8qvo7VooP3JD3dIZU42"
         try:
-            print("🔍 Fetching job with submission/contact for location_id")
             job_with_relations = (
                 Job.objects
-                .select_related('submission__contact')
+                .select_related('contact', 'submission__contact')
                 .get(id=instance.id)
             )
 
-            if job_with_relations.submission and job_with_relations.submission.contact:
+            # 1) Job's direct contact
+            if job_with_relations.contact and job_with_relations.contact.location_id:
+                location_id = job_with_relations.contact.location_id
+                print(f"📍 location_id from job.contact: {location_id}")
+            # 2) Submission's contact
+            elif job_with_relations.submission and job_with_relations.submission.contact and job_with_relations.submission.contact.location_id:
                 location_id = job_with_relations.submission.contact.location_id
-                print(f"📍 location_id resolved: {location_id}")
-            else:
-                print("⚠️ No submission/contact found for job")
+                print(f"📍 location_id from job.submission.contact: {location_id}")
+            # 3) Lookup Contact by job.customer_email
+            elif job_with_relations.customer_email:
+                contact_by_email = (
+                    Contact.objects
+                    .filter(email=job_with_relations.customer_email)
+                    .exclude(location_id__isnull=True)
+                    .exclude(location_id='')
+                    .first()
+                )
+                if contact_by_email:
+                    location_id = contact_by_email.location_id
+                    print(f"📍 location_id from Contact lookup (customer_email): {location_id}")
+            if not location_id:
+                print("⚠️ Could not resolve location_id from job contact, submission.contact, or customer_email")
 
         except Job.DoesNotExist:
             print("❌ Job not found while resolving location_id")

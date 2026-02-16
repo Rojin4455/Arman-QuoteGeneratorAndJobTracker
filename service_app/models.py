@@ -7,7 +7,7 @@ import uuid
 
 
 class User(AbstractUser):
-    """Extended User model for admin authentication"""
+    """Extended User model for admin authentication. Belongs to one GHL account (GHLAuthCredentials)."""
     ROLE_MANAGER = 'manager'
     ROLE_SUPERVISOR = 'supervisor'
     ROLE_WORKER = 'worker'
@@ -18,6 +18,15 @@ class User(AbstractUser):
         (ROLE_WORKER, 'Worker'),
     ]
     # id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    # Parent account (one GHL onboarding = one account; one account can have many users)
+    account = models.ForeignKey(
+        'accounts.GHLAuthCredentials',
+        on_delete=models.CASCADE,
+        related_name='users',
+        null=True,
+        blank=True,
+        help_text='GHL account this user belongs to (for multi-app onboarding)',
+    )
     ghl_user_id = models.CharField(max_length=255, unique=True, null=True, blank=True)
     is_admin = models.BooleanField(default=False)
     role = models.CharField(max_length=20, choices=ROLE_CHOICES, default=ROLE_WORKER)
