@@ -421,6 +421,8 @@ class JobSerializer(serializers.ModelSerializer):
     def get_slot_reserved_info(self, obj):
         """
         Check if there's a matching appointment for this job.
+        Only computed when fetching a single job (GET /api/job/jobs/{id}/) to avoid
+        heavy DB work and N+1 on list endpoints (e.g. locations/jobs/?address=...).
         Conditions:
         1. Appointment start_time matches job.scheduled_at (converted to timezone)
         2. Appointment end_time matches job.scheduled_at + duration_hours (converted to timezone)
@@ -430,6 +432,8 @@ class JobSerializer(serializers.ModelSerializer):
         
         Logic: Check each job user one by one until a match is found.
         """
+        if not self.context.get('include_slot_reserved_info'):
+            return None
         from datetime import timedelta
         from django.utils import timezone as django_timezone
         import pytz
@@ -519,8 +523,6 @@ class JobSerializer(serializers.ModelSerializer):
                     assigned_user=job_user
                 ).select_related('calendar', 'assigned_user', 'contact').first()
 
-                print("appointment: ", appointment)
-                
                 if appointment:
                     # Found a match! Return appointment details
                     return {

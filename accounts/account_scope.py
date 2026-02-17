@@ -7,11 +7,11 @@ Resolves the current request's account (GHLAuthCredentials) from:
   If no location_id is found, falls back to DEFAULT_LOCATION_ID (for unauthenticated routes).
 """
 from typing import Optional
-
+from decouple import config
 from accounts.models import GHLAuthCredentials
 
 # Fallback location_id when none is provided in the request (unauthenticated routes).
-DEFAULT_LOCATION_ID = "2gQq7YvjmiZkoV21TvQU"
+DEFAULT_LOCATION_ID = config("DEFAULT_LOCATION_ID")
 
 
 def _get_location_id_from_request(request) -> Optional[str]:

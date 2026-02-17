@@ -223,6 +223,12 @@ class JobViewSet(viewsets.ModelViewSet):
             return [permissions.IsAuthenticated()]  # Allow authenticated users to update/delete
         return super().get_permissions()
 
+    def get_serializer_context(self):
+        """Include slot_reserved_info only for single-job retrieve (job/{id}/)."""
+        context = super().get_serializer_context()
+        context['include_slot_reserved_info'] = self.action == 'retrieve'
+        return context
+
     def get_object(self):
         """Override to ensure users can only access jobs assigned to them."""
         obj = super().get_object()
