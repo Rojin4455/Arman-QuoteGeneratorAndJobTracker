@@ -11,6 +11,10 @@ from django.db.models import Q, Prefetch
 from decimal import Decimal
 from datetime import timedelta
 from django.utils import timezone
+from accounts.permissions import AccountScopedPermission
+from accounts.mixins import AccountScopedQuerysetMixin
+from .account_scope_utils import get_submission_for_account
+from service_app.account_scope_utils import get_service_for_account
 from service_app.models import ServiceSettings
 from service_app.models import (
     Service, Package, Feature, PackageFeature, Location,
@@ -61,16 +65,16 @@ class ContactPagination(PageNumberPagination):
     max_page_size = 100
 
 
-class ContactSearchView(ListAPIView):
+class ContactSearchView(AccountScopedQuerysetMixin, ListAPIView):
+    queryset = Contact.objects.all()
     serializer_class = ContactSerializer
     pagination_class = ContactPagination
-    permission_classes = [AllowAny]
-
+    permission_classes = [AccountScopedPermission, AllowAny]
+    account_lookup = "account"
 
     def get_queryset(self):
         query = self.request.query_params.get('search', '').strip()
-        qs = Contact.objects.all()
-
+        qs = super().get_queryset()
         if query:
             keywords = query.split()
             q_object = Q()
@@ -87,27 +91,32 @@ class ContactSearchView(ListAPIView):
 
 
 class AddressByContactView(APIView):
-    permission_classes=[AllowAny]
+    permission_classes = [AccountScopedPermission, AllowAny]
+
     def get(self, request, contact_id):
-        if not contact_id:
+        if contact_id is None:
             return Response({'error': 'contact_id is required'}, status=status.HTTP_400_BAD_REQUEST)
-        
-        print("here contact address")
-        # contact = Contact.objects.get(contact_id=contact_id)
-        addresses = Address.objects.filter(contact=contact_id)
+        account = getattr(request, 'account', None)
+        # URL uses <int:contact_id> so contact_id is Django pk; support both pk and GHL contact_id (string)
+        if isinstance(contact_id, int):
+            contact = get_object_or_404(Contact, pk=contact_id, account=account)
+        else:
+            contact = get_object_or_404(Contact, contact_id=contact_id, account=account)
+        addresses = Address.objects.filter(contact=contact)
         serializer = AddressSerializer(addresses, many=True)
         return Response(serializer.data, status=status.HTTP_200_OK)
 
 
 # Step 1: Get initial data (locations, services, size ranges)
 class InitialDataView(APIView):
-    """Get initial data for the quote form"""
-    permission_classes = [AllowAny]
-    
+    """Get initial data for the quote form (scoped to account via location_id when unauthenticated)."""
+    permission_classes = [AccountScopedPermission, AllowAny]
+
     def get(self, request):
-        locations = Location.objects.filter(is_active=True).order_by('name')
-        services = Service.objects.filter(is_active=True).order_by('order', 'name')
-        size_ranges = GlobalSizePackage.objects.all().order_by('order', 'min_sqft')
+        account = getattr(request, 'account', None)
+        locations = Location.objects.filter(is_active=True, account=account).order_by('name')
+        services = Service.objects.filter(is_active=True, account=account).order_by('order', 'name')
+        size_ranges = GlobalSizePackage.objects.filter(account=account).order_by('order', 'min_sqft')
         
         # Get project-based employees (active only)
         project_employees = EmployeeProfile.objects.filter(
@@ -127,17 +136,19 @@ class InitialDataView(APIView):
 
 # Step 2: Create customer submission
 class CustomerSubmissionCreateView(generics.CreateAPIView):
-    """Create a new customer submission"""
+    """Create a new customer submission (scoped to account via location_id when unauthenticated)."""
     queryset = CustomerSubmission.objects.all()
     serializer_class = CustomerSubmissionCreateSerializer
-    permission_classes = [AllowAny]
+    permission_classes = [AccountScopedPermission, AllowAny]
 
-    
+    def perform_create(self, serializer):
+        serializer.save(account=getattr(self.request, 'account', None))
+
     def create(self, request, *args, **kwargs):
         serializer = self.get_serializer(data=request.data)
         serializer.is_valid(raise_exception=True)
-        submission = serializer.save()
-        
+        self.perform_create(serializer)
+        submission = serializer.instance
         return Response({
             'submission_id': submission.id,
             'message': 'Customer information saved successfully'
@@ -145,11 +156,12 @@ class CustomerSubmissionCreateView(generics.CreateAPIView):
 
 # Step 3: Add services to submission
 class AddServicesToSubmissionView(APIView):
-    """Add selected services to customer submission"""
-    permission_classes = [AllowAny]
-    
+    """Add selected services to customer submission (scoped to account)."""
+    permission_classes = [AccountScopedPermission, AllowAny]
+
     def post(self, request, submission_id):
-        submission = get_object_or_404(CustomerSubmission, id=submission_id)
+        account = getattr(request, 'account', None)
+        submission = get_submission_for_account(submission_id, account)
         service_ids = request.data.get('service_ids', [])
         
         # if not service_ids:
@@ -165,7 +177,7 @@ class AddServicesToSubmissionView(APIView):
                 
                 # Add new selections
                 for service_id in service_ids:
-                    service = get_object_or_404(Service, id=service_id, is_active=True)
+                    service = get_object_or_404(Service, id=service_id, is_active=True, account=account)
                     CustomerServiceSelection.objects.get_or_create(
                         submission=submission,
                         service=service
@@ -178,11 +190,14 @@ class AddServicesToSubmissionView(APIView):
 
 # Step 4: Get questions for a specific service
 class ServiceQuestionsView(APIView):
-    """Get questions for a specific service"""
-    permission_classes = [AllowAny]
-    
+    """Get questions for a specific service (scoped to account)."""
+    permission_classes = [AccountScopedPermission, AllowAny]
+
     def get(self, request, service_id):
-        service = get_object_or_404(Service, id=service_id, is_active=True)
+        account = getattr(request, 'account', None)
+        service = get_service_for_account(service_id, account)
+        if not service.is_active:
+            raise NotFound("Service not found.")
         
         # Get root questions (no parent)
         root_questions = Question.objects.filter(
@@ -209,18 +224,17 @@ class ServiceQuestionsView(APIView):
 
 # Step 5: Get conditional questions
 class ConditionalQuestionsView(APIView):
-    """Get conditional questions based on parent answer"""
-    permission_classes = [AllowAny]
-    
+    """Get conditional questions based on parent answer (scoped to account)."""
+    permission_classes = [AccountScopedPermission, AllowAny]
+
     def post(self, request):
         serializer = ConditionalQuestionRequestSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
-        
         parent_question_id = serializer.validated_data['parent_question_id']
         answer = serializer.validated_data.get('answer')
         option_id = serializer.validated_data.get('option_id')
-        
-        parent_question = get_object_or_404(Question, id=parent_question_id)
+        account = getattr(request, 'account', None)
+        parent_question = get_object_or_404(Question, id=parent_question_id, service__account=account)
         
         # Build filter for conditional questions
         filter_kwargs = {
@@ -247,11 +261,12 @@ class ConditionalQuestionsView(APIView):
 
 # Step 6: Submit service responses and calculate pricing
 class SubmitServiceResponsesView(APIView):
-    """Submit responses for a service including conditional questions"""
-    permission_classes = [AllowAny]
+    """Submit responses for a service including conditional questions (scoped to account)."""
+    permission_classes = [AccountScopedPermission, AllowAny]
     
     def post(self, request, submission_id, service_id):
-        submission = get_object_or_404(CustomerSubmission, id=submission_id)
+        account = getattr(request, 'account', None)
+        submission = get_submission_for_account(submission_id, account)
         service_selection = get_object_or_404(
             CustomerServiceSelection, 
             submission=submission,
@@ -892,14 +907,14 @@ class SubmitServiceResponsesView(APIView):
 
 
 class SubmitCustomServiceResponsesView(APIView):
-    """Submit responses for a service including conditional questions"""
-    permission_classes = [AllowAny]
+    """Submit responses for a service including conditional questions (scoped to account)."""
+    permission_classes = [AccountScopedPermission, AllowAny]
 
     def post(self, request, submission_id):
+        account = getattr(request, 'account', None)
+        submission = get_submission_for_account(submission_id, account)
         try:
             with transaction.atomic():
-                submission = get_object_or_404(CustomerSubmission, id=submission_id)
-
                 # Update submission status
                 submission.status = 'responses_completed'
                 submission.save(update_fields=["status"])
@@ -912,12 +927,6 @@ class SubmitCustomServiceResponsesView(APIView):
                 status=status.HTTP_200_OK
             )
 
-        except CustomerSubmission.DoesNotExist:
-            return Response(
-                {"detail": "Submission not found."},
-                status=status.HTTP_404_NOT_FOUND
-            )
-
         except Exception as e:
             return Response(
                 {"detail": f"An error occurred: {str(e)}"},
@@ -927,47 +936,37 @@ class SubmitCustomServiceResponsesView(APIView):
 
 # Step 7: Get submission details with quotes
 class SubmissionDetailView(generics.RetrieveUpdateAPIView):
-    """Get detailed submission with all quotes"""
+    """Get detailed submission with all quotes (scoped to account)."""
     queryset = CustomerSubmission.objects.all()
     serializer_class = CustomerSubmissionDetailSerializer
-    permission_classes = [AllowAny]
+    permission_classes = [AccountScopedPermission, AllowAny]
     lookup_field = 'id'
 
-
-    
     def get_object(self):
         submission_id = self.kwargs['id']
-        return get_object_or_404(
-            CustomerSubmission.objects.prefetch_related(
-                'customerserviceselection_set__service',
-                'customerserviceselection_set__package_quotes__package',
-                'customerserviceselection_set__question_responses__question',
-                'customerserviceselection_set__question_responses__option_responses__option',
-                'customerserviceselection_set__question_responses__sub_question_responses__sub_question',
-                'images',
-            ),
-            id=submission_id
-        )
+        account = getattr(self.request, 'account', None)
+        submission = get_submission_for_account(submission_id, account)
+        return CustomerSubmission.objects.prefetch_related(
+            'customerserviceselection_set__service',
+            'customerserviceselection_set__package_quotes__package',
+            'customerserviceselection_set__question_responses__question',
+            'customerserviceselection_set__question_responses__option_responses__option',
+            'customerserviceselection_set__question_responses__sub_question_responses__sub_question',
+            'images',
+        ).get(id=submission.id)
 
 # Update additional_data for submission
 class UpdateSubmissionAdditionalDataView(APIView):
     """
     Update additional_data field for a customer submission.
-    
     PATCH /api/quote/<submission_id>/additional-data/
     Body: {"additional_data": {...}}
     """
-    permission_classes = [AllowAny]
-    
+    permission_classes = [AccountScopedPermission, AllowAny]
+
     def patch(self, request, submission_id):
-        try:
-            submission = CustomerSubmission.objects.get(id=submission_id)
-        except CustomerSubmission.DoesNotExist:
-            return Response(
-                {'detail': 'Submission not found.'},
-                status=status.HTTP_404_NOT_FOUND
-            )
-        
+        account = getattr(request, 'account', None)
+        submission = get_submission_for_account(submission_id, account)
         # Get additional_data from request
         additional_data = request.data.get('additional_data')
         if additional_data is None:
@@ -1000,11 +999,12 @@ class UpdateSubmissionAdditionalDataView(APIView):
 
 # Step 8: Submit final quote
 class SubmitFinalQuoteView(APIView):
-    """Submit the final quote"""
-    permission_classes = [AllowAny]
-    
+    """Submit the final quote (scoped to account)."""
+    permission_classes = [AccountScopedPermission, AllowAny]
+
     def post(self, request, submission_id):
-        submission = get_object_or_404(CustomerSubmission, id=submission_id)
+        account = getattr(request, 'account', None)
+        submission = get_submission_for_account(submission_id, account)
         
         # Check if packages are already selected (from Step 8)
         print("submission status: ", submission.status)
@@ -1157,11 +1157,12 @@ class SubmitFinalQuoteView(APIView):
 
 # Reject quote view
 class RejectQuoteView(APIView):
-    """Reject a submitted quote"""
-    permission_classes = [AllowAny]
-    
+    """Reject a submitted quote (scoped to account)."""
+    permission_classes = [AccountScopedPermission, AllowAny]
+
     def post(self, request, submission_id):
-        submission = get_object_or_404(CustomerSubmission, id=submission_id)
+        account = getattr(request, 'account', None)
+        submission = get_submission_for_account(submission_id, account)
         
         # Check if quote can be rejected (must be in submitted or accepted status)
         if submission.status in ['submitted', 'accepted']:
@@ -1337,11 +1338,12 @@ class RejectQuoteView(APIView):
 
 # Utility views
 class SubmissionStatusView(APIView):
-    """Check submission status"""
-    permission_classes = [AllowAny]
-    
+    """Check submission status (scoped to account)."""
+    permission_classes = [AccountScopedPermission, AllowAny]
+
     def get(self, request, submission_id):
-        submission = get_object_or_404(CustomerSubmission, id=submission_id)
+        account = getattr(request, 'account', None)
+        submission = get_submission_for_account(submission_id, account)
         
         # Check if expired
         if submission.expires_at and submission.expires_at < timezone.now():
@@ -1356,11 +1358,14 @@ class SubmissionStatusView(APIView):
         })
 
 class ServicePackagesView(APIView):
-    """Get packages for a specific service"""
-    permission_classes = [AllowAny]
-    
+    """Get packages for a specific service (scoped to account)."""
+    permission_classes = [AccountScopedPermission, AllowAny]
+
     def get(self, request, service_id):
-        service = get_object_or_404(Service, id=service_id, is_active=True)
+        account = getattr(request, 'account', None)
+        service = get_service_for_account(service_id, account)
+        if not service.is_active:
+            raise NotFound("Service not found.")
         packages = Package.objects.filter(service=service, is_active=True).order_by('order')
         
         return Response({
@@ -1370,19 +1375,14 @@ class ServicePackagesView(APIView):
 
 
 
-class CustomServiceViewSet(viewsets.ModelViewSet):
-    """
-    API endpoint for CRUD operations on CustomService
-    """
+class CustomServiceViewSet(AccountScopedQuerysetMixin, viewsets.ModelViewSet):
+    """CRUD for CustomService (scoped to account via purchase.submission)."""
     queryset = CustomService.objects.all()
     serializer_class = CustomServiceSerializer
-    permission_classes = [AllowAny]  # You can change this if needed
+    permission_classes = [AccountScopedPermission, AllowAny]
+    account_lookup = "purchase__account"
 
     def get_queryset(self):
-        """
-        Optionally filter by purchase (CustomerSubmission ID) via query param.
-        Example: /api/custom-services/?purchase=<submission_id>
-        """
         queryset = super().get_queryset()
         purchase_id = self.request.query_params.get("purchase")
         if purchase_id:
@@ -1393,21 +1393,21 @@ class CustomServiceViewSet(viewsets.ModelViewSet):
 from quote_app.serializers import ServiceListSerializer,CustomServiceSerializer
 
 class ServiceAndCustomServiceListView(APIView):
-    permission_classes = [AllowAny]
+    """List services and custom services (scoped to account)."""
+    permission_classes = [AccountScopedPermission, AllowAny]
 
     def get(self, request, *args, **kwargs):
+        account = getattr(request, 'account', None)
         submission_id = request.query_params.get("submission_id")
-
-        # Normal active services
-        services = Service.objects.filter(is_active=True).order_by("order")
+        services = Service.objects.filter(is_active=True, account=account).order_by("order")
         services_data = ServiceListSerializer(services, many=True).data
-
-        # Custom services (filter by submission_id if provided)
         custom_services_data = []
         if submission_id:
-            custom_services = CustomService.objects.filter(purchase_id=submission_id)
+            custom_services = CustomService.objects.filter(
+                purchase_id=submission_id,
+                purchase__account=account
+            )
             custom_services_data = CustomServiceSerializer(custom_services, many=True).data
-
         return Response({
             "services": services_data,
             "custom_services": custom_services_data
@@ -1416,20 +1416,15 @@ class ServiceAndCustomServiceListView(APIView):
 
 
 class QuoteScheduleUpdateView(generics.UpdateAPIView):
-    """
-    Update a QuoteSchedule record by submission ID.
-    """
+    """Update a QuoteSchedule record by submission ID (scoped to account)."""
     serializer_class = QuoteScheduleUpdateSerializer
-    permission_classes = [AllowAny] # Set appropriate permissions
+    permission_classes = [AccountScopedPermission, AllowAny]
 
     def get_object(self):
-        # Retrieve the submission ID from the URL kwargs
         submission_id = self.kwargs.get('submission_id')
-        
-        # Look up the QuoteSchedule record associated with the submission ID
-        # The 'quote_schedule' is the related_name defined in your CustomerSubmission model
-        obj = get_object_or_404(QuoteSchedule, submission__id=submission_id)
-        
+        account = getattr(self.request, 'account', None)
+        submission = get_submission_for_account(submission_id, account)
+        obj = get_object_or_404(QuoteSchedule, submission=submission)
         return obj
 
     def update(self, request, *args, **kwargs):
@@ -1503,13 +1498,12 @@ class ScheduleCalendarAppointmentView(APIView):
 from django.db import models
 
 class RemoveServiceFromSubmissionView(APIView):
-    """
-    Remove a selected service from a submission
-    """
-    permission_classes = [AllowAny]
+    """Remove a selected service from a submission (scoped to account)."""
+    permission_classes = [AccountScopedPermission, AllowAny]
 
     def delete(self, request, submission_id, service_id):
-        submission = get_object_or_404(CustomerSubmission, id=submission_id)
+        account = getattr(request, 'account', None)
+        submission = get_submission_for_account(submission_id, account)
 
         try:
             with transaction.atomic():
@@ -1557,45 +1551,42 @@ class RemoveServiceFromSubmissionView(APIView):
 
 class GlobalSettingsView(APIView):
     """
-    GET → Retrieve global base price
-    PUT → Update global base price
+    GET → Retrieve global base price for current account
+    PUT → Update global base price for current account
     """
-    permission_classes = [AllowAny]
+    permission_classes = [AccountScopedPermission, AllowAny]
 
     def get(self, request):
-        settings, _ = GlobalBasePrice.objects.get_or_create(id=1)
+        account = getattr(request, 'account', None)
+        settings, _ = GlobalBasePrice.objects.get_or_create(
+            account=account,
+            defaults={'base_price': 0}
+        )
         serializer = GlobalBasePriceSerializer(settings)
         return Response(serializer.data)
 
+    def put(self, request):
+        account = getattr(request, 'account', None)
+        settings, _ = GlobalBasePrice.objects.get_or_create(
+            account=account,
+            defaults={'base_price': 0}
+        )
+        serializer = GlobalBasePriceSerializer(settings, data=request.data, partial=True)
+        if serializer.is_valid():
+            serializer.save()
+            return Response(serializer.data)
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
-class CustomerSubmissionImageViewSet(viewsets.ModelViewSet):
-    """
-    ViewSet for managing customer submission images.
-    Allows uploading, updating, and deleting images for customer submissions.
-    
-    Permissions:
-    - Authenticated users: Can upload and manage images for submissions
-    
-    Endpoints:
-    - POST /api/quote/submission-images/ - Upload a new image (requires submission_id in request)
-    - GET /api/quote/submission-images/ - List all images (filter by submission_id query param)
-    - GET /api/quote/submission-images/{id}/ - Retrieve a specific image
-    - PATCH /api/quote/submission-images/{id}/ - Update image caption
-    - PUT /api/quote/submission-images/{id}/ - Update image (full update)
-    - DELETE /api/quote/submission-images/{id}/ - Delete an image
-    """
+
+class CustomerSubmissionImageViewSet(AccountScopedQuerysetMixin, viewsets.ModelViewSet):
+    """ViewSet for managing customer submission images (scoped to account)."""
+    queryset = CustomerSubmissionImage.objects.all()
     serializer_class = CustomerSubmissionImageSerializer
-    # Allow anyone (including unauthenticated) to upload and manage images
-    permission_classes = [permissions.AllowAny]
+    permission_classes = [AccountScopedPermission, permissions.AllowAny]
+    account_lookup = "submission__account"
 
     def get_queryset(self):
-        """
-        Return all images, optionally filtered by submission_id.
-        No user-based permission filtering so that anyone can view images.
-        """
-        qs = CustomerSubmissionImage.objects.select_related('submission', 'uploaded_by').all()
-
-        # Filter by submission_id if provided
+        qs = super().get_queryset().select_related('submission', 'uploaded_by')
         submission_id = self.request.query_params.get('submission_id')
         if submission_id:
             try:
@@ -1603,7 +1594,6 @@ class CustomerSubmissionImageViewSet(viewsets.ModelViewSet):
                 qs = qs.filter(submission_id=submission_uuid)
             except (ValueError, TypeError):
                 return CustomerSubmissionImage.objects.none()
-
         return qs.order_by('-created_at')
 
     def get_serializer_context(self):
@@ -1622,11 +1612,8 @@ class CustomerSubmissionImageViewSet(viewsets.ModelViewSet):
         if not uploaded_file:
             raise ValidationError({'image': 'image file is required'})
 
-        try:
-            submission = CustomerSubmission.objects.get(id=submission_id)
-        except CustomerSubmission.DoesNotExist:
-            raise NotFound('Customer submission not found')
-
+        account = getattr(self.request, 'account', None)
+        submission = get_submission_for_account(submission_id, account)
         user = self.request.user if self.request.user.is_authenticated else None
         location_id = None
         if submission.contact:

@@ -121,6 +121,14 @@ class GHLMediaStorage(models.Model):
 
 
 class Contact(models.Model):
+    account = models.ForeignKey(
+        GHLAuthCredentials,
+        on_delete=models.CASCADE,
+        related_name='contacts',
+        null=True,
+        blank=True,
+        help_text='GHL account this contact belongs to (for multi-account onboarding)',
+    )
     contact_id = models.CharField(max_length=100, unique=True)
     first_name = models.CharField(max_length=100, blank=True, null=True)
     last_name = models.CharField(max_length=100, blank=True, null=True)

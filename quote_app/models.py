@@ -23,6 +23,15 @@ class CustomerSubmission(models.Model):
     
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     
+    account = models.ForeignKey(
+        'accounts.GHLAuthCredentials',
+        on_delete=models.CASCADE,
+        related_name='customer_submissions',
+        null=True,
+        blank=True,
+        help_text='GHL account this submission belongs to (for multi-account onboarding)',
+    )
+    
     # Customer Information
     # customer_name = models.CharField(max_length=255)
     # customer_email = models.EmailField()

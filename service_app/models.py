@@ -45,6 +45,14 @@ class User(AbstractUser):
 class Location(models.Model):
     """Location model with Google Places API integration"""
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    account = models.ForeignKey(
+        'accounts.GHLAuthCredentials',
+        on_delete=models.CASCADE,
+        related_name='locations',
+        null=True,
+        blank=True,
+        help_text='GHL account this location belongs to (for multi-account onboarding)',
+    )
     name = models.CharField(max_length=255)
     address = models.TextField()
     latitude = models.DecimalField(max_digits=20, decimal_places=16)
@@ -72,6 +80,14 @@ class Location(models.Model):
 
 
 class GlobalBasePrice(models.Model):
+    account = models.ForeignKey(
+        'accounts.GHLAuthCredentials',
+        on_delete=models.CASCADE,
+        related_name='global_base_prices',
+        null=True,
+        blank=True,
+        help_text='GHL account this base price belongs to (for multi-account onboarding)',
+    )
     base_price = models.DecimalField(
         max_digits=10, 
         decimal_places=2, 
@@ -87,6 +103,14 @@ class GlobalBasePrice(models.Model):
 class Service(models.Model):
     """Main service model"""
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    account = models.ForeignKey(
+        'accounts.GHLAuthCredentials',
+        on_delete=models.CASCADE,
+        related_name='services',
+        null=True,
+        blank=True,
+        help_text='GHL account this service belongs to (for multi-account onboarding)',
+    )
     name = models.CharField(max_length=255)
     description = models.TextField()
     # base_price=models.DecimalField(max_digits=10,decimal_places=2,default=Decimal('0.00'))
@@ -483,6 +507,14 @@ class OrderQuestionAnswer(models.Model):
 class GlobalSizePackage(models.Model):
     """Defines a size range globally applicable to all services"""
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    account = models.ForeignKey(
+        'accounts.GHLAuthCredentials',
+        on_delete=models.CASCADE,
+        related_name='global_size_packages',
+        null=True,
+        blank=True,
+        help_text='GHL account this size package belongs to (for multi-account onboarding)',
+    )
     min_sqft = models.PositiveIntegerField()
     max_sqft = models.PositiveIntegerField(null=True, blank=True, default=100000000)
     order = models.PositiveIntegerField(default=0)
@@ -548,6 +580,14 @@ class Appointment(models.Model):
     ]
     
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    account = models.ForeignKey(
+        'accounts.GHLAuthCredentials',
+        on_delete=models.CASCADE,
+        related_name='appointments',
+        null=True,
+        blank=True,
+        help_text='GHL account this appointment belongs to (for multi-account onboarding)',
+    )
     ghl_appointment_id = models.CharField(max_length=255, unique=True, db_index=True)
     location_id = models.CharField(max_length=255, db_index=True)
     

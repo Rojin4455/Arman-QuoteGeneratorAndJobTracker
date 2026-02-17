@@ -342,7 +342,7 @@ def fetch_all_contacts(location_id: str, access_token: str = None) -> List[Dict[
     
     print(f"\nTotal contacts retrieved: {len(all_contacts)}")
 
-    sync_contacts_to_db(all_contacts)
+    sync_contacts_to_db(all_contacts, location_id=location_id)
     # fetch_contacts_locations(all_contacts, location_id, access_token)
     # return all_contacts
 
@@ -351,13 +351,20 @@ def fetch_all_contacts(location_id: str, access_token: str = None) -> List[Dict[
 
 
 
-def sync_contacts_to_db(contact_data):
+def sync_contacts_to_db(contact_data, location_id: str = None):
     """
     Syncs contact data from API into the local Contact model using bulk upsert.
     Also deletes any Contact objects not present in the incoming contact_data.
     Args:
         contact_data (list): List of contact dicts from GoHighLevel API
+        location_id (str, optional): GHL location ID; used to set account on contacts for multi-account onboarding
     """
+    account = None
+    if location_id:
+        account = GHLAuthCredentials.objects.filter(location_id=location_id).first()
+        if not account:
+            print(f"⚠️ [CONTACT SYNC] No GHLAuthCredentials found for location_id: {location_id}; contacts will have no account set.")
+
     contacts_to_create = []
     incoming_ids = set(c['id'] for c in contact_data)
     existing_ids = set(Contact.objects.filter(contact_id__in=incoming_ids).values_list('contact_id', flat=True))
@@ -366,6 +373,7 @@ def sync_contacts_to_db(contact_data):
         date_added = parse_datetime(item.get("dateAdded")) if item.get("dateAdded") else None
         contact_obj = Contact(
             contact_id=item.get("id"),
+            account=account,
             first_name=item.get("firstName"),
             last_name=item.get("lastName"),
             phone=item.get("phone"),
@@ -380,21 +388,24 @@ def sync_contacts_to_db(contact_data):
             timestamp=date_added
         )
         if item.get("id") in existing_ids:
-            # Update existing contact
-            Contact.objects.filter(contact_id=item["id"]).update(
-                first_name=contact_obj.first_name,
-                last_name=contact_obj.last_name,
-                phone=contact_obj.phone,
-                email=contact_obj.email,
-                dnd=contact_obj.dnd,
-                country=contact_obj.country,
-                date_added=contact_obj.date_added,
-                tags=contact_obj.tags,
-                company_name=contact_obj.company_name,
-                custom_fields=contact_obj.custom_fields,
-                location_id=contact_obj.location_id,
-                timestamp=contact_obj.timestamp
-            )
+            # Update existing contact (include account so correct GHL account is saved)
+            update_kw = {
+                "first_name": contact_obj.first_name,
+                "last_name": contact_obj.last_name,
+                "phone": contact_obj.phone,
+                "email": contact_obj.email,
+                "dnd": contact_obj.dnd,
+                "country": contact_obj.country,
+                "date_added": contact_obj.date_added,
+                "tags": contact_obj.tags,
+                "company_name": contact_obj.company_name,
+                "custom_fields": contact_obj.custom_fields,
+                "location_id": contact_obj.location_id,
+                "timestamp": contact_obj.timestamp,
+            }
+            if account is not None:
+                update_kw["account_id"] = account.id
+            Contact.objects.filter(contact_id=item["id"]).update(**update_kw)
         else:
             contacts_to_create.append(contact_obj)
 
@@ -967,6 +978,9 @@ def create_or_update_contact(data):
                 return None
     
     try:
+        # Resolve account for multi-account onboarding (save correct GHL account on record)
+        account = GHLAuthCredentials.objects.filter(location_id=location_id).first()
+
         # Parse date_added if provided
         date_added = None
         if contact_data.get("dateAdded"):
@@ -977,24 +991,28 @@ def create_or_update_contact(data):
         if dnd_value is None:
             dnd_value = False
         
+        defaults = {
+            "first_name": contact_data.get("firstName"),
+            "last_name": contact_data.get("lastName"),
+            "email": contact_data.get("email"),
+            "phone": contact_data.get("phone"),
+            "company_name": contact_data.get("companyName", ""),
+            "dnd": dnd_value,  # Ensure this is always a boolean, never None
+            "country": contact_data.get("country"),
+            "date_added": date_added,
+            "location_id": location_id,  # Ensure this is never None
+            "custom_fields": contact_data.get("customFields", []),
+            "tags": contact_data.get("tags", []),
+        }
+        if account is not None:
+            defaults["account"] = account
+
         contact, created = Contact.objects.update_or_create(
             contact_id=contact_id,
-            defaults={
-                "first_name": contact_data.get("firstName"),
-                "last_name": contact_data.get("lastName"),
-                "email": contact_data.get("email"),
-                "phone": contact_data.get("phone"),
-                "company_name": contact_data.get("companyName", ""),
-                "dnd": dnd_value,  # Ensure this is always a boolean, never None
-                "country": contact_data.get("country"),
-                "date_added": date_added,
-                "location_id": location_id,  # Ensure this is never None
-                "custom_fields": contact_data.get("customFields", []),
-                "tags": contact_data.get("tags", []),
-            }
+            defaults=defaults,
         )
         
-        cred = GHLAuthCredentials.objects.first()
+        cred = GHLAuthCredentials.objects.filter(location_id=location_id).first() or GHLAuthCredentials.objects.first()
         if cred:
             fetch_contacts_locations([contact_data], location_id, cred.access_token)
         
@@ -1018,7 +1036,7 @@ def delete_contact(data):
         print("Contact not found for deletion:", contact_id)
 
 
-def create_or_update_user_from_ghl(user_data: Dict[str, Any]) -> User:
+def create_or_update_user_from_ghl(user_data: Dict[str, Any], account=None) -> User:
     """
     Create or update a User from GHL user data.
     If user exists (by ghl_user_id or email), update it. Otherwise, create new.
@@ -1033,14 +1051,20 @@ def create_or_update_user_from_ghl(user_data: Dict[str, Any]) -> User:
             - email: Email address
             - phone: Phone number
             Or nested structure with 'user' key containing the user data
+        account: GHLAuthCredentials instance for multi-account onboarding; saved on the user record
     
     Returns:
         User: The created or updated User instance
     """
+    # Get location_id from root payload (before unpacking nested 'user') for account resolution
+    root_location_id = user_data.get("locationId")
     # Handle nested webhook payload structure (if user data is nested)
     if "user" in user_data:
         user_data = user_data["user"]
-    
+    # Resolve account for multi-account: use passed account or look up by locationId from payload
+    if account is None and root_location_id:
+        account = GHLAuthCredentials.objects.filter(location_id=root_location_id).first()
+
     ghl_user_id = user_data.get("id")
     email = user_data.get("email")
     first_name = user_data.get("firstName", "")
@@ -1079,7 +1103,7 @@ def create_or_update_user_from_ghl(user_data: Dict[str, Any]) -> User:
                 username = f"user_{ghl_user_id}_{counter}"
             counter += 1
     
-    # Prepare update/create defaults
+    # Prepare update/create defaults (include account for multi-account onboarding)
     defaults = {
         "ghl_user_id": ghl_user_id,
         "email": email,
@@ -1087,7 +1111,9 @@ def create_or_update_user_from_ghl(user_data: Dict[str, Any]) -> User:
         "last_name": last_name,
         "role": User.ROLE_WORKER,  # Set as worker initially
     }
-    
+    if account is not None:
+        defaults["account"] = account
+
     if user:
         # Update existing user
         # If no username is set, use the generated one
@@ -1152,6 +1178,7 @@ def fetch_all_users_from_ghl(location_id: str, access_token: str) -> List[Dict[s
 def sync_all_users_to_db(location_id: str, access_token: str) -> Dict[str, int]:
     """
     Fetch all users from GHL API and sync them to the local User database.
+    Associates users with the correct GHL account for multi-account onboarding.
     
     Args:
         location_id (str): The location ID for the subaccount
@@ -1160,6 +1187,10 @@ def sync_all_users_to_db(location_id: str, access_token: str) -> Dict[str, int]:
     Returns:
         Dict: Summary with counts of created and updated users
     """
+    account = GHLAuthCredentials.objects.filter(location_id=location_id).first()
+    if not account:
+        print(f"⚠️ [USER SYNC] No GHLAuthCredentials found for location_id: {location_id}; users will have no account set.")
+
     users_data = fetch_all_users_from_ghl(location_id, access_token)
     
     created_count = 0
@@ -1176,7 +1207,7 @@ def sync_all_users_to_db(location_id: str, access_token: str) -> Dict[str, int]:
         if not user_exists and email:
             user_exists = User.objects.filter(email=email).exists()
         
-        user = create_or_update_user_from_ghl(user_data)
+        user = create_or_update_user_from_ghl(user_data, account=account)
         
         if user_exists:
             updated_count += 1

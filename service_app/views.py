@@ -4,6 +4,7 @@ from rest_framework.decorators import api_view, permission_classes
 from rest_framework.response import Response
 from rest_framework.authtoken.models import Token
 from rest_framework.views import APIView
+from rest_framework.exceptions import ValidationError
 from django.contrib.auth import authenticate
 from django.db.models import Count, Avg, Prefetch
 from django.db import transaction
@@ -14,6 +15,9 @@ import os
 from django.db import models
 from .models import Service, ServiceSettings
 from .serializers import ServiceSettingsSerializer
+from accounts.permissions import AccountScopedPermission
+from accounts.mixins import AccountScopedQuerysetMixin
+from .account_scope_utils import get_service_for_account, get_location_for_account
 
 from rest_framework.permissions import IsAuthenticated
 
@@ -192,28 +196,33 @@ class AdminLoginView(APIView):
 
 
 # Location Views
-class LocationListCreateView(generics.ListCreateAPIView):
-    """List all locations and create new ones"""
+class LocationListCreateView(AccountScopedQuerysetMixin, generics.ListCreateAPIView):
+    """List all locations and create new ones (scoped to current account)."""
     queryset = Location.objects.filter(is_active=True)
     serializer_class = LocationSerializer
-    permission_classes = [IsAdminPermission]
+    permission_classes = [AccountScopedPermission, IsAdminPermission]
+    account_lookup = "account"
 
     def get_queryset(self):
         queryset = super().get_queryset()
         search = self.request.query_params.get('search', None)
         if search:
             queryset = queryset.filter(
-                models.Q(name__icontains=search) | 
+                models.Q(name__icontains=search) |
                 models.Q(address__icontains=search)
             )
         return queryset.order_by('name')
 
+    def perform_create(self, serializer):
+        serializer.save(account=getattr(self.request, 'account', None))
 
-class LocationDetailView(generics.RetrieveUpdateDestroyAPIView):
-    """Retrieve, update or delete a location"""
+
+class LocationDetailView(AccountScopedQuerysetMixin, generics.RetrieveUpdateDestroyAPIView):
+    """Retrieve, update or delete a location (scoped to current account)."""
     queryset = Location.objects.all()
     serializer_class = LocationSerializer
-    permission_classes = [IsAdminPermission]
+    permission_classes = [AccountScopedPermission, IsAdminPermission]
+    account_lookup = "account"
 
     def perform_destroy(self, instance):
         # Soft delete
@@ -225,12 +234,14 @@ class LocationDetailView(generics.RetrieveUpdateDestroyAPIView):
 
 
 # Service Views
-class ServiceListCreateView(generics.ListCreateAPIView):
-    """List all services and create new ones"""
-    permission_classes = [IsAuthenticated]
+class ServiceListCreateView(AccountScopedQuerysetMixin, generics.ListCreateAPIView):
+    """List all services and create new ones (scoped to current account)."""
+    queryset = Service.objects.all()
+    permission_classes = [AccountScopedPermission, IsAuthenticated]
+    account_lookup = "account"
 
     def get_queryset(self):
-        queryset = Service.objects.all().prefetch_related(
+        queryset = super().get_queryset().prefetch_related(
             'questions__options',
             'questions__sub_questions',
             'questions__child_questions'
@@ -245,23 +256,38 @@ class ServiceListCreateView(generics.ListCreateAPIView):
             return ServiceListSerializer
         return ServiceSerializer
 
-class ServiceBasicListView(generics.ListAPIView):
-    """Simple endpoint to list all services with basic details only"""
+    def perform_create(self, serializer):
+        serializer.save(account=getattr(self.request, 'account', None))
+
+    def get_queryset(self):
+        queryset = super().get_queryset().prefetch_related(
+            'questions__options',
+            'questions__sub_questions',
+            'questions__child_questions'
+        )
+        search = self.request.query_params.get('search', None)
+        if search:
+            queryset = queryset.filter(name__icontains=search)
+        return queryset.order_by('order', 'name')
+
+
+class ServiceBasicListView(AccountScopedQuerysetMixin, generics.ListAPIView):
+    """Simple endpoint to list all services with basic details only (scoped to account via location_id for unauthenticated)."""
     queryset = Service.objects.filter(is_active=True).order_by('order', 'name')
     serializer_class = ServiceBasicSerializer
-    permission_classes = [AllowAny]  # Public endpoint, can be changed to IsAuthenticated if needed
-    
+    permission_classes = [AccountScopedPermission, AllowAny]
+    account_lookup = "account"
+
     def get_queryset(self):
         queryset = super().get_queryset()
-        # Optional: filter by is_active if not already filtered
         is_active = self.request.query_params.get('is_active', None)
         if is_active is not None:
             is_active_bool = is_active.lower() == 'true'
             queryset = queryset.filter(is_active=is_active_bool)
         return queryset
 
-class ServiceDetailView(generics.RetrieveUpdateDestroyAPIView):
-    """Retrieve, update or delete a service"""
+class ServiceDetailView(AccountScopedQuerysetMixin, generics.RetrieveUpdateDestroyAPIView):
+    """Retrieve, update or delete a service (scoped to current account)."""
     queryset = Service.objects.prefetch_related(
         'questions__options__pricing_rules',
         'questions__sub_questions__pricing_rules',
@@ -269,7 +295,8 @@ class ServiceDetailView(generics.RetrieveUpdateDestroyAPIView):
         'questions__child_questions'
     )
     serializer_class = ServiceSerializer
-    permission_classes = [IsAdminPermission]
+    permission_classes = [AccountScopedPermission, IsAdminPermission]
+    account_lookup = "account"
 
     # def perform_destroy(self, instance):
     #     # Soft delete
@@ -280,11 +307,12 @@ class ServiceDetailView(generics.RetrieveUpdateDestroyAPIView):
 
 
 # Package Views
-class PackageListCreateView(generics.ListCreateAPIView):
-    """List all packages and create new ones"""
+class PackageListCreateView(AccountScopedQuerysetMixin, generics.ListCreateAPIView):
+    """List all packages and create new ones (scoped to account via service)."""
     queryset = Package.objects.filter(is_active=True).select_related('service')
     serializer_class = PackageSerializer
-    permission_classes = [IsAdminPermission]
+    permission_classes = [AccountScopedPermission, IsAdminPermission]
+    account_lookup = "service__account"
 
     def get_queryset(self):
         queryset = super().get_queryset()
@@ -293,12 +321,20 @@ class PackageListCreateView(generics.ListCreateAPIView):
             queryset = queryset.filter(service_id=service_id)
         return queryset.order_by('service__name', 'order', 'name')
 
+    def perform_create(self, serializer):
+        service = serializer.validated_data.get('service')
+        account = getattr(self.request, 'account', None)
+        if account and service and service.account_id != account.id:
+            raise ValidationError({"service": "Service does not belong to your account."})
+        serializer.save()
 
-class PackageDetailView(generics.RetrieveUpdateDestroyAPIView):
-    """Retrieve, update or delete a package"""
+
+class PackageDetailView(AccountScopedQuerysetMixin, generics.RetrieveUpdateDestroyAPIView):
+    """Retrieve, update or delete a package (scoped to account via service)."""
     queryset = Package.objects.all()
     serializer_class = PackageSerializer
-    permission_classes = [IsAdminPermission]
+    permission_classes = [AccountScopedPermission, IsAdminPermission]
+    account_lookup = "service__account"
 
     # def perform_destroy(self, instance):
     #     # Soft delete
@@ -306,19 +342,21 @@ class PackageDetailView(generics.RetrieveUpdateDestroyAPIView):
     #     instance.delete()
 
 
-class PackageWithFeaturesView(generics.RetrieveAPIView):
-    """Get package with its features"""
+class PackageWithFeaturesView(AccountScopedQuerysetMixin, generics.RetrieveAPIView):
+    """Get package with its features (scoped to account via service)."""
     queryset = Package.objects.prefetch_related('package_features__feature')
     serializer_class = PackageWithFeaturesSerializer
-    permission_classes = [IsAdminPermission]
+    permission_classes = [AccountScopedPermission, IsAdminPermission]
+    account_lookup = "service__account"
 
 
 # Feature Views
-class FeatureListCreateView(generics.ListCreateAPIView):
-    """List all features and create new ones"""
+class FeatureListCreateView(AccountScopedQuerysetMixin, generics.ListCreateAPIView):
+    """List all features and create new ones (scoped to account via service)."""
     queryset = Feature.objects.filter(is_active=True).select_related('service')
     serializer_class = FeatureSerializer
-    permission_classes = [IsAdminPermission]
+    permission_classes = [AccountScopedPermission, IsAdminPermission]
+    account_lookup = "service__account"
 
     def get_queryset(self):
         queryset = super().get_queryset()
@@ -327,12 +365,20 @@ class FeatureListCreateView(generics.ListCreateAPIView):
             queryset = queryset.filter(service_id=service_id)
         return queryset.order_by('service__name', 'name')
 
+    def perform_create(self, serializer):
+        service = serializer.validated_data.get('service')
+        account = getattr(self.request, 'account', None)
+        if account and service and service.account_id != account.id:
+            raise ValidationError({"service": "Service does not belong to your account."})
+        serializer.save()
 
-class FeatureDetailView(generics.RetrieveUpdateDestroyAPIView):
-    """Retrieve, update or delete a feature"""
+
+class FeatureDetailView(AccountScopedQuerysetMixin, generics.RetrieveUpdateDestroyAPIView):
+    """Retrieve, update or delete a feature (scoped to account via service)."""
     queryset = Feature.objects.all()
     serializer_class = FeatureSerializer
-    permission_classes = [IsAdminPermission]
+    permission_classes = [AccountScopedPermission, IsAdminPermission]
+    account_lookup = "service__account"
 
     # def perform_destroy(self, instance):
     #     # Soft delete
@@ -341,11 +387,12 @@ class FeatureDetailView(generics.RetrieveUpdateDestroyAPIView):
 
 
 # Package-Feature Views
-class PackageFeatureListCreateView(generics.ListCreateAPIView):
-    """List and create package-feature relationships"""
+class PackageFeatureListCreateView(AccountScopedQuerysetMixin, generics.ListCreateAPIView):
+    """List and create package-feature relationships (scoped via package.service.account)."""
     queryset = PackageFeature.objects.select_related('package', 'feature')
     serializer_class = PackageFeatureSerializer
-    permission_classes = [IsAdminPermission]
+    permission_classes = [AccountScopedPermission, IsAdminPermission]
+    account_lookup = "package__service__account"
 
     def get_queryset(self):
         queryset = super().get_queryset()
@@ -354,21 +401,31 @@ class PackageFeatureListCreateView(generics.ListCreateAPIView):
             queryset = queryset.filter(package_id=package_id)
         return queryset
 
+    def perform_create(self, serializer):
+        package = serializer.validated_data.get('package')
+        account = getattr(self.request, 'account', None)
+        if account and package and getattr(package.service, 'account_id', None) != account.id:
+            raise ValidationError({"package": "Package does not belong to your account."})
+        serializer.save()
 
-class PackageFeatureDetailView(generics.RetrieveUpdateDestroyAPIView):
-    """Retrieve, update or delete a package-feature relationship"""
+
+class PackageFeatureDetailView(AccountScopedQuerysetMixin, generics.RetrieveUpdateDestroyAPIView):
+    """Retrieve, update or delete a package-feature relationship."""
     queryset = PackageFeature.objects.all()
     serializer_class = PackageFeatureSerializer
-    permission_classes = [IsAdminPermission]
+    permission_classes = [AccountScopedPermission, IsAdminPermission]
+    account_lookup = "package__service__account"
 
 
 # Question Views
-class QuestionListCreateView(generics.ListCreateAPIView):
-    """List all questions and create new ones"""
-    permission_classes = [IsAdminPermission]
+class QuestionListCreateView(AccountScopedQuerysetMixin, generics.ListCreateAPIView):
+    """List all questions and create new ones (scoped to account via service)."""
+    queryset = Question.objects.filter(is_active=True)
+    permission_classes = [AccountScopedPermission, IsAdminPermission]
+    account_lookup = "service__account"
 
     def get_queryset(self):
-        queryset = Question.objects.filter(is_active=True).select_related(
+        queryset = super().get_queryset().select_related(
             'service', 'parent_question', 'condition_option'
         ).prefetch_related(
             'options__pricing_rules',
@@ -376,19 +433,15 @@ class QuestionListCreateView(generics.ListCreateAPIView):
             'pricing_rules__package',
             'child_questions'
         )
-        
-        # Filter parameters
         service_id = self.request.query_params.get('service', None)
         question_type = self.request.query_params.get('type', None)
         parent_only = self.request.query_params.get('parent_only', 'false').lower() == 'true'
-        
         if service_id:
             queryset = queryset.filter(service_id=service_id)
         if question_type:
             queryset = queryset.filter(question_type=question_type)
         if parent_only:
             queryset = queryset.filter(parent_question__isnull=True)
-            
         return queryset.order_by('service__name', 'order', 'created_at')
 
     def get_serializer_class(self):
@@ -396,15 +449,23 @@ class QuestionListCreateView(generics.ListCreateAPIView):
             return QuestionCreateSerializer
         return QuestionSerializer
 
-class QuestionDetailView(generics.RetrieveUpdateDestroyAPIView):
-    """Retrieve, update or delete a question"""
+    def perform_create(self, serializer):
+        service = serializer.validated_data.get('service')
+        account = getattr(self.request, 'account', None)
+        if account and service and service.account_id != account.id:
+            raise ValidationError({"service": "Service does not belong to your account."})
+        serializer.save()
+
+class QuestionDetailView(AccountScopedQuerysetMixin, generics.RetrieveUpdateDestroyAPIView):
+    """Retrieve, update or delete a question (scoped to account via service)."""
     queryset = Question.objects.prefetch_related(
         'options__pricing_rules',
         'sub_questions__pricing_rules',
         'pricing_rules',
         'child_questions'
     )
-    permission_classes = [IsAdminPermission]
+    permission_classes = [AccountScopedPermission, IsAdminPermission]
+    account_lookup = "service__account"
 
     def get_serializer_class(self):
         if self.request.method in ['PUT', 'PATCH']:
@@ -417,11 +478,12 @@ class QuestionDetailView(generics.RetrieveUpdateDestroyAPIView):
         instance.save()
 
 # Question Option Views
-class QuestionOptionListCreateView(generics.ListCreateAPIView):
-    """List and create question options"""
+class QuestionOptionListCreateView(AccountScopedQuerysetMixin, generics.ListCreateAPIView):
+    """List and create question options (scoped via question.service.account)."""
     queryset = QuestionOption.objects.filter(is_active=True)
     serializer_class = QuestionOptionSerializer
-    permission_classes = [IsAdminPermission]
+    permission_classes = [AccountScopedPermission, IsAdminPermission]
+    account_lookup = "question__service__account"
 
     def get_queryset(self):
         queryset = super().get_queryset().prefetch_related('pricing_rules')
@@ -430,12 +492,20 @@ class QuestionOptionListCreateView(generics.ListCreateAPIView):
             queryset = queryset.filter(question_id=question_id)
         return queryset.order_by('order', 'option_text')
 
+    def perform_create(self, serializer):
+        question = serializer.validated_data.get('question')
+        account = getattr(self.request, 'account', None)
+        if account and question and getattr(question.service, 'account_id', None) != account.id:
+            raise ValidationError({"question": "Question does not belong to your account."})
+        serializer.save()
 
-class QuestionOptionDetailView(generics.RetrieveUpdateDestroyAPIView):
-    """Retrieve, update or delete a question option"""
+
+class QuestionOptionDetailView(AccountScopedQuerysetMixin, generics.RetrieveUpdateDestroyAPIView):
+    """Retrieve, update or delete a question option."""
     queryset = QuestionOption.objects.prefetch_related('pricing_rules')
     serializer_class = QuestionOptionSerializer
-    permission_classes = [IsAdminPermission]
+    permission_classes = [AccountScopedPermission, IsAdminPermission]
+    account_lookup = "question__service__account"
 
     # def perform_destroy(self, instance):
     #     # Soft delete
@@ -443,104 +513,104 @@ class QuestionOptionDetailView(generics.RetrieveUpdateDestroyAPIView):
     #     instance.save()
 
 # Pricing Views
-class QuestionPricingListCreateView(generics.ListCreateAPIView):
-    """List and create question pricing rules"""
+class QuestionPricingListCreateView(AccountScopedQuerysetMixin, generics.ListCreateAPIView):
+    """List and create question pricing rules (scoped via question.service.account)."""
     queryset = QuestionPricing.objects.select_related('question', 'package')
     serializer_class = QuestionPricingSerializer
-    permission_classes = [IsAdminPermission]
+    permission_classes = [AccountScopedPermission, IsAdminPermission]
+    account_lookup = "question__service__account"
 
     def get_queryset(self):
         queryset = super().get_queryset()
         question_id = self.request.query_params.get('question', None)
         package_id = self.request.query_params.get('package', None)
-        
         if question_id:
             queryset = queryset.filter(question_id=question_id)
         if package_id:
             queryset = queryset.filter(package_id=package_id)
-            
         return queryset
 
 
-class QuestionPricingDetailView(generics.RetrieveUpdateDestroyAPIView):
-    """Retrieve, update or delete a question pricing rule"""
+class QuestionPricingDetailView(AccountScopedQuerysetMixin, generics.RetrieveUpdateDestroyAPIView):
+    """Retrieve, update or delete a question pricing rule."""
     queryset = QuestionPricing.objects.all()
     serializer_class = QuestionPricingSerializer
-    permission_classes = [IsAdminPermission]
+    permission_classes = [AccountScopedPermission, IsAdminPermission]
+    account_lookup = "question__service__account"
 
 
 
-class SubQuestionPricingListCreateView(generics.ListCreateAPIView):
-    """List and create sub-question pricing rules"""
+class SubQuestionPricingListCreateView(AccountScopedQuerysetMixin, generics.ListCreateAPIView):
+    """List and create sub-question pricing rules (scoped via sub_question.parent_question.service.account)."""
     queryset = SubQuestionPricing.objects.select_related('sub_question', 'package')
     serializer_class = SubQuestionPricingSerializer
-    permission_classes = [IsAdminPermission]
+    permission_classes = [AccountScopedPermission, IsAdminPermission]
+    account_lookup = "sub_question__parent_question__service__account"
 
     def get_queryset(self):
         queryset = super().get_queryset()
         sub_question_id = self.request.query_params.get('sub_question', None)
         package_id = self.request.query_params.get('package', None)
-        
         if sub_question_id:
             queryset = queryset.filter(sub_question_id=sub_question_id)
         if package_id:
             queryset = queryset.filter(package_id=package_id)
-            
         return queryset
 
 
-class SubQuestionPricingDetailView(generics.RetrieveUpdateDestroyAPIView):
-    """Retrieve, update or delete a sub-question pricing rule"""
+class SubQuestionPricingDetailView(AccountScopedQuerysetMixin, generics.RetrieveUpdateDestroyAPIView):
+    """Retrieve, update or delete a sub-question pricing rule."""
     queryset = SubQuestionPricing.objects.all()
     serializer_class = SubQuestionPricingSerializer
-    permission_classes = [IsAdminPermission]
+    permission_classes = [AccountScopedPermission, IsAdminPermission]
+    account_lookup = "sub_question__parent_question__service__account"
 
 
-class SubQuestionDetailView(generics.RetrieveUpdateDestroyAPIView):
-    """Retrieve, update or delete a sub-question"""
+class SubQuestionDetailView(AccountScopedQuerysetMixin, generics.RetrieveUpdateDestroyAPIView):
+    """Retrieve, update or delete a sub-question (scoped via parent_question.service.account)."""
     queryset = SubQuestion.objects.prefetch_related('pricing_rules')
     serializer_class = SubQuestionSerializer
-    permission_classes = [IsAdminPermission]
+    permission_classes = [AccountScopedPermission, IsAdminPermission]
+    account_lookup = "parent_question__service__account"
 
     def perform_destroy(self, instance):
-        # Soft delete
         instance.is_active = False
         instance.save()
 
 
-class OptionPricingListCreateView(generics.ListCreateAPIView):
-    """List and create option pricing rules"""
+class OptionPricingListCreateView(AccountScopedQuerysetMixin, generics.ListCreateAPIView):
+    """List and create option pricing rules (scoped via option.question.service.account)."""
     queryset = OptionPricing.objects.select_related('option', 'package')
     serializer_class = OptionPricingSerializer
-    permission_classes = [IsAdminPermission]
+    permission_classes = [AccountScopedPermission, IsAdminPermission]
+    account_lookup = "option__question__service__account"
 
     def get_queryset(self):
         queryset = super().get_queryset()
         option_id = self.request.query_params.get('option', None)
         package_id = self.request.query_params.get('package', None)
-        
         if option_id:
             queryset = queryset.filter(option_id=option_id)
         if package_id:
             queryset = queryset.filter(package_id=package_id)
-            
         return queryset
 
 
-
-class OptionPricingDetailView(generics.RetrieveUpdateDestroyAPIView):
-    """Retrieve, update or delete an option pricing rule"""
+class OptionPricingDetailView(AccountScopedQuerysetMixin, generics.RetrieveUpdateDestroyAPIView):
+    """Retrieve, update or delete an option pricing rule."""
     queryset = OptionPricing.objects.all()
     serializer_class = OptionPricingSerializer
-    permission_classes = [IsAdminPermission]
+    permission_classes = [AccountScopedPermission, IsAdminPermission]
+    account_lookup = "option__question__service__account"
 
 
 
-class SubQuestionListCreateView(generics.ListCreateAPIView):
-    """List and create sub-questions"""
+class SubQuestionListCreateView(AccountScopedQuerysetMixin, generics.ListCreateAPIView):
+    """List and create sub-questions (scoped via parent_question.service.account)."""
     queryset = SubQuestion.objects.filter(is_active=True)
     serializer_class = SubQuestionSerializer
-    permission_classes = [IsAdminPermission]
+    permission_classes = [AccountScopedPermission, IsAdminPermission]
+    account_lookup = "parent_question__service__account"
 
     def get_queryset(self):
         queryset = super().get_queryset().prefetch_related('pricing_rules')
@@ -549,21 +619,28 @@ class SubQuestionListCreateView(generics.ListCreateAPIView):
             queryset = queryset.filter(parent_question_id=parent_question_id)
         return queryset.order_by('order', 'sub_question_text')
 
+    def perform_create(self, serializer):
+        parent_question = serializer.validated_data.get('parent_question')
+        account = getattr(self.request, 'account', None)
+        if account and parent_question and getattr(parent_question.service, 'account_id', None) != account.id:
+            raise ValidationError({"parent_question": "Question does not belong to your account."})
+        serializer.save()
+
 
 # Bulk Operations Views
 class BulkQuestionPricingView(APIView):
-    """Bulk update question pricing rules for all packages"""
-    permission_classes = [IsAdminPermission]
+    """Bulk update question pricing rules for all packages (scoped to account)."""
+    permission_classes = [AccountScopedPermission, IsAdminPermission]
 
     def post(self, request):
         serializer = BulkPricingUpdateSerializer(data=request.data)
         if serializer.is_valid():
             question_id = serializer.validated_data['question_id']
             pricing_rules = serializer.validated_data['pricing_rules']
-
+            account = getattr(request, 'account', None)
             try:
                 with transaction.atomic():
-                    question = get_object_or_404(Question, id=question_id)
+                    question = get_object_or_404(Question, id=question_id, service__account=account)
                     
                     # Update or create pricing rules
                     for rule in pricing_rules:
@@ -595,18 +672,18 @@ class BulkQuestionPricingView(APIView):
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
 class BulkSubQuestionPricingView(APIView):
-    """Bulk update sub-question pricing rules for all packages"""
-    permission_classes = [IsAdminPermission]
+    """Bulk update sub-question pricing rules for all packages (scoped to account)."""
+    permission_classes = [AccountScopedPermission, IsAdminPermission]
 
     def post(self, request):
         serializer = BulkSubQuestionPricingSerializer(data=request.data)
         if serializer.is_valid():
             sub_question_id = serializer.validated_data['sub_question_id']
             pricing_rules = serializer.validated_data['pricing_rules']
-
+            account = getattr(request, 'account', None)
             try:
                 with transaction.atomic():
-                    sub_question = get_object_or_404(SubQuestion, id=sub_question_id)
+                    sub_question = get_object_or_404(SubQuestion, id=sub_question_id, parent_question__service__account=account)
                     
                     for rule in pricing_rules:
                         package_id = rule['package_id']
@@ -636,20 +713,19 @@ class BulkSubQuestionPricingView(APIView):
 
 
 class BulkOptionPricingView(APIView):
-    """Bulk update option pricing rules for all packages"""
-    permission_classes = [IsAdminPermission]
+    """Bulk update option pricing rules for all packages (scoped to account)."""
+    permission_classes = [AccountScopedPermission, IsAdminPermission]
 
     def post(self, request):
         option_id = request.data.get('option_id')
         pricing_rules = request.data.get('pricing_rules', [])
-
         if not option_id or not pricing_rules:
-            return Response({'error': 'option_id and pricing_rules are required'}, 
-                          status=status.HTTP_400_BAD_REQUEST)
-
+            return Response({'error': 'option_id and pricing_rules are required'},
+                            status=status.HTTP_400_BAD_REQUEST)
+        account = getattr(request, 'account', None)
         try:
             with transaction.atomic():
-                option = get_object_or_404(QuestionOption, id=option_id)
+                option = get_object_or_404(QuestionOption, id=option_id, question__service__account=account)
                 
                 for rule in pricing_rules:
                     package_id = rule['package_id']
@@ -677,12 +753,16 @@ class BulkOptionPricingView(APIView):
 
 
 class QuestionTreeView(APIView):
-    """Get the complete question tree for a service"""
-    permission_classes = [IsAuthenticated]
+    """Get the complete question tree for a service (scoped to account)."""
+    permission_classes = [AccountScopedPermission, IsAuthenticated]
 
     def get(self, request, service_id):
         try:
-            service = get_object_or_404(Service, id=service_id, is_active=True)
+            account = getattr(request, 'account', None)
+            service = get_service_for_account(service_id, account)
+            if not service.is_active:
+                from rest_framework.exceptions import NotFound
+                raise NotFound("Service not found.")
             
             # Get root questions (no parent)
             root_questions = Question.objects.filter(
@@ -714,19 +794,22 @@ class QuestionTreeView(APIView):
 
 
 class ConditionalQuestionsView(APIView):
-    """Get conditional questions based on parent question and answer"""
-    permission_classes = [IsAuthenticated]
+    """Get conditional questions based on parent question and answer (scoped to account)."""
+    permission_classes = [AccountScopedPermission, IsAuthenticated]
 
     def get(self, request, parent_question_id):
         answer = request.query_params.get('answer')
         option_id = request.query_params.get('option_id')
-        
         if not answer and not option_id:
-            return Response({'error': 'Either answer or option_id is required'}, 
-                          status=status.HTTP_400_BAD_REQUEST)
-        
+            return Response({'error': 'Either answer or option_id is required'},
+                            status=status.HTTP_400_BAD_REQUEST)
         try:
-            parent_question = get_object_or_404(Question, id=parent_question_id)
+            account = getattr(request, 'account', None)
+            parent_question = get_object_or_404(
+                Question,
+                id=parent_question_id,
+                service__account=account
+            )
             
             # Build filter for conditional questions
             filter_kwargs = {
@@ -760,14 +843,15 @@ class ConditionalQuestionsView(APIView):
             return Response({'error': str(e)}, status=status.HTTP_400_BAD_REQUEST)
         
 
-class QuestionResponseListCreateView(generics.ListCreateAPIView):
-    """List and create question responses"""
+class QuestionResponseListCreateView(AccountScopedQuerysetMixin, generics.ListCreateAPIView):
+    """List and create question responses (scoped via question.service.account)."""
     queryset = QuestionResponse.objects.prefetch_related(
         'option_responses__option',
         'sub_question_responses__sub_question'
     )
     serializer_class = QuestionResponseSerializer
-    permission_classes = [IsAuthenticated]
+    permission_classes = [AccountScopedPermission, IsAuthenticated]
+    account_lookup = "question__service__account"
 
     def get_queryset(self):
         queryset = super().get_queryset()
@@ -781,11 +865,12 @@ class QuestionResponseListCreateView(generics.ListCreateAPIView):
 
 # Analytics Views
 class ServiceAnalyticsView(APIView):
-    """Get analytics data for services"""
-    permission_classes = [IsAdminPermission]
+    """Get analytics data for services (scoped to account)."""
+    permission_classes = [AccountScopedPermission, IsAdminPermission]
 
     def get(self, request):
-        services = Service.objects.filter(is_active=True).annotate(
+        account = getattr(request, 'account', None)
+        services = Service.objects.filter(is_active=True, account=account).annotate(
             total_packages=Count('packages', filter=models.Q(packages__is_active=True)),
             total_features=Count('features', filter=models.Q(features__is_active=True)),
             total_questions=Count('questions', filter=models.Q(questions__is_active=True)),
@@ -810,8 +895,8 @@ class ServiceAnalyticsView(APIView):
 
 # Utility Views
 class PricingCalculatorView(APIView):
-    """Calculate pricing based on question responses"""
-    permission_classes = [IsAuthenticated]
+    """Calculate pricing based on question responses (scoped to account)."""
+    permission_classes = [AccountScopedPermission, IsAuthenticated]
 
     def post(self, request):
         serializer = PricingCalculationSerializer(data=request.data)
@@ -819,17 +904,14 @@ class PricingCalculatorView(APIView):
             service_id = serializer.validated_data['service_id']
             package_id = serializer.validated_data['package_id']
             responses = serializer.validated_data['responses']
-
+            account = getattr(request, 'account', None)
             try:
-                service = get_object_or_404(Service, id=service_id)
-                # package = get_object_or_404(Package, id=package_id)
-                
+                service = get_object_or_404(Service, id=service_id, account=account)
                 total_adjustment = Decimal('0.00')
                 breakdown = []
-
                 for response in responses:
                     question_id = response['question_id']
-                    question = get_object_or_404(Question, id=question_id)
+                    question = get_object_or_404(Question, id=question_id, service__account=account)
                     
                     question_adjustment = Decimal('0.00')
                     question_breakdown = {
@@ -915,8 +997,11 @@ class PricingCalculatorView(APIView):
 
 
 class ServiceSettingsView(APIView):
+    permission_classes = [AccountScopedPermission, IsAdminPermission]
+
     def get(self, request, service_id):
-        service = get_object_or_404(Service, id=service_id)
+        account = getattr(request, 'account', None)
+        service = get_service_for_account(service_id, account)
         try:
             settings = service.settings
             serializer = ServiceSettingsSerializer(settings)
@@ -924,8 +1009,8 @@ class ServiceSettingsView(APIView):
         except ServiceSettings.DoesNotExist:
             return Response({"detail": "Settings not found."}, status=status.HTTP_404_NOT_FOUND)
     def post(self, request, service_id):
-        service = get_object_or_404(Service, id=service_id)
-
+        account = getattr(request, 'account', None)
+        service = get_service_for_account(service_id, account)
         serializer = ServiceSettingsSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
 
@@ -940,7 +1025,8 @@ class ServiceSettingsView(APIView):
         )
 
     def put(self, request, service_id):
-        service = get_object_or_404(Service, id=service_id)
+        account = getattr(request, 'account', None)
+        service = get_service_for_account(service_id, account)
         settings = get_object_or_404(ServiceSettings, service=service)
 
         serializer = ServiceSettingsSerializer(settings, data=request.data, partial=True)
@@ -1035,17 +1121,26 @@ class GlobalSizePackageDetailView(generics.RetrieveUpdateDestroyAPIView):
 
 class GlobalSettingsView(APIView):
     """
-    GET → Retrieve global base price
-    PUT → Update global base price
+    GET → Retrieve global base price for current account
+    PUT → Update global base price for current account
     """
+    permission_classes = [AccountScopedPermission, IsAuthenticated]
 
     def get(self, request):
-        settings, _ = GlobalBasePrice.objects.get_or_create(id=1)
+        account = getattr(request, 'account', None)
+        settings, _ = GlobalBasePrice.objects.get_or_create(
+            account=account,
+            defaults={'base_price': 0}
+        )
         serializer = GlobalBasePriceSerializer(settings)
         return Response(serializer.data)
 
     def put(self, request):
-        settings, _ = GlobalBasePrice.objects.get_or_create(id=1)
+        account = getattr(request, 'account', None)
+        settings, _ = GlobalBasePrice.objects.get_or_create(
+            account=account,
+            defaults={'base_price': 0}
+        )
         serializer = GlobalBasePriceSerializer(settings, data=request.data, partial=True)
         if serializer.is_valid():
             serializer.save()
@@ -1054,16 +1149,16 @@ class GlobalSettingsView(APIView):
 
 
 # ============================
-# User CRUD (Admin managed)
+# User CRUD (Admin managed, scoped to account)
 # ============================
-class UserListCreateView(generics.ListCreateAPIView):
+class UserListCreateView(AccountScopedQuerysetMixin, generics.ListCreateAPIView):
     queryset = User.objects.all().order_by('-date_joined')
     serializer_class = UserSerializer
-    permission_classes = [IsAdminPermission]
+    permission_classes = [AccountScopedPermission, IsAdminPermission]
+    account_lookup = "account"
 
     def get_queryset(self):
         qs = super().get_queryset()
-        # Exclude super admins from the response
         qs = qs.filter(is_superuser=False)
         search = self.request.query_params.get('search')
         role = self.request.query_params.get('role')
@@ -1079,14 +1174,16 @@ class UserListCreateView(generics.ListCreateAPIView):
         return qs
 
 
-class UserDetailView(generics.RetrieveUpdateDestroyAPIView):
+class UserDetailView(AccountScopedQuerysetMixin, generics.RetrieveUpdateDestroyAPIView):
     queryset = User.objects.all()
     serializer_class = UserSerializer
+    account_lookup = "account"
 
     def get_permissions(self):
+        base = [AccountScopedPermission()]
         if self.request.method in ['PUT', 'PATCH', 'DELETE', 'POST']:
-            return [IsAdminPermission()]
-        return [permissions.IsAuthenticated()]
+            return base + [IsAdminPermission()]
+        return base + [permissions.IsAuthenticated()]
 
     def get_object(self):
         obj = super().get_object()
