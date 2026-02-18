@@ -46,6 +46,7 @@ from accounts.utils import (
 from rest_framework.generics import ListAPIView
 import requests
 from accounts.models import GHLAuthCredentials, GHLCustomField, Contact, Address
+from accounts.account_scope import DEFAULT_LOCATION_ID
 
 from rest_framework import viewsets
 from .serializers import CustomServiceSerializer
@@ -143,6 +144,10 @@ class CustomerSubmissionCreateView(generics.CreateAPIView):
 
     def create(self, request, *args, **kwargs):
         account = getattr(request, 'account', None)
+        if not account and DEFAULT_LOCATION_ID:
+            account = GHLAuthCredentials.objects.filter(location_id=DEFAULT_LOCATION_ID).first()
+            if account:
+                request.account = account
         if not account:
             return Response(
                 {'error': 'Account could not be determined. Provide location_id in query, body, or X-Location-Id header when unauthenticated.'},

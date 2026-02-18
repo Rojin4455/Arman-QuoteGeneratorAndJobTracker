@@ -122,9 +122,11 @@ class CustomerSubmissionCreateSerializer(serializers.ModelSerializer):
 
         quoted_by_user = validated_data.pop('quoted_by', None)
         first_time = validated_data.pop('first_time')
-        # Account is required (enforced in view); get from context so submission is always mapped to account
-        request = self.context.get('request')
-        account = getattr(request, 'account', None) if request else None
+        # Avoid duplicate 'account' (can be in validated_data when passed via serializer.save(account=...))
+        account = validated_data.pop('account', None)
+        if account is None:
+            request = self.context.get('request')
+            account = getattr(request, 'account', None) if request else None
 
         # Create submission with quoted_by user and account
         submission = CustomerSubmission.objects.create(
