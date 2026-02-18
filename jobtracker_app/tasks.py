@@ -258,6 +258,12 @@ def send_job_completion_webhook(job_id):
             "location_id": location_id
         }
 
+        if getattr(job, 'discount_type', None) and (float(job.discount_value or 0) > 0):
+            payload["discount"] = {
+                "value": float(job.discount_value),
+                "type": job.discount_type
+            }
+
         if job.customer_name:
             payload["customer_name"] = job.customer_name
 
