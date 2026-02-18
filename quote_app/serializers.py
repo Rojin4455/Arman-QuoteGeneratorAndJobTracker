@@ -122,11 +122,15 @@ class CustomerSubmissionCreateSerializer(serializers.ModelSerializer):
 
         quoted_by_user = validated_data.pop('quoted_by', None)
         first_time = validated_data.pop('first_time')
+        # Account is required (enforced in view); get from context so submission is always mapped to account
+        request = self.context.get('request')
+        account = getattr(request, 'account', None) if request else None
 
-        # Create submission with quoted_by user
+        # Create submission with quoted_by user and account
         submission = CustomerSubmission.objects.create(
             **validated_data,
-            quoted_by=quoted_by_user
+            quoted_by=quoted_by_user,
+            account=account
         )
         submission.expires_at = timezone.now() + timedelta(days=30)
         submission.save()

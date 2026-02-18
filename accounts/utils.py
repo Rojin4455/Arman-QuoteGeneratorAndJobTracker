@@ -1248,33 +1248,24 @@ def update_all_users_password(password: str = "adminuser@246!") -> Dict[str, int
     }
 
 
-def create_or_update_appointment_from_ghl(appointment_data: Dict[str, Any], location_id: str = None) -> Appointment:
+def create_or_update_appointment_from_ghl(
+    appointment_data: Dict[str, Any],
+    location_id: str = None,
+    account=None,
+) -> Appointment:
     """
     Create or update an Appointment from GHL appointment data.
     Maps assignedUserId and users array to User model using ghl_user_id.
+    Sets appointment.account (location account) when account or location_id is provided.
     
     If appointment was created from our backend (has created_from_backend=True),
     we update it instead of creating a new one. This prevents duplicates when
     the webhook comes back after we create an appointment in GHL.
     
     Args:
-        appointment_data (dict): Appointment data from GHL webhook with fields:
-            - id: GHL appointment ID
-            - title: Appointment title
-            - address: Meeting URL or address
-            - calendarId: Calendar ID
-            - contactId: GHL contact ID
-            - groupId: Group ID
-            - appointmentStatus: Status of appointment
-            - assignedUserId: GHL user ID of assigned user
-            - users: Array of GHL user IDs
-            - notes: Appointment notes
-            - source: Source of appointment
-            - startTime: Start time (ISO format)
-            - endTime: End time (ISO format)
-            - dateAdded: Date added (ISO format)
-            - dateUpdated: Date updated (ISO format)
-        location_id (str): Location ID from webhook payload (optional, can be in appointment_data)
+        appointment_data (dict): Appointment data from GHL webhook (see fields below).
+        location_id (str): Location ID from webhook payload (optional).
+        account: GHLAuthCredentials instance for multi-account; set on appointment.
     
     Returns:
         Appointment: The created or updated Appointment instance
@@ -1284,6 +1275,9 @@ def create_or_update_appointment_from_ghl(appointment_data: Dict[str, Any], loca
         appointment_data = appointment_data["appointment"]
         if not location_id:
             location_id = appointment_data.get("locationId")
+    # Resolve account from location_id if not passed
+    if account is None and location_id:
+        account = GHLAuthCredentials.objects.filter(location_id=location_id).first()
     
     ghl_appointment_id = appointment_data.get("id")
     if not ghl_appointment_id:
@@ -1327,6 +1321,8 @@ def create_or_update_appointment_from_ghl(appointment_data: Dict[str, Any], loca
         existing_appointment.date_added = date_added or existing_appointment.date_added
         existing_appointment.date_updated = date_updated or existing_appointment.date_updated
         existing_appointment.users_ghl_ids = appointment_data.get("users", existing_appointment.users_ghl_ids)
+        if account is not None:
+            existing_appointment.account = account
         # Keep created_from_backend flag as True
         existing_appointment.save()
         appointment = existing_appointment
@@ -1363,7 +1359,8 @@ def create_or_update_appointment_from_ghl(appointment_data: Dict[str, Any], loca
             "users_ghl_ids": appointment_data.get("users", []),
             "created_from_backend": False,  # This is from GHL webhook
         }
-        
+        if account is not None:
+            defaults_dict["account"] = account
         # Only add calendar if it exists (ForeignKey can be None)
         if calendar is not None:
             defaults_dict["calendar"] = calendar

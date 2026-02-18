@@ -141,10 +141,13 @@ class CustomerSubmissionCreateView(generics.CreateAPIView):
     serializer_class = CustomerSubmissionCreateSerializer
     permission_classes = [AccountScopedPermission, AllowAny]
 
-    def perform_create(self, serializer):
-        serializer.save(account=getattr(self.request, 'account', None))
-
     def create(self, request, *args, **kwargs):
+        account = getattr(request, 'account', None)
+        if not account:
+            return Response(
+                {'error': 'Account could not be determined. Provide location_id in query, body, or X-Location-Id header when unauthenticated.'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
         serializer = self.get_serializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         self.perform_create(serializer)
@@ -153,6 +156,9 @@ class CustomerSubmissionCreateView(generics.CreateAPIView):
             'submission_id': submission.id,
             'message': 'Customer information saved successfully'
         }, status=status.HTTP_201_CREATED)
+
+    def perform_create(self, serializer):
+        serializer.save(account=getattr(self.request, 'account', None))
 
 # Step 3: Add services to submission
 class AddServicesToSubmissionView(APIView):

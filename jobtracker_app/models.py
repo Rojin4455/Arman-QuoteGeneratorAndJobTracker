@@ -115,7 +115,30 @@ class Job(models.Model):
 
     status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='pending')
     notes = models.TextField(blank=True, null=True)
-    
+
+    # Discount: admin can add amount or percentage; revised total = total_price - discount
+    DISCOUNT_TYPE_AMOUNT = 'amount'
+    DISCOUNT_TYPE_PERCENTAGE = 'percentage'
+    DISCOUNT_TYPE_CHOICES = [
+        (DISCOUNT_TYPE_AMOUNT, 'Amount (fixed)'),
+        (DISCOUNT_TYPE_PERCENTAGE, 'Percentage'),
+    ]
+    discount_type = models.CharField(
+        max_length=20,
+        choices=DISCOUNT_TYPE_CHOICES,
+        blank=True,
+        null=True,
+        help_text='Type of discount: fixed amount or percentage of total',
+    )
+    discount_value = models.DecimalField(
+        max_digits=12,
+        decimal_places=2,
+        default=Decimal('0.00'),
+        null=True,
+        blank=True,
+        help_text='Discount amount in dollars, or percentage (e.g. 10 for 10%%)',
+    )
+
     # Payment method for completed jobs
     payment_method = models.CharField(max_length=20, choices=PAYMENT_METHOD_CHOICES, blank=True, null=True, help_text="Payment method used for this job (only for completed jobs)")
     
@@ -148,6 +171,23 @@ class Job(models.Model):
     #                 })
     #         except Job.DoesNotExist:
     #             pass
+
+    @property
+    def revised_total(self):
+        """
+        Total after discount. If discount_type is 'amount', subtract that amount.
+        If 'percentage', subtract that percentage of total_price. Otherwise return total_price.
+        """
+        total = self.total_price or Decimal('0.00')
+        if not self.discount_type or not (self.discount_value or Decimal('0.00')):
+            return total
+        value = self.discount_value or Decimal('0.00')
+        if self.discount_type == self.DISCOUNT_TYPE_AMOUNT:
+            return max(Decimal('0.00'), total - value)
+        if self.discount_type == self.DISCOUNT_TYPE_PERCENTAGE:
+            discount_amount = total * (value / Decimal('100'))
+            return max(Decimal('0.00'), total - discount_amount)
+        return total
 
     def __str__(self):
         return self.title or f"Job {self.id}"

@@ -371,7 +371,7 @@ class JobSerializer(serializers.ModelSerializer):
         model = Job
         fields = [
             'id', 'submission', 'title', 'description', 'priority', 'duration_hours', 'scheduled_at',
-            'total_price',
+            'total_price', 'discount_type', 'discount_value', 'revised_total',
             'contact', 'address', 'contact_id', 'address_id', 'contact_details', 'address_details',  # New fields
             'customer_name', 'customer_phone', 'customer_email', 'customer_address', 'ghl_contact_id',
             'quoted_by', 'quoted_by_name', 'created_by', 'created_by_email',
@@ -380,7 +380,7 @@ class JobSerializer(serializers.ModelSerializer):
             'occurrence_count', 'occurrence_events', 'series_id', 'series_sequence',
             'invoice_url', 'slot_reserved_info', 'images', 'created_at', 'updated_at'
         ]
-        read_only_fields = ['id', 'contact', 'address', 'created_at', 'updated_at']
+        read_only_fields = ['id', 'contact', 'address', 'revised_total', 'created_at', 'updated_at']
 
     def get_contact_details(self, obj):
         """Return contact details if contact is linked"""

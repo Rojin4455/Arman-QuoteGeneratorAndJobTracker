@@ -64,26 +64,38 @@ def fetch_all_contacts_task(location_id, access_token):
     fetch_all_contacts(location_id, access_token)
 
 
+def _get_account_from_webhook_data(data):
+    """Resolve GHLAuthCredentials (location account) from webhook payload."""
+    location_id = data.get("locationId") or data.get("location_id")
+    if not location_id and "contact" in data:
+        location_id = data["contact"].get("locationId")
+    if not location_id and "appointment" in data:
+        location_id = data["appointment"].get("locationId")
+    if not location_id and "user" in data:
+        location_id = data.get("locationId")
+    if location_id:
+        return GHLAuthCredentials.objects.filter(location_id=location_id).first()
+    return None
+
+
 @shared_task
 def handle_webhook_event(data, event_type):
     try:
+        # Resolve location account so create/update can set it on models
+        account = _get_account_from_webhook_data(data)
+
         if event_type in ["ContactCreate", "ContactUpdate"]:
             create_or_update_contact(data)
         elif event_type == "ContactDelete":
             delete_contact(data)
         elif event_type == "UserCreate":
-            # Handle user creation from GHL
-            create_or_update_user_from_ghl(data)
+            create_or_update_user_from_ghl(data, account=account)
         elif event_type in ["AppointmentCreate", "AppointmentUpdate"]:
-            # Handle appointment creation/update from GHL
-            location_id = data.get("locationId")
-            appointment = create_or_update_appointment_from_ghl(data, location_id)
-            
-            # If this is an update and the appointment is linked to a QuoteSchedule, update it
+            location_id = data.get("locationId") or (data.get("appointment") or {}).get("locationId")
+            appointment = create_or_update_appointment_from_ghl(data, location_id=location_id, account=account)
             if event_type == "AppointmentUpdate":
                 update_quote_schedule_from_appointment(data, appointment)
         elif event_type == "AppointmentDelete":
-            # Handle appointment deletion from GHL
             from accounts.utils import delete_appointment_from_ghl_webhook
             delete_appointment_from_ghl_webhook(data)
     except Exception as e:

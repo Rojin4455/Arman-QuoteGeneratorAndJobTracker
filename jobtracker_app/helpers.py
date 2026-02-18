@@ -97,7 +97,10 @@ def create_product(access_token, location_id, product_name, custom_data=None):
 def build_invoice_payload_from_job(job):
     """
     Construct the payload expected by the invoice flow based on a Job instance.
+    Uses job.revised_total (total after discount) so the invoice reflects the
+    amount the customer actually pays.
     """
+    revised_total = float(job.revised_total) if hasattr(job, 'revised_total') else float(job.total_price or 0)
     items = job.items.all()
     services = []
 
@@ -123,8 +126,21 @@ def build_invoice_payload_from_job(job):
             "name": job.title or "Service",
             "description": job.description or "",
             "quantity": 1,
-            "price": float(job.total_price or 0),
+            "price": revised_total,
         })
+    else:
+        # When job has a discount, invoice must show revised total. Use a single line.
+        has_discount = (
+            getattr(job, 'discount_type', None)
+            and (float(job.discount_value or 0) > 0)
+        )
+        if has_discount:
+            services = [{
+                "name": job.title or "Service",
+                "description": job.description or "",
+                "quantity": 1,
+                "price": revised_total,
+            }]
 
     contact_email = job.customer_email
     contact_name = job.customer_name
