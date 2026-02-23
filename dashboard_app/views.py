@@ -1,6 +1,6 @@
 from rest_framework import viewsets, status
 from rest_framework.decorators import action
-from rest_framework.permissions import AllowAny,IsAuthenticated
+from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
@@ -12,7 +12,10 @@ from datetime import datetime, timedelta, time, date
 import pytz
 
 from django_filters import rest_framework as filters
+from django.contrib.auth import get_user_model
 
+from accounts.permissions import AccountScopedPermission
+from accounts.mixins import AccountScopedQuerysetMixin
 from jobtracker_app.models import Job
 from jobtracker_app.views import resolve_user_identifier
 from accounts.models import Contact
@@ -131,11 +134,12 @@ class InvoiceFilter(filters.FilterSet):
         return queryset.filter(amount_due=0)
 
 
-class InvoiceViewSet(viewsets.ModelViewSet):
-    """ViewSet for Invoice model"""
+class InvoiceViewSet(AccountScopedQuerysetMixin, viewsets.ModelViewSet):
+    """ViewSet for Invoice model (scoped to current account)."""
     queryset = Invoice.objects.all().prefetch_related('items')
     serializer_class = InvoiceSerializer
-    permission_classes = [IsAuthenticated]
+    permission_classes = [AccountScopedPermission, IsAuthenticated]
+    account_lookup = "account"
     filterset_class = InvoiceFilter
     ordering_fields = ['created_at', 'updated_at', 'issue_date', 'due_date', 'total', 'amount_due', 'invoice_number', 'status']
     ordering = ['-created_at']
@@ -146,23 +150,17 @@ class InvoiceViewSet(viewsets.ModelViewSet):
             return InvoiceDetailSerializer
         return InvoiceSerializer
     
-    def get_queryset(self):
-        queryset = super().get_queryset()
-        user = self.request.user
-        if hasattr(user, 'location_id') and user.location_id:
-            queryset = queryset.filter(location_id=user.location_id)
-        return queryset
-    
     @action(detail=False, methods=['post'])
     def sync(self, request):
-        """Sync invoices from GHL API"""
-
-        print("triggered here")
+        """Sync invoices from GHL API (uses request.account or location_id in body)."""
         location_id = request.data.get('location_id')
         invoice_id = request.data.get('invoice_id')
+        account = getattr(request, 'account', None)
         
+        if not location_id and account:
+            location_id = getattr(account, 'location_id', None)
         if not location_id:
-            return Response({'error': 'location_id is required'}, status=status.HTTP_400_BAD_REQUEST)
+            return Response({'error': 'location_id is required (or authenticate with an account)'}, status=status.HTTP_400_BAD_REQUEST)
         
         try:
             result = sync_invoices(location_id, invoice_id)
@@ -183,7 +181,7 @@ class InvoiceViewSet(viewsets.ModelViewSet):
     
     @action(detail=False, methods=['get'])
     def statistics(self, request):
-        """Get invoice statistics"""
+        """Get invoice statistics (scoped to current account)."""
         queryset = self.filter_queryset(self.get_queryset())
         
         location_id = request.query_params.get('location_id')
@@ -408,18 +406,18 @@ class InvoiceViewSet(viewsets.ModelViewSet):
     @action(detail=False, methods=['get'])
     def lead_funnel_report(self, request):
         """
-        Lead Funnel Report endpoint.
+        Lead Funnel Report endpoint (scoped to current account).
         Returns comprehensive metrics for the sales funnel including leads, estimates, and jobs.
         Supports date range filter via start_date and end_date (default: current year).
         """
-        user = request.user
-        location_id = request.query_params.get('location_id')
+        account = getattr(request, 'account', None)
+        if not account:
+            return Response({'error': 'Account context is required.'}, status=status.HTTP_403_FORBIDDEN)
         
-        # Apply location filter if user has location_id or if location_id is provided
+        location_id = request.query_params.get('location_id')
+        # Optional location filter within account
         location_filter = {}
-        if hasattr(user, 'location_id') and user.location_id:
-            location_filter['location_id'] = user.location_id
-        elif location_id:
+        if location_id:
             location_filter['location_id'] = location_id
         
         now = timezone.now()
@@ -445,8 +443,8 @@ class InvoiceViewSet(viewsets.ModelViewSet):
             start_dt = timezone.make_aware(datetime(now.year, 1, 1), timezone.get_current_timezone())
             end_dt = timezone.make_aware(datetime(now.year, 12, 31, 23, 59, 59, 999999), timezone.get_current_timezone())
         
-        # 1. New Lead Count (contacts created in date range)
-        contacts_qs = Contact.objects.all()
+        # 1. New Lead Count (contacts created in date range) — scoped to account
+        contacts_qs = Contact.objects.filter(account=account)
         if location_filter:
             contacts_qs = contacts_qs.filter(**location_filter)
         new_leads_count = contacts_qs.filter(
@@ -454,9 +452,9 @@ class InvoiceViewSet(viewsets.ModelViewSet):
             date_added__lte=end_dt
         ).count()
         
-        # 2. Open Estimate (submissions with status: draft, responses_completed, packages_selected) — no amount
+        # 2. Open Estimate (submissions with status: draft, responses_completed, packages_selected) — scoped to account
         open_statuses = ['draft', 'responses_completed', 'packages_selected']
-        submissions_qs = CustomerSubmission.objects.all()
+        submissions_qs = CustomerSubmission.objects.filter(account=account)
         if location_filter:
             submissions_qs = submissions_qs.filter(contact__location_id=location_filter['location_id'])
         submissions_qs = submissions_qs.filter(created_at__gte=start_dt, created_at__lte=end_dt)
@@ -477,10 +475,10 @@ class InvoiceViewSet(viewsets.ModelViewSet):
         scheduled_quotes_count = scheduled_quotes_qs.count()
         scheduled_quotes_total_value = scheduled_quotes_qs.aggregate(Sum('final_total'))['final_total__sum'] or 0
         
-        # Jobs queryset with location and date filter
-        jobs_qs = Job.objects.filter(created_at__gte=start_dt, created_at__lte=end_dt)
+        # Jobs queryset — scoped to account (Job.account), optional location via contact
+        jobs_qs = Job.objects.filter(account=account, created_at__gte=start_dt, created_at__lte=end_dt)
         if location_filter:
-            jobs_qs = jobs_qs.filter(submission__contact__location_id=location_filter['location_id'])
+            jobs_qs = jobs_qs.filter(contact__location_id=location_filter['location_id'])
         
         # 6. Estimate to Convert (jobs with status: to_convert)
         estimate_to_convert_jobs_qs = jobs_qs.filter(status='to_convert')
@@ -490,13 +488,14 @@ class InvoiceViewSet(viewsets.ModelViewSet):
         # 7. Scheduled Jobs (pending, confirmed, on_the_way, service_due) — upcoming jobs from now to end_date
         scheduled_job_statuses = ['pending', 'confirmed', 'on_the_way', 'service_due']
         scheduled_jobs_qs = Job.objects.filter(
+            account=account,
             status__in=scheduled_job_statuses,
             scheduled_at__isnull=False,
             scheduled_at__gte=now,
             scheduled_at__lte=end_dt
         )
         if location_filter:
-            scheduled_jobs_qs = scheduled_jobs_qs.filter(submission__contact__location_id=location_filter['location_id'])
+            scheduled_jobs_qs = scheduled_jobs_qs.filter(contact__location_id=location_filter['location_id'])
         scheduled_job_count = scheduled_jobs_qs.count()
         scheduled_job_total_value = scheduled_jobs_qs.aggregate(Sum('total_price'))['total_price__sum'] or 0
         
@@ -604,16 +603,18 @@ class InvoiceViewSet(viewsets.ModelViewSet):
         Data source: Job table only (no Invoice). Actual = completed job revenue; scheduled = non-cancelled jobs.
         Optional assignee_ids (comma-separated user IDs): when provided, only jobs assigned to those users
         are included, so scheduled/forecast totals match the calendar view (job/occurrences with same filter).
+        Scoped to request.account.
         """
-        user = request.user
+        account = getattr(request, 'account', None)
+        if not account:
+            return Response({'error': 'Account context is required.'}, status=status.HTTP_403_FORBIDDEN)
         location_id = request.query_params.get('location_id')
         location_filter = {}
-        if hasattr(user, 'location_id') and user.location_id:
-            location_filter['location_id'] = user.location_id
-        elif location_id:
+        if location_id:
             location_filter['location_id'] = location_id
 
-        # Optional assignee filter (same as calendar occurrences) so scheduled totals match calendar view
+        # Optional assignee filter (same as calendar occurrences); exclude superusers
+        User = get_user_model()
         assignee_ids_param = request.query_params.get('assignee_ids')
         assignee_user_ids = []
         if assignee_ids_param:
@@ -621,14 +622,17 @@ class InvoiceViewSet(viewsets.ModelViewSet):
                 uid = resolve_user_identifier(assignee)
                 if uid is not None:
                     assignee_user_ids.append(uid)
+        if assignee_user_ids:
+            valid_ids = set(User.objects.filter(account=account).exclude(is_superuser=True).values_list('id', flat=True))
+            assignee_user_ids = [uid for uid in assignee_user_ids if uid in valid_ids]
 
         now = timezone.now()
         current_year, current_month = now.year, now.month
 
         def jobs_base():
-            qs = Job.objects.all()
+            qs = Job.objects.filter(account=account)
             if location_filter:
-                qs = qs.filter(submission__contact__location_id=location_filter['location_id'])
+                qs = qs.filter(contact__location_id=location_filter['location_id'])
             if assignee_user_ids:
                 qs = qs.filter(assignments__user_id__in=assignee_user_ids).distinct()
             return qs
@@ -752,12 +756,11 @@ class InvoiceViewSet(viewsets.ModelViewSet):
 
 class TechnicianWorkloadHeatmapView(APIView):
     """
-    Returns a 7-day (configurable) workload heatmap per technician similar to the
-    dashboard mock. The response includes the ordered date headers plus per-technician
+    Returns a 7-day (configurable) workload heatmap per technician (scoped to current account).
+    The response includes the ordered date headers plus per-technician
     aggregates (job counts, total value, and load intensity classification).
     """
-
-    permission_classes = [IsAuthenticated]
+    permission_classes = [AccountScopedPermission, IsAuthenticated]
     DEFAULT_STATUSES = [
         status for status, _ in Job.STATUS_CHOICES
         if status not in ('to_convert',)
@@ -784,7 +787,12 @@ class TechnicianWorkloadHeatmapView(APIView):
         order = request.query_params.get('order', 'desc').lower()
         view_mode = request.query_params.get('view', 'heatmap')
 
+        account = getattr(request, 'account', None)
+        if not account:
+            return Response({'error': 'Account context is required.'}, status=status.HTTP_403_FORBIDDEN)
+
         jobs = Job.objects.filter(
+            account=account,
             scheduled_at__isnull=False,
             scheduled_at__gte=start_dt,
             scheduled_at__lt=end_dt,
@@ -816,6 +824,8 @@ class TechnicianWorkloadHeatmapView(APIView):
             for assignment in job.assignments.all():
                 user = assignment.user
                 if not user:
+                    continue
+                if getattr(user, 'is_superuser', False):
                     continue
                 if technician_filter and user.id not in technician_filter:
                     continue

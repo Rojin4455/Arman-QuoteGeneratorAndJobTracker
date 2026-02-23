@@ -22,8 +22,4 @@ class AccountScopedQuerysetMixin:
         account = getattr(self.request, "account", None)
         if account is None:
             return qs.none()
-
-        print(qs.filter(**{self.account_lookup: account}))
-        print(self.account_lookup)
-        print(account)
         return qs.filter(**{self.account_lookup: account})

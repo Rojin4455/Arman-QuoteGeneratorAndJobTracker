@@ -352,12 +352,15 @@ def create_ghl_appointment_from_job(job) -> Optional[Appointment]:
     from jobtracker_app.models import Job
     
     print(f"📅 [CREATE APPOINTMENT FROM JOB] Starting for job {job.id}")
-    
-    # Check if appointment already exists for this job
-    if hasattr(job, 'appointment') and job.appointment:
-        print(f"⚠️ [CREATE APPOINTMENT FROM JOB] Appointment already exists for job {job.id}: {job.appointment.ghl_appointment_id}")
-        return job.appointment
-    
+
+    from jobtracker_app.job_appointment_utils import get_assignee_ghl_ids_without_matching_appointment
+
+    # Use manual check: create in GHL only for assignees who don't already have a matching appointment
+    assigned_user_ghl_ids = get_assignee_ghl_ids_without_matching_appointment(job)
+    if not assigned_user_ghl_ids:
+        print(f"⚠️ [CREATE APPOINTMENT FROM JOB] All assignees already have matching appointment(s) for job {job.id}, skipping GHL create")
+        return None
+
     # Resolve location_id
     location_id = None
     try:
@@ -402,20 +405,9 @@ def create_ghl_appointment_from_job(job) -> Optional[Appointment]:
     if not ghl_contact_id:
         print("⚠️ [CREATE APPOINTMENT FROM JOB] No GHL contact ID found for job")
         # We can still create the appointment without contact_id, but it's not ideal
-    
-    # Get all assigned user GHL IDs from job assignments (create same appointment for each assignee)
-    assigned_user_ghl_ids = []
-    if job.assignments.exists():
-        for assignment in job.assignments.select_related('user').all():
-            if assignment.user and assignment.user.ghl_user_id:
-                assigned_user_ghl_ids.append(assignment.user.ghl_user_id)
-        if assigned_user_ghl_ids:
-            print(f"📍 [CREATE APPOINTMENT FROM JOB] Creating appointment for {len(assigned_user_ghl_ids)} assignee(s): {assigned_user_ghl_ids}")
-        else:
-            print("⚠️ [CREATE APPOINTMENT FROM JOB] No assigned users with GHL ID found")
-    else:
-        print("⚠️ [CREATE APPOINTMENT FROM JOB] No assignments found")
-    
+
+    print(f"📍 [CREATE APPOINTMENT FROM JOB] Creating appointment for {len(assigned_user_ghl_ids)} assignee(s): {assigned_user_ghl_ids}")
+
     # Get calendar by name and location_id
     calendar = None
     calendar_id = None

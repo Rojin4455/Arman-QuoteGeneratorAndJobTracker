@@ -1098,6 +1098,7 @@ class Command(BaseCommand):
             'to_convert': 'to_convert',
             'service_due': 'service_due',
             'on_the_way': 'on_the_way',
+            'onhold': 'onhold',
         }
         return status_map.get(old_status.lower(), 'pending')
 

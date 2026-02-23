@@ -33,23 +33,19 @@ def _store_previous_status(sender, instance, **kwargs):
         instance._previous_title = None
         instance._previous_customer_address = None
 
-from service_app.models import Appointment
-
 @receiver(post_save, sender=Job)
 def _create_appointment_on_confirmed(sender, instance, created, **kwargs):
     """
     Create appointment in GHL when job status becomes 'confirmed'.
     This only happens once when status changes to 'confirmed'.
+    Uses manual check (same as slot_reserved_info) to see if job already has matching appointment(s).
     """
-    # Check if appointment already exists for this job
-    try:
-        existing_appointment = instance.appointment
-        if existing_appointment:
-            print(f"⚠️ [APPOINTMENT] Appointment already exists for job {instance.id}: {existing_appointment.ghl_appointment_id}")
-            return
-    except Appointment.DoesNotExist:
-        pass  # No appointment exists, which is fine - we can create one
-    
+    from .job_appointment_utils import job_has_matching_appointment
+
+    if job_has_matching_appointment(instance):
+        print(f"⚠️ [APPOINTMENT] Job {instance.id} already has matching appointment(s) (manual check), skipping GHL create")
+        return
+
     if created:
         # If job is created with 'confirmed' status directly
         if instance.status == 'confirmed':
@@ -97,25 +93,29 @@ def _trigger_invoice_on_completion(sender, instance, created, **kwargs):
             return
 
         # --------------------------------------------------
-        # Resolve location_id from job: contact, submission.contact, or lookup by customer_email
+        # Resolve location_id from job: account, contact, submission.contact, or lookup by customer_email
         # --------------------------------------------------
-        location_id = "b8qvo7VooP3JD3dIZU42"
+        location_id = None
         try:
             job_with_relations = (
                 Job.objects
-                .select_related('contact', 'submission__contact')
+                .select_related('account', 'contact', 'submission__contact')
                 .get(id=instance.id)
             )
 
-            # 1) Job's direct contact
-            if job_with_relations.contact and job_with_relations.contact.location_id:
+            # 1) Job's account (GHLAuthCredentials)
+            if job_with_relations.account and job_with_relations.account.location_id:
+                location_id = job_with_relations.account.location_id
+                print(f"📍 location_id from job.account: {location_id}")
+            # 2) Job's direct contact
+            elif job_with_relations.contact and job_with_relations.contact.location_id:
                 location_id = job_with_relations.contact.location_id
                 print(f"📍 location_id from job.contact: {location_id}")
-            # 2) Submission's contact
+            # 3) Submission's contact
             elif job_with_relations.submission and job_with_relations.submission.contact and job_with_relations.submission.contact.location_id:
                 location_id = job_with_relations.submission.contact.location_id
                 print(f"📍 location_id from job.submission.contact: {location_id}")
-            # 3) Lookup Contact by job.customer_email
+            # 4) Lookup Contact by job.customer_email
             elif job_with_relations.customer_email:
                 contact_by_email = (
                     Contact.objects
@@ -128,7 +128,7 @@ def _trigger_invoice_on_completion(sender, instance, created, **kwargs):
                     location_id = contact_by_email.location_id
                     print(f"📍 location_id from Contact lookup (customer_email): {location_id}")
             if not location_id:
-                print("⚠️ Could not resolve location_id from job contact, submission.contact, or customer_email")
+                print("⚠️ Could not resolve location_id from job.account, contact, submission.contact, or customer_email")
 
         except Job.DoesNotExist:
             print("❌ Job not found while resolving location_id")

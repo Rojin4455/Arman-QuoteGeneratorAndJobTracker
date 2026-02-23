@@ -7,7 +7,7 @@ from accounts.models import Contact, Address
 
 
 class Job(models.Model):
-    """Job record. Can be created from accepted quote or directly from portal."""
+    """Job record. Can be created from accepted quote or directly from portal. Scoped to one GHL account."""
     PRIORITY_CHOICES = [
         ('low', 'Low'),
         ('medium', 'Medium'),
@@ -41,6 +41,7 @@ class Job(models.Model):
         ('service_due', 'Service Due'),
         ('on_the_way', 'On The Way'),
         ('in_progress', 'In Progress'),
+        ('onhold', 'On Hold'),
         ('completed', 'Completed'),
         ('cancelled', 'Cancelled'),
     ]
@@ -55,6 +56,16 @@ class Job(models.Model):
     ]
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+
+    # Account (multi-account support)
+    account = models.ForeignKey(
+        'accounts.GHLAuthCredentials',
+        on_delete=models.CASCADE,
+        related_name='jobs',
+        null=True,
+        blank=True,
+        help_text='GHL account this job belongs to (for multi-account onboarding)',
+    )
 
     # Optional link when coming from quote flow
     # Changed from OneToOneField to ForeignKey to allow multiple jobs per submission

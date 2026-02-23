@@ -1179,6 +1179,10 @@ class UserDetailView(AccountScopedQuerysetMixin, generics.RetrieveUpdateDestroyA
     serializer_class = UserSerializer
     account_lookup = "account"
 
+    def get_queryset(self):
+        qs = super().get_queryset()
+        return qs.filter(is_superuser=False)
+
     def get_permissions(self):
         base = [AccountScopedPermission()]
         if self.request.method in ['PUT', 'PATCH', 'DELETE', 'POST']:

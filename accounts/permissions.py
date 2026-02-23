@@ -25,7 +25,5 @@ class AccountScopedPermission(permissions.BasePermission):
     def has_permission(self, request, view):
         account = get_account_from_request(request, allow_superadmin_override=True)
         if account is None:
-            print("Account is None")
-            
             return False
         return True

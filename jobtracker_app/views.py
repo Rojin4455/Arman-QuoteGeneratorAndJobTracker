@@ -3,6 +3,7 @@ import uuid
 import requests
 from collections import defaultdict
 from datetime import datetime, timedelta
+from decimal import Decimal
 from django.db.models import Count, Sum, Min, Q, Prefetch
 from django.db.models.functions import Coalesce
 from django.http import JsonResponse
@@ -16,12 +17,15 @@ from rest_framework.pagination import PageNumberPagination
 from rest_framework.response import Response
 
 from accounts.models import Webhook, GHLAuthCredentials, GHLCustomField, Contact, Address
+from accounts.permissions import AccountScopedPermission
+from accounts.mixins import AccountScopedQuerysetMixin
 from accounts.utils import (
     get_ghl_media_storage_for_location,
     upload_file_to_ghl_media,
     delete_ghl_media,
     compress_image_for_upload,
 )
+from payroll_app.models import Payout
 from service_app.models import User, Appointment
 from .models import Job, JobOccurrence, JobServiceItem, JobAssignment, JobImage
 from .ghl_appointment_sync import delete_appointment_from_ghl
@@ -131,21 +135,23 @@ def apply_job_filters(queryset, request, skip_assignee_ids=False, allow_to_conve
         except (ValueError, AttributeError):
             pass  # Invalid UUID format, skip this filter
     
-    # Filter by assignees (user IDs, UUIDs, or emails)
+    # Filter by assignees (user IDs, UUIDs, or emails); exclude superusers when account is set
     if not skip_assignee_ids:
         assignee_ids = params.get('assignee_ids')
         if assignee_ids:
             assignee_list = [a.strip() for a in assignee_ids.split(',') if a.strip()]
             if assignee_list:
-                # Resolve each assignee identifier to user ID
                 user_ids = []
                 for assignee in assignee_list:
                     user_id = resolve_user_identifier(assignee)
                     if user_id:
                         user_ids.append(user_id)
-                
                 if user_ids:
-                    queryset = queryset.filter(assignments__user_id__in=user_ids).distinct()
+                    account = getattr(request, 'account', None)
+                    if account:
+                        user_ids = list(User.objects.filter(id__in=user_ids, account=account).exclude(is_superuser=True).values_list('id', flat=True))
+                    if user_ids:
+                        queryset = queryset.filter(assignments__user_id__in=user_ids).distinct()
     
     # Filter by date range
     start_date = params.get('start_date')
@@ -184,13 +190,15 @@ class IsAuthenticatedOrReadOnly(permissions.BasePermission):
         return request.user and request.user.is_authenticated
 
 
-class JobViewSet(viewsets.ModelViewSet):
+class JobViewSet(AccountScopedQuerysetMixin, viewsets.ModelViewSet):
+    """Jobs scoped to current account. Admins see all in account; normal users see only jobs assigned to them."""
     queryset = Job.objects.all().select_related('submission', 'contact', 'address').prefetch_related('images', 'images__uploaded_by')
     serializer_class = JobSerializer
-    permission_classes = [IsAuthenticatedOrReadOnly]
+    permission_classes = [AccountScopedPermission, IsAuthenticatedOrReadOnly]
+    account_lookup = "account"
 
     def get_queryset(self):
-        queryset = super().get_queryset()
+        queryset = super().get_queryset()  # already filtered by account
 
         submission_id = self.request.query_params.get('submission_id')
         if submission_id:
@@ -200,17 +208,13 @@ class JobViewSet(viewsets.ModelViewSet):
         if not user.is_authenticated:
             return queryset.none()
 
-        # Allow to_convert jobs to be accessed for DELETE operations
         allow_to_convert = (self.request.method == 'DELETE')
 
         if getattr(user, 'is_admin', False):
-            # Apply filters for admins
             queryset = apply_job_filters(queryset, self.request, allow_to_convert=allow_to_convert)
             return queryset
 
-        # Normal users: only jobs assigned to them
         queryset = queryset.filter(assignments__user=user).distinct()
-        # Apply filters for normal users
         queryset = apply_job_filters(queryset, self.request, allow_to_convert=allow_to_convert)
         return queryset
 
@@ -267,6 +271,36 @@ class JobViewSet(viewsets.ModelViewSet):
         if not request.user.is_authenticated:
             return Response([], status=200)
         qs = self.get_queryset()
+        serializer = self.get_serializer(qs, many=True)
+        return Response(serializer.data)
+
+    @action(detail=False, methods=['get'], url_path='onhold')
+    def onhold(self, request):
+        """
+        List jobs with status 'onhold'.
+        - Admin: returns all onhold jobs in the account; optional query param
+          user_ids (comma-separated) filters to jobs assigned to those users.
+        - Normal user: returns only their own onhold jobs (assigned to them).
+        """
+        if not request.user.is_authenticated:
+            return Response([], status=200)
+        qs = self.get_queryset().filter(status='onhold')
+        user = request.user
+        if getattr(user, 'is_admin', False):
+            user_ids_param = request.query_params.get('user_ids')
+            if user_ids_param:
+                assignee_list = [a.strip() for a in user_ids_param.split(',') if a.strip()]
+                user_ids = []
+                for assignee in assignee_list:
+                    uid = resolve_user_identifier(assignee)
+                    if uid:
+                        user_ids.append(uid)
+                if user_ids:
+                    account = getattr(request, 'account', None)
+                    if account:
+                        user_ids = list(User.objects.filter(id__in=user_ids, account=account).exclude(is_superuser=True).values_list('id', flat=True))
+                    if user_ids:
+                        qs = qs.filter(assignments__user_id__in=user_ids).distinct()
         serializer = self.get_serializer(qs, many=True)
         return Response(serializer.data)
 
@@ -406,7 +440,14 @@ class JobViewSet(viewsets.ModelViewSet):
         return Response(serializer.data)
 
     def perform_create(self, serializer):
-        serializer.save(created_by=self.request.user, created_by_email=getattr(self.request.user, 'email', None))
+        account = getattr(self.request, 'account', None)
+        job = serializer.save(
+            created_by=self.request.user,
+            created_by_email=getattr(self.request.user, 'email', None),
+        )
+        if account and not job.account_id:
+            job.account = account
+            job.save(update_fields=['account'])
 
 
 class _IsAdminOnly(permissions.BasePermission):
@@ -417,7 +458,7 @@ class _IsAdminOnly(permissions.BasePermission):
 from rest_framework.views import APIView
 
 class OccurrenceListView(APIView):
-    """Flattened calendar events for a date range.
+    """Flattened calendar events for a date range (scoped to current account).
     Query params: 
     - start (ISO), end (ISO) - required for date range
     - status: comma-separated list of statuses
@@ -428,7 +469,7 @@ class OccurrenceListView(APIView):
     - Admins: if assignee_ids provided, only jobs for those assignees; otherwise return empty
     - Normal user: always return only jobs assigned to them (assignee_ids parameter is ignored)
     """
-    permission_classes = [IsAuthenticatedOrReadOnly]
+    permission_classes = [AccountScopedPermission, IsAuthenticatedOrReadOnly]
 
     def get(self, request):
         start = request.query_params.get('start')
@@ -441,8 +482,13 @@ class OccurrenceListView(APIView):
         if not start_dt or not end_dt:
             return Response({'detail': 'Invalid start/end datetime.'}, status=400)
 
-        # Query Job model directly (includes both one-time jobs and recurring series instances)
+        account = getattr(request, 'account', None)
+        if not account:
+            return Response([], status=200)
+
+        # Query Job model (scoped to current account)
         qs = Job.objects.filter(
+            account=account,
             scheduled_at__gte=start_dt,
             scheduled_at__lte=end_dt,
         ).exclude(scheduled_at__isnull=True)
@@ -457,8 +503,7 @@ class OccurrenceListView(APIView):
         # Handle assignee_ids filtering based on user role
         skip_assignee_ids_in_filter = False
         if is_admin:
-            # Admin: if assignee_ids provided, filter by those assignees only
-            # Otherwise, return empty (no jobs)
+            # Admin: if assignee_ids provided, filter by those assignees only (within account)
             if assignee_ids_param:
                 assignee_list = [a.strip() for a in assignee_ids_param.split(',') if a.strip()]
                 if assignee_list:
@@ -467,6 +512,10 @@ class OccurrenceListView(APIView):
                         user_id = resolve_user_identifier(assignee)
                         if user_id:
                             user_ids.append(user_id)
+                    if user_ids:
+                        # Restrict to users in current account (exclude superusers)
+                        account_user_ids = set(User.objects.filter(account=account).exclude(is_superuser=True).values_list('id', flat=True))
+                        user_ids = [uid for uid in user_ids if uid in account_user_ids]
                     if user_ids:
                         qs = qs.filter(assignments__user_id__in=user_ids).distinct()
                     else:
@@ -498,17 +547,17 @@ class OccurrenceListView(APIView):
 
 
 class AppointmentCalendarView(APIView):
-    """Calendar view for appointments in a date range.
+    """Calendar view for appointments in a date range (scoped to current account).
     Query params: 
     - start (ISO), end (ISO) - required for date range
     - status: comma-separated list of appointment statuses
     - assigned_user_ids: comma-separated list of user IDs (integer), UUIDs, or emails
     - search: search in title, notes
     Returns all appointments with start_time in the range.
-    - Admins: all appointments
+    - Admins: all appointments in account
     - Normal user: only appointments assigned to them or where they are in users list
     """
-    permission_classes = [IsAuthenticatedOrReadOnly]
+    permission_classes = [AccountScopedPermission, IsAuthenticatedOrReadOnly]
 
     def get(self, request):
         start = request.query_params.get('start')
@@ -521,17 +570,19 @@ class AppointmentCalendarView(APIView):
         if not start_dt or not end_dt:
             return Response({'detail': 'Invalid start/end datetime.'}, status=400)
 
-        # Query Appointment model
+        account = getattr(request, 'account', None)
+        if not account:
+            return Response([], status=200)
+
         qs = Appointment.objects.filter(
+            account=account,
             start_time__gte=start_dt,
             start_time__lte=end_dt,
         ).exclude(start_time__isnull=True).select_related('assigned_user', 'contact', 'calendar').prefetch_related('users')
         
-        # Exclude appointments with calendar name "Reccuring Service Calendar"
         qs = qs.exclude(calendar__name="Reccuring Service Calendar")
         qs = qs.exclude(calendar__name="FREE On-Site Estimate")
         
-        print("qs: ", qs)
         user = request.user
         if not user.is_authenticated:
             return Response([], status=200)
@@ -601,15 +652,15 @@ class AppointmentCalendarView(APIView):
         return Response(data)
 
 
-class AppointmentViewSet(viewsets.ModelViewSet):
+class AppointmentViewSet(AccountScopedQuerysetMixin, viewsets.ModelViewSet):
     """
-    ViewSet for CRUD operations on appointments.
+    ViewSet for CRUD operations on appointments (scoped to current account).
     
     List/Create: GET/POST /api/jobtracker/appointments/
     Retrieve/Update/Delete: GET/PUT/PATCH/DELETE /api/jobtracker/appointments/{id}/
     
     Permissions:
-    - Admins: Full access to all appointments
+    - Admins: Full access to all appointments in the account
     - Normal users: Can only access appointments assigned to them or where they are in users list
     
     Query Parameters (filters):
@@ -625,18 +676,21 @@ class AppointmentViewSet(viewsets.ModelViewSet):
     - end_date: filter by start_time <= date (YYYY-MM-DD format)
     - search: search in title and notes (case-insensitive)
     """
+    queryset = Appointment.objects.all()
     serializer_class = AppointmentSerializer
-    permission_classes = [IsAuthenticatedOrReadOnly]
+    permission_classes = [AccountScopedPermission, IsAuthenticatedOrReadOnly]
+    account_lookup = "account"
     lookup_field = 'id'
 
     def get_queryset(self):
-        """Filter queryset based on user permissions and query parameters"""
+        """Filter queryset by account and user permissions"""
         user = self.request.user
         
         if not user.is_authenticated:
             return Appointment.objects.none()
         
-        qs = Appointment.objects.select_related(
+        qs = super().get_queryset()  # already filtered by account
+        qs = qs.select_related(
             'assigned_user', 'contact', 'calendar'
         ).prefetch_related(
             'users',
@@ -764,16 +818,14 @@ class AppointmentViewSet(viewsets.ModelViewSet):
         return obj
 
     def perform_create(self, serializer):
-        """Set location_id from credentials if not provided"""
-        if 'location_id' not in serializer.validated_data or not serializer.validated_data.get('location_id'):
-            from accounts.models import GHLAuthCredentials
-            credentials = GHLAuthCredentials.objects.first()
-            if credentials and credentials.location_id:
-                serializer.save(location_id=credentials.location_id)
-            else:
-                serializer.save()
-        else:
-            serializer.save()
+        """Set account and location_id from request.account if not provided"""
+        account = getattr(self.request, 'account', None)
+        data = dict(serializer.validated_data)
+        if account:
+            data['account'] = account
+            if not data.get('location_id') and getattr(account, 'location_id', None):
+                data['location_id'] = account.location_id
+        serializer.save(**data)
 
     def update(self, request, *args, **kwargs):
         """Update appointment and sync to GHL"""
@@ -848,10 +900,10 @@ class AppointmentViewSet(viewsets.ModelViewSet):
 
 
 class JobSeriesCreateView(APIView):
-    permission_classes = [IsAuthenticatedOrReadOnly]
+    permission_classes = [AccountScopedPermission, IsAuthenticatedOrReadOnly]
 
     def post(self, request):
-        # Only admins can create series
+        # Only admins can create series (account from request.account)
         if not (request.user.is_authenticated and getattr(request.user, 'is_admin', False)):
             raise permissions.PermissionDenied('Admin only')
         serializer = JobSeriesCreateSerializer(data=request.data, context={'request': request})
@@ -862,17 +914,20 @@ class JobSeriesCreateView(APIView):
 
 class JobBySeriesView(APIView):
     """
-    GET: Returns jobs for a specific series.
+    GET: Returns jobs for a specific series (scoped to current account).
     DELETE: Deletes all jobs in a series (admin only).
     
     Query params (for GET):
     - page: page number (default: 1)
     - page_size: number of items per page (default: 20, max: 100)
     """
-    permission_classes = [IsAuthenticatedOrReadOnly]
+    permission_classes = [AccountScopedPermission, IsAuthenticatedOrReadOnly]
 
     def get(self, request, series_id):
-        qs = Job.objects.filter(series_id=series_id).select_related('submission').order_by('series_sequence')
+        account = getattr(request, 'account', None)
+        if not account:
+            return Response([], status=200)
+        qs = Job.objects.filter(account=account, series_id=series_id).select_related('submission').order_by('series_sequence')
         user = request.user
         if not user.is_authenticated:
             return Response([], status=200)
@@ -891,15 +946,18 @@ class JobBySeriesView(APIView):
 
     def delete(self, request, series_id):
         """
-        Delete all jobs in a series.
+        Delete all jobs in a series (scoped to current account).
         Users can delete if they are assigned to any job in the series, or if they are admins.
         """
         user = request.user
         if not user.is_authenticated:
             return Response({'detail': 'Authentication required.'}, status=401)
+        account = getattr(request, 'account', None)
+        if not account:
+            return Response({'detail': 'Account context is required.'}, status=403)
         
-        # Get all jobs in the series
-        jobs_in_series = Job.objects.filter(series_id=series_id)
+        # Get all jobs in the series (current account only)
+        jobs_in_series = Job.objects.filter(account=account, series_id=series_id)
         job_count = jobs_in_series.count()
         
         if job_count == 0:
@@ -976,7 +1034,7 @@ class JobBySeriesView(APIView):
 
 class LocationJobListView(APIView):
     """
-    Returns jobs grouped by location with summary statistics.
+    Returns jobs grouped by location with summary statistics (scoped to current account).
     Query params:
     - status: comma-separated list of statuses
     - job_ids: comma-separated list of job UUIDs
@@ -997,25 +1055,25 @@ class LocationJobListView(APIView):
     - Next scheduled date
     - Service names
     """
-    permission_classes = [IsAuthenticatedOrReadOnly]
+    permission_classes = [AccountScopedPermission, IsAuthenticatedOrReadOnly]
 
     def get(self, request):
         user = request.user
         if not user.is_authenticated:
             return Response([], status=200)
+        account = getattr(request, 'account', None)
+        if not account:
+            return Response([], status=200)
 
-        # Base queryset with permission filtering
-        qs = Job.objects.select_related('submission').prefetch_related(
+        # Base queryset scoped to account
+        qs = Job.objects.filter(account=account).select_related('submission').prefetch_related(
             'items__service', 'assignments__user'
         )
 
         if not getattr(user, 'is_admin', False):
             qs = qs.filter(assignments__user=user).distinct()
 
-        # Apply filters
         qs = apply_job_filters(qs, request)
-
-        # Filter out jobs without addresses
         qs = qs.exclude(Q(customer_address__isnull=True) | Q(customer_address=''))
 
         # Group jobs by address
@@ -1068,6 +1126,7 @@ class LocationJobListView(APIView):
                     'service_due': status_counts.get('service_due', 0),
                     'on_the_way': status_counts.get('on_the_way', 0),
                     'in_progress': status_counts.get('in_progress', 0),
+                    'onhold': status_counts.get('onhold', 0),
                     'completed': status_counts.get('completed', 0),
                     'cancelled': status_counts.get('cancelled', 0),
                 },
@@ -1093,7 +1152,7 @@ class LocationJobListView(APIView):
 
 class LocationJobDetailView(APIView):
     """
-    Returns detailed job information for a specific location.
+    Returns detailed job information for a specific location (scoped to current account).
     Query params:
     - address (required): exact match for customer address
     - status: comma-separated list of statuses
@@ -1105,7 +1164,7 @@ class LocationJobDetailView(APIView):
     - page: page number (default: 1)
     - page_size: number of items per page (default: 20, max: 100)
     """
-    permission_classes = [IsAuthenticatedOrReadOnly]
+    permission_classes = [AccountScopedPermission, IsAuthenticatedOrReadOnly]
 
     def get(self, request):
         address = request.query_params.get('address')
@@ -1115,14 +1174,15 @@ class LocationJobDetailView(APIView):
         user = request.user
         if not user.is_authenticated:
             return Response([], status=200)
+        account = getattr(request, 'account', None)
+        if not account:
+            return Response([], status=200)
 
-        # Base queryset with permission filtering
-        qs = Job.objects.filter(customer_address=address).select_related('submission')
+        qs = Job.objects.filter(account=account, customer_address=address).select_related('submission')
 
         if not getattr(user, 'is_admin', False):
             qs = qs.filter(assignments__user=user).distinct()
 
-        # Apply filters
         qs = apply_job_filters(qs, request)
 
         # Order queryset
@@ -1141,34 +1201,23 @@ class LocationJobDetailView(APIView):
 
 
 
-class JobImageViewSet(viewsets.ModelViewSet):
+class JobImageViewSet(AccountScopedQuerysetMixin, viewsets.ModelViewSet):
     """
-    ViewSet for managing job images.
-    Allows uploading images for jobs in any status.
-    
-    Permissions:
-    - Admins: Full access to all job images
+    ViewSet for managing job images (scoped to current account via job).
+    - Admins: Full access to all job images in account
     - Normal users: Can only access images for jobs assigned to them
-    
-    Endpoints:
-    - POST /api/jobtracker/job-images/ - Upload a new image (requires job_id in request)
-    - GET /api/jobtracker/job-images/ - List all images (filter by job_id query param)
-    - GET /api/jobtracker/job-images/{id}/ - Retrieve a specific image
-    - DELETE /api/jobtracker/job-images/{id}/ - Delete an image
     """
     serializer_class = JobImageSerializer
-    permission_classes = [permissions.IsAuthenticated]
+    permission_classes = [AccountScopedPermission, permissions.IsAuthenticated]
+    account_lookup = "job__account"
 
     def get_queryset(self):
-        """Filter queryset based on user permissions"""
         user = self.request.user
-        
         if not user.is_authenticated:
             return JobImage.objects.none()
         
-        qs = JobImage.objects.select_related('job', 'uploaded_by').all()
+        qs = super().get_queryset().select_related('job', 'uploaded_by')
         
-        # Filter by job_id if provided
         job_id = self.request.query_params.get('job_id')
         if job_id:
             try:
@@ -1177,10 +1226,8 @@ class JobImageViewSet(viewsets.ModelViewSet):
             except (ValueError, TypeError):
                 return JobImage.objects.none()
         
-        # Permission filtering
         is_admin = getattr(user, 'is_admin', False)
         if not is_admin:
-            # Normal users: only images for jobs assigned to them
             qs = qs.filter(job__assignments__user=user).distinct()
         
         return qs.order_by('-created_at')
@@ -1192,7 +1239,7 @@ class JobImageViewSet(viewsets.ModelViewSet):
         return context
 
     def perform_create(self, serializer):
-        """Validate job, upload image to GHL only (not S3), then save record with ghl_file_id/ghl_file_url."""
+        """Validate job (account-scoped), upload image to GHL, then save record with ghl_file_id/ghl_file_url."""
         from rest_framework.exceptions import ValidationError, NotFound
 
         job_id = self.request.data.get('job')
@@ -1203,8 +1250,11 @@ class JobImageViewSet(viewsets.ModelViewSet):
         if not uploaded_file:
             raise ValidationError({'image': 'image file is required'})
 
+        account = getattr(self.request, 'account', None)
+        if not account:
+            raise ValidationError({'detail': 'Account context is required.'})
         try:
-            job = Job.objects.get(id=job_id)
+            job = Job.objects.get(id=job_id, account=account)
         except Job.DoesNotExist:
             raise NotFound('Job not found')
 
@@ -1216,9 +1266,8 @@ class JobImageViewSet(viewsets.ModelViewSet):
         location_id = None
         if job.contact:
             location_id = getattr(job.contact, 'location_id', None)
-        if not location_id:
-            creds = GHLAuthCredentials.objects.first()
-            location_id = creds.location_id if creds else None
+        if not location_id and getattr(account, 'location_id', None):
+            location_id = account.location_id
         if not location_id:
             raise ValidationError({'detail': 'No GHL location available for media upload.'})
 
@@ -1267,6 +1316,7 @@ class JobImageViewSet(viewsets.ModelViewSet):
             })
 
         serializer.save(
+            job=job,
             uploaded_by=user,
             image=None,
             ghl_file_id=result.get('fileId'),
@@ -1292,12 +1342,12 @@ class JobImageViewSet(viewsets.ModelViewSet):
     def perform_destroy(self, instance):
         """Delete from GHL media if we have ghl_file_id, then delete local record."""
         if instance.ghl_file_id:
+            account = getattr(self.request, 'account', None)
             location_id = None
             if instance.job.contact:
                 location_id = getattr(instance.job.contact, 'location_id', None)
-            if not location_id:
-                creds = GHLAuthCredentials.objects.first()
-                location_id = creds.location_id if creds else None
+            if not location_id and account:
+                location_id = getattr(account, 'location_id', None)
             if location_id:
                 try:
                     creds = GHLAuthCredentials.objects.filter(location_id=location_id).first()
@@ -1310,7 +1360,7 @@ class JobImageViewSet(viewsets.ModelViewSet):
 
 class EstimateAppointmentListView(APIView):
     """
-    Get all estimate appointments (appointments with calendar name "FREE On-Site Estimate").
+    Get all estimate appointments (scoped to current account).
     Returns all matching records (no pagination).
     
     Query params:
@@ -1321,23 +1371,25 @@ class EstimateAppointmentListView(APIView):
     - search: search in title and notes (case-insensitive)
     
     Permissions:
-    - Admins: Full access to all estimate appointments
+    - Admins: Full access to all estimate appointments in account
     - Normal users: Only estimate appointments assigned to them or where they are in users list
     """
-    permission_classes = [IsAuthenticatedOrReadOnly]
+    permission_classes = [AccountScopedPermission, IsAuthenticatedOrReadOnly]
 
     def get(self, request):
         user = request.user
         if not user.is_authenticated:
             return Response([], status=200)
+        account = getattr(request, 'account', None)
+        if not account:
+            return Response([], status=200)
         
-        # Check if assigned_user_ids is provided - if not, return empty result
         assigned_user_ids = request.query_params.get('assigned_user_ids')
         if not assigned_user_ids:
             return Response([], status=200)
         
-        # Filter by calendar name "FREE On-Site Estimate"
         qs = Appointment.objects.filter(
+            account=account,
             calendar__name="FREE On-Site Estimate"
         ).select_related(
             'assigned_user', 'contact', 'calendar'
@@ -1414,20 +1466,25 @@ class EstimateAppointmentListView(APIView):
 
 class EstimateAppointmentUpdateStatusView(APIView):
     """
-    Update estimate_status for an estimate appointment.
+    Update estimate_status for an estimate appointment (scoped to current account).
     
     PATCH /api/jobtracker/estimate-appointments/{id}/update-status/
     Body: {"estimate_status": "confirmed"}
     
     Permissions:
-    - Admins: Can update any estimate appointment
+    - Admins: Can update any estimate appointment in account
     - Normal users: Can only update estimate appointments assigned to them or where they are in users list
     """
-    permission_classes = [permissions.IsAuthenticated]
+    permission_classes = [AccountScopedPermission, permissions.IsAuthenticated]
 
     def patch(self, request, appointment_id):
+        account = getattr(request, 'account', None)
+        if not account:
+            return Response({'detail': 'Account context is required.'}, status=403)
         try:
-            appointment = Appointment.objects.select_related('calendar', 'assigned_user', 'contact').prefetch_related(
+            appointment = Appointment.objects.filter(account=account).select_related(
+                'calendar', 'assigned_user', 'contact'
+            ).prefetch_related(
                 'users',
                 Prefetch('contact__contact_location', queryset=Address.objects.order_by('order')),
             ).get(id=appointment_id)
@@ -1577,3 +1634,75 @@ def webhook_handler(request):
         return JsonResponse({"message": "Webhook received"}, status=200)
     except Exception as e:
         return JsonResponse({"error": str(e)}, status=500)
+
+
+@csrf_exempt
+def tip_webhook_handler(request):
+    """
+    Webhook that receives job_id and tip_amount (and optionally other data).
+    Fetches the job by job_id, then creates one Payout per assignee with the tip
+    divided equally among them (payout_type='tip').
+    POST body (JSON): job_id (required), tip_amount (required), and any other fields (stored in payload/logs).
+    """
+    if request.method != "POST":
+        return JsonResponse({"error": "Method not allowed"}, status=405)
+
+    try:
+        data = json.loads(request.body)
+    except (json.JSONDecodeError, TypeError):
+        return JsonResponse({"error": "Invalid JSON body"}, status=400)
+
+    job_id = data.get("job_id")
+    tip_amount_raw = data.get("tip_amount")
+
+    if not job_id:
+        return JsonResponse({"error": "job_id is required"}, status=400)
+    if tip_amount_raw is None:
+        return JsonResponse({"error": "tip_amount is required"}, status=400)
+
+    try:
+        job_uuid = uuid.UUID(str(job_id))
+    except (ValueError, TypeError):
+        return JsonResponse({"error": "job_id must be a valid UUID"}, status=400)
+
+    try:
+        tip_amount = Decimal(str(tip_amount_raw))
+    except (ValueError, TypeError, Exception):
+        return JsonResponse({"error": "tip_amount must be a number"}, status=400)
+
+    if tip_amount < 0:
+        return JsonResponse({"error": "tip_amount must be non-negative"}, status=400)
+
+    job = Job.objects.filter(id=job_uuid).prefetch_related("assignments__user").first()
+    if not job:
+        return JsonResponse({"error": f"Job not found: {job_id}"}, status=404)
+
+    assignees = list(job.assignments.select_related("user").all())
+    assignees = [a for a in assignees if a.user_id]
+
+    if not assignees:
+        return JsonResponse({"error": "Job has no assignees; cannot split tip"}, status=400)
+
+    n = len(assignees)
+    share = (tip_amount / n).quantize(Decimal("0.01"))
+    remainder = tip_amount - (share * n)
+
+    created_payouts = []
+    for i, assignment in enumerate(assignees):
+        amount = share + (remainder if i == 0 else Decimal("0"))
+        payout = Payout.objects.create(
+            employee=assignment.user,
+            payout_type="tip",
+            amount=amount,
+            job=job,
+            notes=data.get("notes") or f"Tip (split equally among {n} assignee(s)) from webhook",
+        )
+        created_payouts.append({"id": str(payout.id), "employee_id": assignment.user_id, "amount": str(amount)})
+
+    return JsonResponse({
+        "message": "Tip payouts created",
+        "job_id": str(job.id),
+        "tip_amount": str(tip_amount),
+        "assignee_count": n,
+        "payouts": created_payouts,
+    }, status=201)

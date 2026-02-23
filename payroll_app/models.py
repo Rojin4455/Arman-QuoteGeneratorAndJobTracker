@@ -6,13 +6,21 @@ from service_app.models import User
 
 
 class EmployeeProfile(models.Model):
-    """Extended employee information linked to User"""
+    """Extended employee information linked to User. Scoped to one GHL account."""
     PAY_SCALE_CHOICES = [
         ('hourly', 'Hourly'),
         ('project', 'Project'),
     ]
     
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    account = models.ForeignKey(
+        'accounts.GHLAuthCredentials',
+        on_delete=models.CASCADE,
+        related_name='employee_profiles',
+        null=True,
+        blank=True,
+        help_text='GHL account this employee belongs to (for multi-account onboarding)',
+    )
     user = models.OneToOneField(User, on_delete=models.CASCADE, related_name='employee_profile')
     
     # Basic Info
@@ -62,6 +70,11 @@ class EmployeeProfile(models.Model):
     def clean(self):
         if self.pay_scale_type == 'hourly' and not self.hourly_rate:
             raise ValidationError({'hourly_rate': 'Hourly rate is required for hourly employees'})
+
+    def save(self, *args, **kwargs):
+        if self.account_id is None and self.user_id:
+            self.account_id = getattr(self.user, 'account_id', None)
+        super().save(*args, **kwargs)
 
 
 class CollaborationRate(models.Model):
@@ -141,6 +154,7 @@ class Payout(models.Model):
         ('project', 'Project'),
         ('bonus_first_time', 'First Time Bonus'),
         ('bonus_quoted_by', 'Quoted By Bonus'),
+        ('tip', 'Tip'),
     ]
     
     SOURCE_CHOICES = [
@@ -205,9 +219,16 @@ class Payout(models.Model):
 
 
 class PayrollSettings(models.Model):
-    """Singleton model for payroll bonus settings"""
+    """Singleton model for payroll bonus settings (one per account)."""
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
-    
+    account = models.ForeignKey(
+        'accounts.GHLAuthCredentials',
+        on_delete=models.CASCADE,
+        related_name='payroll_settings',
+        null=True,
+        blank=True,
+        help_text='GHL account these settings belong to (for multi-account onboarding)',
+    )
     first_time_bonus_percentage = models.DecimalField(
         max_digits=5, 
         decimal_places=2, 
@@ -232,16 +253,22 @@ class PayrollSettings(models.Model):
         return "Payroll Settings"
     
     def save(self, *args, **kwargs):
-        # Ensure only one settings record exists
-        existing = PayrollSettings.objects.first()
-        if existing and existing.pk != self.pk:
-            self.pk = existing.pk
+        # Ensure only one settings record exists per account
+        if self.account_id is not None:
+            existing = PayrollSettings.objects.filter(account_id=self.account_id).first()
+            if existing and existing.pk != self.pk:
+                self.pk = existing.pk
         super().save(*args, **kwargs)
     
     @classmethod
-    def get_settings(cls):
-        """Get or create the singleton settings instance"""
-        obj = cls.objects.first()
+    def get_settings(cls, account=None):
+        """Get or create the singleton settings instance for the given account."""
+        if account is None:
+            obj = cls.objects.filter(account__isnull=True).first()
+            if not obj:
+                obj = cls.objects.create()
+            return obj
+        obj = cls.objects.filter(account=account).first()
         if not obj:
-            obj = cls.objects.create()
+            obj = cls.objects.create(account=account)
         return obj

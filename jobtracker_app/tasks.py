@@ -255,7 +255,8 @@ def send_job_completion_webhook(job_id):
         payload = {
             "customer_email": job.customer_email or "",
             "selected_services": selected_services,
-            "location_id": location_id
+            "location_id": location_id,
+            "job_id": job_id
         }
 
         if getattr(job, 'discount_type', None) and (float(job.discount_value or 0) > 0):

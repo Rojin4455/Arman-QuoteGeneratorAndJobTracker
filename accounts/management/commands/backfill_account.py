@@ -7,10 +7,13 @@ multi-account: run once per location_id to set account on existing records for t
 Usage:
     python manage.py backfill_account --location_id 2gQq7YvjmiZkoV21TvQU
     python manage.py backfill_account --location_id 2gQq7YvjmiZkoV21TvQU --dry-run
+    # Map ALL jobs with null account to this account (single-account or claim orphans):
+    python manage.py backfill_account --location_id 2gQq7YvjmiZkoV21TvQU --job-claim-all-null
 """
 
 from django.core.management.base import BaseCommand, CommandError
 from django.db import transaction
+from django.db.models import Q
 
 
 class Command(BaseCommand):
@@ -31,10 +34,16 @@ class Command(BaseCommand):
             action="store_true",
             help="Show what would be updated without writing to the database.",
         )
+        parser.add_argument(
+            "--job-claim-all-null",
+            action="store_true",
+            help="For Job: assign this account to ALL jobs with null account (not only those linked via submission/contact). Use when all jobs belong to this account or to claim orphan jobs.",
+        )
 
     def handle(self, *args, **options):
         location_id = options["location_id"].strip()
         dry_run = options["dry_run"]
+        job_claim_all_null = options.get("job_claim_all_null", False)
 
         if not location_id:
             raise CommandError("--location_id is required.")
@@ -52,15 +61,25 @@ class Command(BaseCommand):
         if dry_run:
             self.stdout.write(self.style.WARNING("DRY RUN: no changes will be saved."))
 
-        # (model, field_name): field_name is the FK attr to GHLAuthCredentials (account or credentials)
-        models_to_backfill = self._get_models_to_backfill()
+        # (model, field_name) or (model, field_name, extra_filter): extra_filter limits which null-account rows to update
+        models_to_backfill = self._get_models_to_backfill(account, location_id, job_claim_all_null=job_claim_all_null)
         total_updated = 0
 
-        # Bulk update: one SQL UPDATE per model (e.g. UPDATE table SET account_id=X WHERE account_id IS NULL)
+        # Bulk update: one SQL UPDATE per model (e.g. UPDATE table SET account_id=X WHERE account_id IS NULL [and extra_filter])
         with transaction.atomic():
-            for model, field_name in models_to_backfill:
+            for item in models_to_backfill:
+                if len(item) == 3:
+                    model, field_name, extra_filter = item
+                else:
+                    model, field_name = item
+                    extra_filter = None
                 label = f"{model._meta.label}.{field_name}"
                 qs = model.objects.filter(**{field_name: None})
+                if extra_filter is not None:
+                    if isinstance(extra_filter, Q):
+                        qs = qs.filter(extra_filter)
+                    else:
+                        qs = qs.filter(**extra_filter)
                 if dry_run:
                     count = qs.count()
                     if count > 0:
@@ -78,10 +97,13 @@ class Command(BaseCommand):
         else:
             self.stdout.write(self.style.SUCCESS(f"Backfill complete. Total rows updated: {total_updated}"))
 
-    def _get_models_to_backfill(self):
-        """Return list of (model, field_name) for models that have account/credentials FK to GHLAuthCredentials."""
+    def _get_models_to_backfill(self, account, location_id, job_claim_all_null=False):
+        """
+        Return list of (model, field_name) or (model, field_name, extra_filter).
+        extra_filter: optional dict or Q to restrict which null-account rows are updated.
+        job_claim_all_null: if True, Job backfill updates ALL jobs with null account (no submission/contact filter).
+        """
         from accounts.models import (
-            GHLAuthCredentials,
             GHLCustomField,
             GHLMediaStorage,
             Contact,
@@ -90,6 +112,9 @@ class Command(BaseCommand):
         )
         from service_app.models import User, Location, GlobalBasePrice, Service, GlobalSizePackage, Appointment
         from quote_app.models import CustomerSubmission
+        from dashboard_app.models import Invoice
+        from payroll_app.models import EmployeeProfile, PayrollSettings
+        from jobtracker_app.models import Job
 
         return [
             # accounts
@@ -107,4 +132,11 @@ class Command(BaseCommand):
             (Appointment, "account"),
             # quote_app
             (CustomerSubmission, "account"),
+            # dashboard_app: only invoices for this location_id
+            (Invoice, "account", {"location_id": location_id}),
+            # payroll_app: only profiles whose user belongs to this account; settings for this account
+            (EmployeeProfile, "account", {"user__account_id": account.pk}),
+            (PayrollSettings, "account"),
+            # jobtracker_app: with --job-claim-all-null update ALL null-account jobs; else only those linked via submission/contact
+            (Job, "account", None if job_claim_all_null else (Q(submission__account_id=account.pk) | Q(contact__account_id=account.pk))),
         ]

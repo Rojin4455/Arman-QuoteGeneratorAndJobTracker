@@ -9,6 +9,8 @@ from django.utils import timezone
 from decimal import Decimal
 from datetime import datetime, timedelta
 
+from accounts.permissions import AccountScopedPermission
+from accounts.mixins import AccountScopedQuerysetMixin
 from service_app.models import User
 from .models import (
     EmployeeProfile, CollaborationRate, TimeEntry, Payout, PayrollSettings
@@ -39,27 +41,30 @@ class IsAdminOnlyPermission(permissions.BasePermission):
         )
 
 
-class EmployeeProfileViewSet(viewsets.ModelViewSet):
-    """ViewSet for managing employee profiles"""
+class EmployeeProfileViewSet(AccountScopedQuerysetMixin, viewsets.ModelViewSet):
+    """ViewSet for managing employee profiles (scoped to current account)."""
     queryset = EmployeeProfile.objects.all().select_related('user').prefetch_related('user__collaboration_rates')
     serializer_class = EmployeeProfileSerializer
-    permission_classes = [IsAdminOrEmployeePermission]
+    permission_classes = [AccountScopedPermission, IsAdminOrEmployeePermission]
+    account_lookup = "account"
     
     def get_permissions(self):
         # Only admins can create/update/delete profiles
         # Normal users can read their own profile
         if self.request.method in ['POST', 'PUT', 'PATCH', 'DELETE']:
-            return [IsAdminOnlyPermission()]
+            return [AccountScopedPermission(), IsAdminOnlyPermission()]
         return super().get_permissions()
     
     def get_queryset(self):
         queryset = super().get_queryset()
         user = self.request.user
         
-        # Normal users can only see their own profile
+        # Normal users can only see their own profile (within account scope)
         if not getattr(user, 'is_admin', False):
-            # Filter to only show the user's own profile if it exists
             queryset = queryset.filter(user=user)
+        else:
+            # Exclude super admin (superuser) from employee list for admins
+            queryset = queryset.exclude(user__is_superuser=True)
         
         # Search functionality (admin only)
         search = self.request.query_params.get('search', None)
@@ -111,6 +116,10 @@ class EmployeeProfileViewSet(viewsets.ModelViewSet):
         
         return obj
     
+    def perform_create(self, serializer):
+        account = getattr(self.request, 'account', None)
+        serializer.save(account=account)
+    
     @action(detail=True, methods=['post'], url_path='collaboration-rates')
     def update_collaboration_rates(self, request, pk=None):
         """Update collaboration rates for an employee"""
@@ -138,19 +147,26 @@ class EmployeeProfileViewSet(viewsets.ModelViewSet):
         })
 
 
-class TimeEntryViewSet(viewsets.ModelViewSet):
-    """ViewSet for time clock entries"""
+class TimeEntryViewSet(AccountScopedQuerysetMixin, viewsets.ModelViewSet):
+    """
+    Time clock entries. Account-scoped: list/detail only for current account.
+    - is_admin: see all time entries in that account (optionally filter by employee).
+    - Non-admin: see only their own time entries in that account.
+    """
     queryset = TimeEntry.objects.all().select_related('employee')
     serializer_class = TimeEntrySerializer
-    permission_classes = [IsAdminOrEmployeePermission]
+    permission_classes = [AccountScopedPermission, IsAdminOrEmployeePermission]
+    account_lookup = "employee__account"
     
     def get_queryset(self):
-        queryset = super().get_queryset()
+        queryset = super().get_queryset()  # already filtered by employee__account
         user = self.request.user
-        
-        # Admins see all, employees see only their own
+        # Non-admin: only their own entries within the account
         if not getattr(user, 'is_admin', False):
             queryset = queryset.filter(employee=user)
+        else:
+            # Exclude super admin (superuser) from time entry list for admins
+            queryset = queryset.exclude(employee__is_superuser=True)
         
         # Filter by date
         date = self.request.query_params.get('date', None)
@@ -193,6 +209,7 @@ class TimeEntryViewSet(viewsets.ModelViewSet):
         is_admin = getattr(user, 'is_admin', False)
         
         # Determine which employee to check in
+        account = getattr(request, 'account', None)
         if is_admin:
             employee_id = request.data.get('employee_id')
             if not employee_id:
@@ -201,7 +218,7 @@ class TimeEntryViewSet(viewsets.ModelViewSet):
                 }, status=status.HTTP_400_BAD_REQUEST)
             
             try:
-                target_employee = User.objects.get(pk=employee_id)
+                target_employee = User.objects.get(pk=employee_id, account=account, is_superuser=False)
             except User.DoesNotExist:
                 return Response({
                     'error': f'Employee with ID {employee_id} not found'
@@ -220,7 +237,7 @@ class TimeEntryViewSet(viewsets.ModelViewSet):
                 'error': f'{target_employee.get_full_name() or target_employee.username} already has an active session. Please check out first.'
             }, status=status.HTTP_400_BAD_REQUEST)
         
-        # Create new time entry
+        # Create new time entry (employee is already account-scoped when admin)
         entry = TimeEntry.objects.create(
             employee=target_employee,
             check_in_time=timezone.now(),
@@ -252,16 +269,17 @@ class TimeEntryViewSet(viewsets.ModelViewSet):
         user = request.user
         is_admin = getattr(user, 'is_admin', False)
         
+        account = getattr(request, 'account', None)
         if is_admin:
-            # Admin can query all active sessions or a specific employee's
+            # Admin can query all active sessions or a specific employee's (within account)
             get_all = request.query_params.get('all', '').lower() == 'true'
             employee_id = request.query_params.get('employee_id')
             
             if get_all:
-                # Return all active sessions
                 active_entries = TimeEntry.objects.filter(
+                    employee__account=account,
                     status='checked_in'
-                ).select_related('employee').order_by('-check_in_time')
+                ).exclude(employee__is_superuser=True).select_related('employee').order_by('-check_in_time')
                 
                 result = []
                 for entry in active_entries:
@@ -282,9 +300,8 @@ class TimeEntryViewSet(viewsets.ModelViewSet):
                     'count': len(result)
                 })
             elif employee_id:
-                # Get specific employee's active session
                 try:
-                    target_employee = User.objects.get(pk=employee_id)
+                    target_employee = User.objects.get(pk=employee_id, account=account, is_superuser=False)
                 except User.DoesNotExist:
                     return Response({
                         'error': f'Employee with ID {employee_id} not found'
@@ -295,10 +312,10 @@ class TimeEntryViewSet(viewsets.ModelViewSet):
                     status='checked_in'
                 ).first()
             else:
-                # Default: return all active sessions (same as all=true)
                 active_entries = TimeEntry.objects.filter(
+                    employee__account=account,
                     status='checked_in'
-                ).select_related('employee').order_by('-check_in_time')
+                ).exclude(employee__is_superuser=True).select_related('employee').order_by('-check_in_time')
                 
                 result = []
                 for entry in active_entries:
@@ -319,9 +336,10 @@ class TimeEntryViewSet(viewsets.ModelViewSet):
                     'count': len(result)
                 })
         else:
-            # Normal user: get their own active session
+            # Non-admin: only their own active session (strictly within account)
             active_entry = TimeEntry.objects.filter(
                 employee=user,
+                employee__account=account,
                 status='checked_in'
             ).first()
         
@@ -342,8 +360,9 @@ class TimeEntryViewSet(viewsets.ModelViewSet):
     
     @action(detail=True, methods=['post'], url_path='check-out')
     def check_out(self, request, pk=None):
-        """Check out and complete time entry"""
-        entry = get_object_or_404(TimeEntry, pk=pk)
+        """Check out and complete time entry (entry is account-scoped via get_queryset when using detail route)."""
+        account = getattr(request, 'account', None)
+        entry = get_object_or_404(TimeEntry, pk=pk, employee__account=account)
         
         # Verify ownership (unless admin)
         user = request.user
@@ -404,22 +423,23 @@ class TimeEntryViewSet(viewsets.ModelViewSet):
         """
         user = request.user
         is_admin = getattr(user, 'is_admin', False)
+        account = getattr(request, 'account', None)
         today = timezone.now().date()
         
         if is_admin:
-            # Admin can see all entries or filter by employee
             employee_id = request.query_params.get('employee_id')
             get_all = request.query_params.get('all', 'true').lower() == 'true'
             
             queryset = TimeEntry.objects.filter(
+                employee__account=account,
                 check_in_time__date=today
-            ).filter(
+            ).exclude(employee__is_superuser=True).filter(
                 Q(total_hours__isnull=True) | Q(total_hours__gte=MIN_DURATION_HOURS_FOR_TODAY)
             ).select_related('employee').order_by('-check_in_time')
             
             if employee_id:
                 try:
-                    target_employee = User.objects.get(pk=employee_id)
+                    target_employee = User.objects.get(pk=employee_id, account=account, is_superuser=False)
                     queryset = queryset.filter(employee=target_employee)
                 except User.DoesNotExist:
                     return Response({
@@ -427,9 +447,10 @@ class TimeEntryViewSet(viewsets.ModelViewSet):
                     }, status=status.HTTP_404_NOT_FOUND)
             # If get_all is true (default), show all entries (no additional filter)
         else:
-            # Normal user: only their own entries
+            # Non-admin: only their own entries, strictly within current account
             queryset = TimeEntry.objects.filter(
                 employee=user,
+                employee__account=account,
                 check_in_time__date=today
             ).filter(
                 Q(total_hours__isnull=True) | Q(total_hours__gte=MIN_DURATION_HOURS_FOR_TODAY)
@@ -443,26 +464,31 @@ class TimeEntryViewSet(viewsets.ModelViewSet):
         })
 
 
-class PayoutViewSet(viewsets.ModelViewSet):
-    """ViewSet for managing payouts (read for all, update for admins only, create via calculator)"""
+class PayoutViewSet(AccountScopedQuerysetMixin, viewsets.ModelViewSet):
+    """
+    Payouts. Account-scoped: list/detail only for current account.
+    - is_admin: see all payouts in that account (optionally filter by employee).
+    - Non-admin: see only their own payouts in that account.
+    """
     queryset = Payout.objects.all().select_related('employee', 'job', 'time_entry')
     serializer_class = PayoutSerializer
-    permission_classes = [IsAdminOrEmployeePermission]
+    permission_classes = [AccountScopedPermission, IsAdminOrEmployeePermission]
+    account_lookup = "employee__account"
     
     def get_permissions(self):
-        # Only admins can update/delete payouts
-        # Normal users can only read their own payouts
         if self.request.method in ['PUT', 'PATCH', 'DELETE']:
-            return [IsAdminOnlyPermission()]
+            return [AccountScopedPermission(), IsAdminOnlyPermission()]
         return super().get_permissions()
     
     def get_queryset(self):
-        queryset = super().get_queryset()
+        queryset = super().get_queryset()  # already filtered by employee__account
         user = self.request.user
-        
-        # Admins see all, employees see only their own
+        # Non-admin: only their own payouts within the account
         if not getattr(user, 'is_admin', False):
             queryset = queryset.filter(employee=user)
+        else:
+            # Exclude super admin (superuser) from payout list for admins
+            queryset = queryset.exclude(employee__is_superuser=True)
         
         # Filter by employee (admin only)
         employee_id = self.request.query_params.get('employee', None)
@@ -498,20 +524,17 @@ class PayoutViewSet(viewsets.ModelViewSet):
         return queryset.order_by('-created_at')
     
     def _get_employee_filter(self):
-        """Helper method to get employee filter based on user permissions and query params"""
+        """Helper: employees to include (account-scoped, excluding superusers)."""
         user = self.request.user
+        account = getattr(self.request, 'account', None)
         employee_id = self.request.query_params.get('employee', None)
         
-        # Determine which employees to include
+        base = User.objects.filter(account=account).exclude(is_superuser=True) if account else User.objects.none()
         if not getattr(user, 'is_admin', False):
-            # Normal users: only their own data
-            return User.objects.filter(pk=user.id)
-        elif employee_id:
-            # Admin filtering by specific employee
-            return User.objects.filter(pk=employee_id)
-        else:
-            # Admin: all employees
-            return User.objects.all()
+            return base.filter(pk=user.id)
+        if employee_id:
+            return base.filter(pk=employee_id)
+        return base
     
     def _get_time_entry_queryset(self):
         """Get filtered TimeEntry queryset matching the same filters as payouts"""
@@ -607,7 +630,7 @@ class PayoutViewSet(viewsets.ModelViewSet):
 
 class CalculatorView(APIView):
     """
-    Manual calculator for creating payouts.
+    Manual calculator for creating payouts (scoped to current account).
     Works the same way as automatic payroll creation for project payouts,
     and also supports hourly payouts.
     
@@ -628,7 +651,7 @@ class CalculatorView(APIView):
     - start_time: HH:MM or HH:MM:SS (required)
     - end_time: HH:MM or HH:MM:SS (required)
     """
-    permission_classes = [IsAdminOrEmployeePermission]
+    permission_classes = [AccountScopedPermission, IsAdminOrEmployeePermission]
     
     def post(self, request):
         """Create manual payouts using the same logic as automatic payroll"""
@@ -688,11 +711,15 @@ class CalculatorView(APIView):
                     'error': 'job_date_time must be a valid ISO datetime or date string'
                 }, status=status.HTTP_400_BAD_REQUEST)
         
-        # Get assignees
+        account = getattr(request, 'account', None)
+        if not account:
+            return Response({'error': 'Account context is required.'}, status=status.HTTP_403_FORBIDDEN)
+        
+        # Get assignees (must belong to current account, exclude superusers)
         assignees = []
         for assignee_id in assignee_user_ids:
             try:
-                assignee = User.objects.get(pk=assignee_id)
+                assignee = User.objects.get(pk=assignee_id, account=account, is_superuser=False)
                 assignees.append(assignee)
             except User.DoesNotExist:
                 return Response({
@@ -704,18 +731,18 @@ class CalculatorView(APIView):
                 'error': 'No valid assignees found'
             }, status=status.HTTP_400_BAD_REQUEST)
         
-        # Get quoted_by user if provided
+        # Get quoted_by user if provided (must belong to current account, exclude superusers)
         quoted_by_user = None
         if quoted_by_user_id:
             try:
-                quoted_by_user = User.objects.get(pk=quoted_by_user_id)
+                quoted_by_user = User.objects.get(pk=quoted_by_user_id, account=account, is_superuser=False)
             except User.DoesNotExist:
                 return Response({
                     'error': f'Quoted by user with ID {quoted_by_user_id} not found'
                 }, status=status.HTTP_404_NOT_FOUND)
         
-        # Get payroll settings
-        settings = PayrollSettings.get_settings()
+        # Get payroll settings for current account
+        settings = PayrollSettings.get_settings(account)
         
         # Get number of assigned employees
         employee_count = len(assignees)
@@ -876,11 +903,15 @@ class CalculatorView(APIView):
             end_datetime = end_datetime.astimezone(timezone.utc)
         
         # Prepare employees
+        account = getattr(request, 'account', None)
+        if not account:
+            return Response({'error': 'Account context is required.'}, status=status.HTTP_403_FORBIDDEN)
+        
         created_payouts = []
         errors = []
         for employee_id in employee_ids:
             try:
-                employee = User.objects.get(pk=employee_id)
+                employee = User.objects.get(pk=employee_id, account=account, is_superuser=False)
             except User.DoesNotExist:
                 errors.append(f'Employee with ID {employee_id} not found')
                 continue
@@ -936,30 +967,31 @@ class CalculatorView(APIView):
 
 
 class ReportsView(APIView):
-    """Reports view combining time entries and payouts"""
-    permission_classes = [IsAdminOrEmployeePermission]
+    """Reports view combining time entries and payouts (scoped to current account)."""
+    permission_classes = [AccountScopedPermission, IsAdminOrEmployeePermission]
     
     def get(self, request):
         """Get combined reports"""
         user = request.user
+        account = getattr(request, 'account', None)
+        if not account:
+            return Response({'error': 'Account context is required.'}, status=status.HTTP_403_FORBIDDEN)
         is_admin = getattr(user, 'is_admin', False)
         
-        # Get filters
         employee_id = request.query_params.get('employee', None)
         payout_type = request.query_params.get('type', None)
         start_date = request.query_params.get('start_date', None)
         end_date = request.query_params.get('end_date', None)
         project_title = request.query_params.get('project_title', None)
         
-        # Determine which employee to filter
+        base_users = User.objects.filter(account=account).exclude(is_superuser=True)
         if is_admin and employee_id:
-            employee_filter = User.objects.filter(pk=employee_id)
+            employee_filter = base_users.filter(pk=employee_id)
         elif not is_admin:
-            employee_filter = User.objects.filter(pk=user.id)
+            employee_filter = base_users.filter(pk=user.id)
         else:
-            employee_filter = User.objects.all()
+            employee_filter = base_users
         
-        # Get payouts
         payouts_query = Payout.objects.filter(employee__in=employee_filter)
         
         if payout_type:
@@ -1022,14 +1054,22 @@ class ReportsView(APIView):
 
 
 class PayrollSettingsViewSet(viewsets.ModelViewSet):
-    """ViewSet for payroll settings (admin only)"""
+    """ViewSet for payroll settings (admin only, one per account)."""
     queryset = PayrollSettings.objects.all()
     serializer_class = PayrollSettingsSerializer
-    permission_classes = [IsAdminOnlyPermission]
+    permission_classes = [AccountScopedPermission, IsAdminOnlyPermission]
     
     def get_object(self):
-        """Always return the singleton instance"""
-        return PayrollSettings.get_settings()
+        """Return the settings instance for the current account."""
+        account = getattr(self.request, 'account', None)
+        return PayrollSettings.get_settings(account)
+    
+    def get_queryset(self):
+        """List: return only the current account's settings."""
+        account = getattr(self.request, 'account', None)
+        if not account:
+            return PayrollSettings.objects.none()
+        return PayrollSettings.objects.filter(account=account)
     
     def list(self, request, *args, **kwargs):
         """Return the singleton instance as a list"""
@@ -1042,3 +1082,11 @@ class PayrollSettingsViewSet(viewsets.ModelViewSet):
         instance = self.get_object()
         serializer = self.get_serializer(instance)
         return Response(serializer.data)
+    
+    def perform_create(self, serializer):
+        account = getattr(self.request, 'account', None)
+        serializer.save(account=account)
+    
+    def perform_update(self, serializer):
+        # get_object() already returns account-scoped instance
+        serializer.save()

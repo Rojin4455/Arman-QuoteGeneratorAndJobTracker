@@ -420,145 +420,14 @@ class JobSerializer(serializers.ModelSerializer):
 
     def get_slot_reserved_info(self, obj):
         """
-        Check if there's a matching appointment for this job.
-        Only computed when fetching a single job (GET /api/job/jobs/{id}/) to avoid
-        heavy DB work and N+1 on list endpoints (e.g. locations/jobs/?address=...).
-        Conditions:
-        1. Appointment start_time matches job.scheduled_at (converted to timezone)
-        2. Appointment end_time matches job.scheduled_at + duration_hours (converted to timezone)
-        3. Appointment calendar name is "Recurring Service Calendar"
-        4. Appointment location_id matches job's location_id
-        5. Appointment assigned_user matches one of the users assigned to the job
-        
-        Logic: Check each job user one by one until a match is found.
+        Check if there's a matching appointment for this job (manual check, same logic as
+        job_appointment_utils.get_slot_reserved_info_for_job). Only computed when fetching
+        a single job (GET /api/job/jobs/{id}/) to avoid heavy DB work and N+1 on list endpoints.
         """
         if not self.context.get('include_slot_reserved_info'):
             return None
-        from datetime import timedelta
-        from django.utils import timezone as django_timezone
-        import pytz
-        from service_app.models import Appointment
-        from accounts.models import Calendar, GHLAuthCredentials
-        
-        # Only check if job has scheduled_at and duration_hours
-        if not obj.scheduled_at or not obj.duration_hours:
-            return None
-        
-        # Get location_id from job (via submission->contact or fallback to credentials)
-        location_id = None
-        credentials = None
-        try:
-            # Try to get location_id from submission->contact
-            if obj.submission and hasattr(obj.submission, 'contact') and obj.submission.contact:
-                location_id = obj.submission.contact.location_id
-                # Get credentials for this location_id
-                credentials = GHLAuthCredentials.objects.filter(location_id=location_id).first()
-            
-            # Fallback to first credentials if location_id not found or credentials not found
-            if not location_id or not credentials:
-                credentials = GHLAuthCredentials.objects.first()
-                if credentials:
-                    location_id = credentials.location_id or location_id
-        except Exception as e:
-            # If error, try fallback
-            credentials = GHLAuthCredentials.objects.first()
-            if credentials:
-                location_id = credentials.location_id
-        
-        if not location_id or not credentials:
-            return None
-        
-        # Get timezone from GHLAuthCredentials
-        try:
-            timezone_str = credentials.timezone if credentials.timezone else "America/Chicago"
-            tz = pytz.timezone(timezone_str)
-        except Exception as e:
-            # Default to America/Chicago if timezone lookup fails
-            tz = pytz.timezone("America/Chicago")
-        
-        # Convert job times to the timezone from GHLAuthCredentials, then to UTC for querying
-        try:
-            # Get the job start time
-            job_start_time = obj.scheduled_at
-            
-            # The job's scheduled_at is stored in UTC but actually represents local time
-            # We need to treat it as if it's in the local timezone
-            if django_timezone.is_naive(job_start_time):
-                # If naive, localize it to the credentials timezone
-                job_start_time = tz.localize(job_start_time)
-            else:
-                # If aware (stored as UTC), we need to treat it as local time
-                # So we convert to naive first, then localize to the target timezone
-                naive_time = job_start_time.replace(tzinfo=None)
-                job_start_time = tz.localize(naive_time)
-            
-            # Calculate job end time in the same timezone
-            duration_hours = float(obj.duration_hours)
-            job_end_time = job_start_time + timedelta(hours=duration_hours)
-            
-            # Convert both times to UTC for database query (appointments are stored in UTC)
-            job_start_time_utc = job_start_time.astimezone(pytz.UTC)
-            job_end_time_utc = job_end_time.astimezone(pytz.UTC)
-        except (ValueError, TypeError, Exception) as e:
-            return None
-        
-        # Get users assigned to this job
-        job_assignments = obj.assignments.select_related('user').all()
-        if not job_assignments:
-            return None
-        
-        # Check each job user one by one until we find a matching appointment
-        for assignment in job_assignments:
-            job_user = assignment.user
-            if not job_user:
-                continue
-            
-            # Find appointment matching this specific user with location_id and converted times
-            try:
-                appointment = Appointment.objects.filter(
-                    start_time=job_start_time_utc,
-                    end_time=job_end_time_utc,
-                    calendar__name="Reccuring Service Calendar",
-                    location_id=location_id,
-                    assigned_user=job_user
-                ).select_related('calendar', 'assigned_user', 'contact').first()
-
-                if appointment:
-                    # Found a match! Return appointment details
-                    return {
-                        'slot_reserved': True,
-                        'appointment': {
-                            'id': str(appointment.id),
-                            'ghl_appointment_id': appointment.ghl_appointment_id,
-                            'title': appointment.title,
-                            'start_time': appointment.start_time.isoformat() if appointment.start_time else None,
-                            'end_time': appointment.end_time.isoformat() if appointment.end_time else None,
-                            'appointment_status': appointment.appointment_status,
-                            'calendar_id': appointment.calendar.ghl_calendar_id if appointment.calendar else None,
-                            'calendar_name': appointment.calendar.name if appointment.calendar else None,
-                            'assigned_user': {
-                                'id': str(appointment.assigned_user.id),
-                                'name': appointment.assigned_user.get_full_name() or appointment.assigned_user.username,
-                                'email': appointment.assigned_user.email
-                            } if appointment.assigned_user else None,
-                            'contact': {
-                                'id': appointment.contact.contact_id,
-                                'name': f"{appointment.contact.first_name or ''} {appointment.contact.last_name or ''}".strip(),
-                                'email': appointment.contact.email
-                            } if appointment.contact else None,
-                            'notes': appointment.notes,
-                            'address': appointment.address
-                        }
-                    }
-            except Exception as e:
-                # Continue to next user if there's an error
-                continue
-        
-        # No matching appointment found for any job user
-        return {
-            'slot_reserved': False,
-            'appointment': None
-        }
+        from .job_appointment_utils import get_slot_reserved_info_for_job
+        return get_slot_reserved_info_for_job(obj)
 
     def create(self, validated_data):
         items_data = validated_data.pop('items', [])
@@ -615,6 +484,9 @@ class JobSerializer(serializers.ModelSerializer):
                 })
         
         job = Job.objects.create(**validated_data)
+        if job.account_id is None and job.submission_id:
+            job.account_id = job.submission.account_id
+            job.save(update_fields=['account'])
 
         for item in items_data:
             JobServiceItem.objects.create(job=job, **item)
@@ -887,6 +759,7 @@ class JobSeriesCreateSerializer(serializers.Serializer):
 
         request = self.context.get('request')
         creator = request.user if request and request.user.is_authenticated else None
+        account = getattr(request, 'account', None) if request else None
 
         # build dates using the existing helper, passing day_of_week
         dates = JobSerializer._build_occurrence_datetimes(
@@ -901,7 +774,7 @@ class JobSeriesCreateSerializer(serializers.Serializer):
             if quoted_by_raw:
                 qb_id = self._resolve_user_id(quoted_by_raw)
             
-            # Create job with all the data (including contact and address)
+            # Create job with all the data (including contact, address, account)
             job = Job.objects.create(
                 **job_data,
                 scheduled_at=dt,
@@ -915,6 +788,7 @@ class JobSeriesCreateSerializer(serializers.Serializer):
                 created_by_email=getattr(creator, 'email', None),
                 series_id=series,
                 series_sequence=idx,
+                account=account,
                 **({ 'quoted_by_id': qb_id } if qb_id else {})
             )
             for it in items:

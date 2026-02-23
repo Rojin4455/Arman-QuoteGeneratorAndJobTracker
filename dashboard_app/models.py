@@ -4,6 +4,7 @@ from django.contrib.postgres.fields import ArrayField
 
 
 class Invoice(models.Model):
+    """Invoice synced from GHL. Scoped to one GHL account (GHLAuthCredentials)."""
     STATUS_CHOICES = [
         ('draft', 'Draft'),
         ('sent', 'Sent'),
@@ -15,8 +16,18 @@ class Invoice(models.Model):
         ('void', 'Void'),
     ]
 
+    # Account (multi-account support)
+    account = models.ForeignKey(
+        'accounts.GHLAuthCredentials',
+        on_delete=models.CASCADE,
+        related_name='invoices',
+        null=True,
+        blank=True,
+        help_text='GHL account this invoice belongs to (for multi-account onboarding)',
+    )
+
     # Primary identifiers
-    invoice_id = models.CharField(max_length=100, unique=True, db_index=True)  # maps to _id
+    invoice_id = models.CharField(max_length=100, db_index=True)  # maps to _id; unique per account
     invoice_number = models.CharField(max_length=50, db_index=True, blank=True, null=True)
     alt_id = models.CharField(max_length=100, db_index=True, blank=True, null=True)
     alt_type = models.CharField(max_length=50, blank=True, null=True)  # typically "location"
@@ -98,7 +109,9 @@ class Invoice(models.Model):
     class Meta:
         db_table = 'invoices'
         ordering = ['-created_at']
+        unique_together = [['account', 'invoice_id']]
         indexes = [
+            models.Index(fields=['account', 'location_id']),
             models.Index(fields=['location_id', 'status']),
             models.Index(fields=['contact_id', 'status']),
             models.Index(fields=['due_date', 'status']),

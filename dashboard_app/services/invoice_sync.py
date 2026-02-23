@@ -213,10 +213,12 @@ class InvoiceSyncService:
         parsed = self._parse_invoice_data(invoice_data)
         items_data = invoice_data.get("invoiceItems", []) or []
 
-        # update_or_create invoice
+        # update_or_create invoice (scoped by account for multi-account)
+        defaults = {**parsed, "account": self.credentials}
         invoice_obj, created = Invoice.objects.update_or_create(
+            account=self.credentials,
             invoice_id=parsed["invoice_id"],
-            defaults=parsed,
+            defaults=defaults,
         )
 
         # remove existing items for this invoice and recreate (keeps it simple & consistent)
