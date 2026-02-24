@@ -219,12 +219,12 @@ class JobViewSet(AccountScopedQuerysetMixin, viewsets.ModelViewSet):
         return queryset
 
     def get_permissions(self):
-        # Only admins can create jobs
-        # Normal users can update/delete their own jobs
+        # AccountScopedPermission must run first so request.account is set (needed for create/update/delete and queryset filtering)
+        # Only admins can create jobs; normal users can update/delete their own jobs
         if self.request.method == 'POST':
-            return [permissions.IsAuthenticated(), _IsAdminOnly()]  # type: ignore
+            return [AccountScopedPermission(), permissions.IsAuthenticated(), _IsAdminOnly()]  # type: ignore
         elif self.request.method in ['PUT', 'PATCH', 'DELETE']:
-            return [permissions.IsAuthenticated()]  # Allow authenticated users to update/delete
+            return [AccountScopedPermission(), permissions.IsAuthenticated()]  # Allow authenticated users to update/delete
         return super().get_permissions()
 
     def get_serializer_context(self):
