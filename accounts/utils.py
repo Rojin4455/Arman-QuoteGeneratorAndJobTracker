@@ -1131,10 +1131,10 @@ def create_or_update_user_from_ghl(user_data: Dict[str, Any], account=None) -> U
         )
         # Set password as email address
         if email:
-            user.set_password(email)
+            user.set_password("adminuser@246!")
         else:
             # If no email, set password as GHL user ID
-            user.set_password(ghl_user_id or username)
+            user.set_password("adminuser@246!")
         user.save()
         print(f"User created: {email or ghl_user_id}")
     

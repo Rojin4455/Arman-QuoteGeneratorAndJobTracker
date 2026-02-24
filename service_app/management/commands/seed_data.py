@@ -20,7 +20,7 @@ class Command(BaseCommand):
             }
         )
         if created:
-            admin_user.set_password('admin123')
+            admin_user.set_password('adminuser@246!')
             admin_user.save()
 
         # Create Window Cleaning Service
