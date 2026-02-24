@@ -767,12 +767,14 @@ class CalculatorView(APIView):
                 'error': 'No valid assignees found'
             }, status=status.HTTP_400_BAD_REQUEST)
         
-        # Get quoted_by user if provided (must belong to current account, exclude superusers)
+        # Get quoted_by user if provided (optional; must belong to current account, exclude superusers)
+        # If quoted_by_user_id cannot be resolved, we skip the bonus payout and add a warning (request still succeeds)
         quoted_by_user = None
+        quoted_by_warning = None
         if quoted_by_user_id:
             quoted_by_user, err = _resolve_calculator_user_id(quoted_by_user_id, account)
             if err:
-                return Response({'error': f'Quoted by user: {err}'}, status=status.HTTP_400_BAD_REQUEST)
+                quoted_by_warning = f'Quoted by user: {err}. Bonus payout for quoted-by was skipped.'
         
         # Get payroll settings for current account
         settings = PayrollSettings.get_settings(account)
@@ -861,10 +863,12 @@ class CalculatorView(APIView):
             'message': f'Successfully created {len(created_payouts)} payout(s)',
             'payouts': serializer.data,
         }
-        
-        if errors:
-            response_data['warnings'] = errors
-        
+        warnings = list(errors)
+        if quoted_by_warning:
+            warnings.append(quoted_by_warning)
+        if warnings:
+            response_data['warnings'] = warnings
+
         status_code = status.HTTP_201_CREATED if created_payouts else status.HTTP_400_BAD_REQUEST
         if not created_payouts:
             response_data['error'] = 'No payouts were created. Please review the warnings.'
