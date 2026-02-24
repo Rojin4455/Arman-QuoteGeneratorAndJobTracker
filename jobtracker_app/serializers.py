@@ -433,6 +433,12 @@ class JobSerializer(serializers.ModelSerializer):
         items_data = validated_data.pop('items', [])
         assignments_data = validated_data.pop('assignments', [])
         
+        # Set account from request context (user's account) so job is scoped correctly
+        request = self.context.get('request')
+        account = getattr(request, 'account', None) if request else None
+        if account and not validated_data.get('account'):
+            validated_data['account'] = account
+        
         # Handle contact_id and address_id (write-only fields)
         contact_id = validated_data.pop('contact_id', None)
         address_id = validated_data.pop('address_id', None)
@@ -484,9 +490,11 @@ class JobSerializer(serializers.ModelSerializer):
                 })
         
         job = Job.objects.create(**validated_data)
+        # Fallback: if still no account, set from submission when job came from a quote
         if job.account_id is None and job.submission_id:
-            job.account_id = job.submission.account_id
-            job.save(update_fields=['account'])
+            job.account_id = getattr(job.submission, 'account_id', None)
+            if job.account_id:
+                job.save(update_fields=['account'])
 
         for item in items_data:
             JobServiceItem.objects.create(job=job, **item)

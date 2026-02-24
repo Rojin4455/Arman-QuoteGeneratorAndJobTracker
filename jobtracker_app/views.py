@@ -449,6 +449,14 @@ class JobViewSet(AccountScopedQuerysetMixin, viewsets.ModelViewSet):
             job.account = account
             job.save(update_fields=['account'])
 
+    def perform_update(self, serializer):
+        job = serializer.save()
+        # Sync account from request when job has no account (e.g. legacy or created elsewhere)
+        account = getattr(self.request, 'account', None)
+        if account and not job.account_id:
+            job.account = account
+            job.save(update_fields=['account'])
+
 
 class _IsAdminOnly(permissions.BasePermission):
     def has_permission(self, request, view):

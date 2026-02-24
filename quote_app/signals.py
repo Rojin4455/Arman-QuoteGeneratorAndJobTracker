@@ -182,14 +182,18 @@ def handle_quote_submission(sender, instance, created, **kwargs):
                 job.quoted_by = quoted_by_user
             if not job.status:
                 job.status = "to_convert"
+            # Sync account from submission when job has no account
+            if getattr(submission, 'account_id', None) and not job.account_id:
+                job.account_id = submission.account_id
             job.save()
             job.items.all().delete()
         else:
-            # Create new job
+            # Create new job (set account from submission for multi-account)
             job = Job.objects.create(
                 submission=submission,
                 **job_defaults,
                 status="to_convert",
+                account=getattr(submission, 'account', None),
                 **({"quoted_by": quoted_by_user} if quoted_by_user else {}),
             )
 

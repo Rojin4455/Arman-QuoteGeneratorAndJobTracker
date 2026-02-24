@@ -59,11 +59,16 @@ def _create_project_payouts(job):
        - This is separate from assignee payouts, so if quoted_by is also
          an assignee, they get BOTH payouts
     """
-    # Get assigned employees
+    # Get assigned employees (when job has account, only include users in that account)
     assignments = job.assignments.all().select_related('user')
-    
-    if not assignments.exists():
-        return  # No employees assigned, skip payout creation
+    job_account_id = getattr(job, 'account_id', None)
+    if job_account_id:
+        assignments = [a for a in assignments if getattr(a.user, 'account_id', None) == job_account_id]
+    else:
+        assignments = list(assignments)
+
+    if not assignments:
+        return  # No employees assigned (or none in job's account), skip payout creation
     
     # Get project value
     project_value = job.total_price or Decimal('0.00')
@@ -71,14 +76,14 @@ def _create_project_payouts(job):
     if project_value <= 0:
         return  # No value, skip payout creation
     
-    # Get payroll settings
-    settings = PayrollSettings.get_settings()
+    # Get payroll settings for the job's account (so bonus % etc. are account-specific)
+    settings = PayrollSettings.get_settings(account=getattr(job, 'account', None))
     
     # Determine if first-time project
     is_first_time = (job.job_type == 'one_time')
     
-    # Get number of assigned employees
-    employee_count = assignments.count()
+    # Get number of assigned employees (in job's account)
+    employee_count = len(assignments)
     
     # Step 1: Create payouts for each assigned employee (based on their collaboration rates)
     for assignment in assignments:
@@ -130,9 +135,14 @@ def _create_project_payouts(job):
         )
     
     # Step 2: Create bonus payout for quoted_by person (separate from assignee payouts)
+    # When job has account, only create if quoted_by is in the same account
     if job.quoted_by:
         quoted_by_employee = job.quoted_by
-        
+        if job_account_id and getattr(quoted_by_employee, 'account_id', None) != job_account_id:
+            quoted_by_employee = None  # Skip bonus for cross-account quoted_by
+    else:
+        quoted_by_employee = None
+    if quoted_by_employee:
         # Determine bonus type
         bonus_type = 'bonus_first_time' if is_first_time else 'bonus_quoted_by'
         
