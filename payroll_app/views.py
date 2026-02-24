@@ -25,6 +25,40 @@ from .serializers import (
 MIN_DURATION_HOURS_FOR_TODAY = Decimal('1') / 60  # 60 seconds = 1 minute
 
 
+def _resolve_calculator_user_id(identifier, account):
+    """
+    Resolve a user identifier from calculator payload to a User in the given account.
+    User model uses integer primary key; accepts integer ID, email, or username.
+    Returns (User, None) if found, (None, error_message) if invalid or not found.
+    """
+    if identifier is None:
+        return None, None
+    s = str(identifier).strip()
+    if not s:
+        return None, "User ID cannot be empty"
+    # Reject UUID-like strings with a clear message (User.pk is integer)
+    if len(s) == 36 and s.count("-") == 4 and all(c in "0123456789abcdefABCDEF-" for c in s):
+        return None, "User ID must be an integer (or email/username). UUIDs are not valid user IDs."
+    # Try integer ID
+    try:
+        uid = int(s)
+        user = User.objects.filter(pk=uid, account=account, is_superuser=False).first()
+        if user:
+            return user, None
+        return None, f"User with ID {uid} not found in this account"
+    except (ValueError, TypeError):
+        pass
+    # Try email or username
+    user = User.objects.filter(
+        Q(email=s) | Q(username=s),
+        account=account,
+        is_superuser=False
+    ).first()
+    if user:
+        return user, None
+    return None, f"User '{s}' not found in this account"
+
+
 class IsAdminOrEmployeePermission(permissions.BasePermission):
     """Permission for admin or employee access"""
     def has_permission(self, request, view):
@@ -716,15 +750,14 @@ class CalculatorView(APIView):
             return Response({'error': 'Account context is required.'}, status=status.HTTP_403_FORBIDDEN)
         
         # Get assignees (must belong to current account, exclude superusers)
+        # Accept integer user ID, email, or username (User.pk is integer; UUIDs return clear error)
         assignees = []
         for assignee_id in assignee_user_ids:
-            try:
-                assignee = User.objects.get(pk=assignee_id, account=account, is_superuser=False)
+            assignee, err = _resolve_calculator_user_id(assignee_id, account)
+            if err:
+                return Response({'error': f'Assignee: {err}'}, status=status.HTTP_400_BAD_REQUEST)
+            if assignee:
                 assignees.append(assignee)
-            except User.DoesNotExist:
-                return Response({
-                    'error': f'Assignee with ID {assignee_id} not found'
-                }, status=status.HTTP_404_NOT_FOUND)
         
         if not assignees:
             return Response({
@@ -734,12 +767,9 @@ class CalculatorView(APIView):
         # Get quoted_by user if provided (must belong to current account, exclude superusers)
         quoted_by_user = None
         if quoted_by_user_id:
-            try:
-                quoted_by_user = User.objects.get(pk=quoted_by_user_id, account=account, is_superuser=False)
-            except User.DoesNotExist:
-                return Response({
-                    'error': f'Quoted by user with ID {quoted_by_user_id} not found'
-                }, status=status.HTTP_404_NOT_FOUND)
+            quoted_by_user, err = _resolve_calculator_user_id(quoted_by_user_id, account)
+            if err:
+                return Response({'error': f'Quoted by user: {err}'}, status=status.HTTP_400_BAD_REQUEST)
         
         # Get payroll settings for current account
         settings = PayrollSettings.get_settings(account)
@@ -910,10 +940,9 @@ class CalculatorView(APIView):
         created_payouts = []
         errors = []
         for employee_id in employee_ids:
-            try:
-                employee = User.objects.get(pk=employee_id, account=account, is_superuser=False)
-            except User.DoesNotExist:
-                errors.append(f'Employee with ID {employee_id} not found')
+            employee, err = _resolve_calculator_user_id(employee_id, account)
+            if err or not employee:
+                errors.append(f'Employee {employee_id}: {err or "not found"}')
                 continue
             
             try:
