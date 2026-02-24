@@ -28,7 +28,7 @@ MIN_DURATION_HOURS_FOR_TODAY = Decimal('1') / 60  # 60 seconds = 1 minute
 def _resolve_calculator_user_id(identifier, account):
     """
     Resolve a user identifier from calculator payload to a User in the given account.
-    User model uses integer primary key; accepts integer ID, email, or username.
+    Accepts: integer primary key, UUID (matched to ghl_user_id), email, or username.
     Returns (User, None) if found, (None, error_message) if invalid or not found.
     """
     if identifier is None:
@@ -36,10 +36,7 @@ def _resolve_calculator_user_id(identifier, account):
     s = str(identifier).strip()
     if not s:
         return None, "User ID cannot be empty"
-    # Reject UUID-like strings with a clear message (User.pk is integer)
-    if len(s) == 36 and s.count("-") == 4 and all(c in "0123456789abcdefABCDEF-" for c in s):
-        return None, "User ID must be an integer (or email/username). UUIDs are not valid user IDs."
-    # Try integer ID
+    # Try integer ID (User.pk is integer)
     try:
         uid = int(s)
         user = User.objects.filter(pk=uid, account=account, is_superuser=False).first()
@@ -48,6 +45,12 @@ def _resolve_calculator_user_id(identifier, account):
         return None, f"User with ID {uid} not found in this account"
     except (ValueError, TypeError):
         pass
+    # Try UUID / GHL-style id as ghl_user_id
+    if len(s) == 36 and s.count("-") == 4 and all(c in "0123456789abcdefABCDEF-" for c in s):
+        user = User.objects.filter(ghl_user_id=s, account=account, is_superuser=False).first()
+        if user:
+            return user, None
+        return None, f"User with ID {s} not found in this account (tried ghl_user_id)"
     # Try email or username
     user = User.objects.filter(
         Q(email=s) | Q(username=s),
