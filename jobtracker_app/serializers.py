@@ -53,13 +53,14 @@ class CalendarEventSerializer(serializers.ModelSerializer):
     """Serializer for calendar view - works with Job model directly (supports both one-time and recurring series instances)"""
     job_id = serializers.UUIDField(source='id')
     company_name = serializers.SerializerMethodField()
+    assigned_user_ids = serializers.SerializerMethodField()
 
     class Meta:
         model = Job
         fields = [
             'job_id', 'title', 'scheduled_at', 'status', 'priority',
             'duration_hours', 'total_price', 'customer_name', 'company_name',
-            'series_id', 'series_sequence', 'job_type'
+            'series_id', 'series_sequence', 'job_type', 'assigned_user_ids'
         ]
 
     def get_company_name(self, obj):
@@ -67,22 +68,35 @@ class CalendarEventSerializer(serializers.ModelSerializer):
             return obj.contact.company_name or None
         return None
 
+    def get_assigned_user_ids(self, obj):
+        """Return list of assigned user IDs (string) for this job. Prefer ghl_user_id when present, else str(pk)."""
+        ids = []
+        for assignment in (obj.assignments.all() if hasattr(obj, 'assignments') else []):
+            user = getattr(assignment, 'user', None)
+            if not user:
+                continue
+            if getattr(user, 'ghl_user_id', None):
+                ids.append(user.ghl_user_id)
+            else:
+                ids.append(str(user.pk))
+        return ids
+
 
 class AppointmentCalendarSerializer(serializers.ModelSerializer):
     """Serializer for appointment calendar view"""
     appointment_id = serializers.UUIDField(source='id')
     assigned_user_name = serializers.SerializerMethodField()
+    assigned_user_ids = serializers.SerializerMethodField()
     contact_name = serializers.SerializerMethodField()
     contact_company_name = serializers.SerializerMethodField()
     users_count = serializers.SerializerMethodField()
     calendar = serializers.SerializerMethodField()
 
-
     class Meta:
         model = Appointment
         fields = [
-            'appointment_id', 'title', 'start_time', 'end_time', 
-            'appointment_status', 'assigned_user_name', 'contact_name',
+            'appointment_id', 'title', 'start_time', 'end_time',
+            'appointment_status', 'assigned_user_name', 'assigned_user_ids', 'contact_name',
             'contact_company_name', 'address', 'notes', 'source', 'users_count', 'calendar',
             'ghl_contact_id'
         ]
@@ -91,6 +105,24 @@ class AppointmentCalendarSerializer(serializers.ModelSerializer):
         if obj.assigned_user:
             return obj.assigned_user.get_full_name() or obj.assigned_user.username
         return None
+
+    def get_assigned_user_ids(self, obj):
+        """Return list of user IDs (string) for this appointment: assigned_user + users. Prefer ghl_user_id when present."""
+        ids = []
+        seen = set()
+        if obj.assigned_user:
+            u = obj.assigned_user
+            key = u.pk
+            if key not in seen:
+                seen.add(key)
+                ids.append(u.ghl_user_id if getattr(u, 'ghl_user_id', None) else str(u.pk))
+        users_mgr = getattr(obj, 'users', None)
+        if users_mgr is not None:
+            for u in users_mgr.all():
+                if u.pk not in seen:
+                    seen.add(u.pk)
+                    ids.append(u.ghl_user_id if getattr(u, 'ghl_user_id', None) else str(u.pk))
+        return ids
 
     def get_contact_name(self, obj):
         if obj.contact:
