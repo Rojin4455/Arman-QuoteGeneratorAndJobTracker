@@ -69,16 +69,12 @@ class CalendarEventSerializer(serializers.ModelSerializer):
         return None
 
     def get_assigned_user_ids(self, obj):
-        """Return list of assigned user IDs (string) for this job. Prefer ghl_user_id when present, else str(pk)."""
+        """Return list of assigned user primary keys (integer) for this job."""
         ids = []
         for assignment in (obj.assignments.all() if hasattr(obj, 'assignments') else []):
             user = getattr(assignment, 'user', None)
-            if not user:
-                continue
-            if getattr(user, 'ghl_user_id', None):
-                ids.append(user.ghl_user_id)
-            else:
-                ids.append(str(user.pk))
+            if user:
+                ids.append(user.pk)
         return ids
 
 
@@ -107,21 +103,20 @@ class AppointmentCalendarSerializer(serializers.ModelSerializer):
         return None
 
     def get_assigned_user_ids(self, obj):
-        """Return list of user IDs (string) for this appointment: assigned_user + users. Prefer ghl_user_id when present."""
+        """Return list of user primary keys (integer) for this appointment: assigned_user + users."""
         ids = []
         seen = set()
         if obj.assigned_user:
             u = obj.assigned_user
-            key = u.pk
-            if key not in seen:
-                seen.add(key)
-                ids.append(u.ghl_user_id if getattr(u, 'ghl_user_id', None) else str(u.pk))
+            if u.pk not in seen:
+                seen.add(u.pk)
+                ids.append(u.pk)
         users_mgr = getattr(obj, 'users', None)
         if users_mgr is not None:
             for u in users_mgr.all():
                 if u.pk not in seen:
                     seen.add(u.pk)
-                    ids.append(u.ghl_user_id if getattr(u, 'ghl_user_id', None) else str(u.pk))
+                    ids.append(u.pk)
         return ids
 
     def get_contact_name(self, obj):
