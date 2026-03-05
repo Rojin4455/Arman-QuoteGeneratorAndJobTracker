@@ -163,7 +163,7 @@ class BulkQuestionOrderSerializer(serializers.Serializer):
     questions = serializers.ListField(
         child=BulkQuestionOrderItemSerializer(),
         allow_empty=False,
-        required=True
+        required=False
     )
 
     def to_internal_value(self, data):
@@ -171,6 +171,11 @@ class BulkQuestionOrderSerializer(serializers.Serializer):
         if isinstance(data, list):
             data = {'questions': data}
         return super().to_internal_value(data)
+
+    def validate(self, data):
+        if not data.get('questions'):
+            raise serializers.ValidationError({'questions': 'This field is required and cannot be empty.'})
+        return data
 
 
 class OptionResponseSerializer(serializers.ModelSerializer):

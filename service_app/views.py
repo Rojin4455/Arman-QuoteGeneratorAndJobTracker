@@ -34,8 +34,8 @@ from .serializers import (
     PackageWithFeaturesSerializer, BulkPricingUpdateSerializer,
     ServiceAnalyticsSerializer, SubQuestionPricingSerializer,BulkSubQuestionPricingSerializer,QuestionResponseSerializer,
     PricingCalculationSerializer, SubQuestionSerializer,GlobalBasePriceSerializer,
-    BulkQuestionOrderSerializer
-)
+    BulkQuestionOrderSerializer, BulkQuestionOrderItemSerializer
+)   
 
 
 
@@ -637,7 +637,7 @@ class BulkQuestionOrderView(APIView):
         import json
         data = request.data
         
-        serializer = BulkQuestionOrderSerializer(data=data)
+        serializer = BulkQuestionOrderItemSerializer(data=data)
         if not serializer.is_valid():
             return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
