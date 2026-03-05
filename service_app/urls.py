@@ -87,6 +87,7 @@ urlpatterns = [
     # ============================================================================
     # BULK OPERATIONS
     # ============================================================================
+    path('questions/reorder/', views.BulkQuestionOrderView.as_view(), name='questions-reorder'),
     path('questions/bulk-pricing/', views.BulkQuestionPricingView.as_view(), name='bulk-question-pricing'),
     path('sub-questions/bulk-pricing/', views.BulkSubQuestionPricingView.as_view(), name='bulk-sub-question-pricing'),
     path('options/bulk-pricing/', views.BulkOptionPricingView.as_view(), name='bulk-option-pricing'),

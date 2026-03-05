@@ -33,7 +33,8 @@ from .serializers import (
     QuestionOptionSerializer, QuestionPricingSerializer, OptionPricingSerializer,
     PackageWithFeaturesSerializer, BulkPricingUpdateSerializer,
     ServiceAnalyticsSerializer, SubQuestionPricingSerializer,BulkSubQuestionPricingSerializer,QuestionResponseSerializer,
-    PricingCalculationSerializer, SubQuestionSerializer,GlobalBasePriceSerializer
+    PricingCalculationSerializer, SubQuestionSerializer,GlobalBasePriceSerializer,
+    BulkQuestionOrderSerializer
 )
 
 
@@ -628,6 +629,47 @@ class SubQuestionListCreateView(AccountScopedQuerysetMixin, generics.ListCreateA
 
 
 # Bulk Operations Views
+class BulkQuestionOrderView(APIView):
+    """PATCH endpoint to bulk reorder service questions. Supports all questions (root and conditional)."""
+    permission_classes = [AccountScopedPermission, IsAdminPermission]
+
+    def patch(self, request):
+        serializer = BulkQuestionOrderSerializer(data=request.data)
+        if not serializer.is_valid():
+            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+        account = getattr(request, 'account', None)
+        if not account:
+            return Response(
+                {'error': 'Account scope required'},
+                status=status.HTTP_403_FORBIDDEN
+            )
+
+        items = serializer.validated_data['questions']
+        try:
+            with transaction.atomic():
+                for item in items:
+                    question_id = item['question_id']
+                    service_id = item['service_id']
+                    order = item['order']
+
+                    question = get_object_or_404(
+                        Question,
+                        id=question_id,
+                        service_id=service_id,
+                        service__account=account
+                    )
+                    question.order = order
+                    question.save()
+
+            return Response({
+                'message': 'Question order updated successfully',
+                'updated_count': len(items)
+            })
+        except Exception as e:
+            return Response({'error': str(e)}, status=status.HTTP_400_BAD_REQUEST)
+
+
 class BulkQuestionPricingView(APIView):
     """Bulk update question pricing rules for all packages (scoped to account)."""
     permission_classes = [AccountScopedPermission, IsAdminPermission]

@@ -140,6 +140,21 @@ class BulkSubQuestionPricingSerializer(serializers.Serializer):
     )
 
 
+class BulkQuestionOrderItemSerializer(serializers.Serializer):
+    """Serializer for a single question order update"""
+    question_id = serializers.UUIDField()
+    service_id = serializers.UUIDField()
+    order = serializers.IntegerField(min_value=0)
+
+
+class BulkQuestionOrderSerializer(serializers.Serializer):
+    """Serializer for bulk reordering service questions"""
+    questions = serializers.ListField(
+        child=BulkQuestionOrderItemSerializer(),
+        allow_empty=False
+    )
+
+
 class OptionResponseSerializer(serializers.ModelSerializer):
     """Serializer for customer option responses"""
     option_text = serializers.CharField(source='option.option_text', read_only=True)
