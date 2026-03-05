@@ -178,12 +178,14 @@ class Feature(models.Model):
     name = models.CharField(max_length=255)
     description = models.TextField(blank=True)
     is_active = models.BooleanField(default=True)
+    order = models.PositiveIntegerField(default=0)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:
         db_table = 'features'
         unique_together = ['service', 'name']
+        ordering = ['order', 'name']
 
     def __str__(self):
         return f"{self.service.name} - {self.name}"

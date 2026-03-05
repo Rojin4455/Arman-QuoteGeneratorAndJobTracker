@@ -198,11 +198,18 @@ class FeatureSerializer(serializers.ModelSerializer):
         model = Feature
         fields = [
             'id', 'service', 'service_name', 'name', 'description',
-            'is_active', 'created_at', 'updated_at'
+            'is_active', 'order', 'created_at', 'updated_at'
         ]
         read_only_fields = ['id', 'created_at', 'updated_at']
 
     def create(self, validated_data):
+        # Set order to max+1 if not provided
+        if 'order' not in validated_data or validated_data.get('order') is None:
+            service = validated_data.get('service')
+            max_order = Feature.objects.filter(service=service).aggregate(
+                m=Max('order')
+            )['m'] or 0
+            validated_data['order'] = max_order + 1
         feature = super().create(validated_data)
 
         # Automatically link to all existing packages under the same service

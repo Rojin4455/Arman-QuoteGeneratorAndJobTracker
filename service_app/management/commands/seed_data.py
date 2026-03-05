@@ -64,9 +64,10 @@ class Command(BaseCommand):
             ]
 
             features = []
-            for feat_data in features_data:
+            for order, feat_data in enumerate(features_data):
                 feature = Feature.objects.create(
                     service=service,
+                    order=order,
                     **feat_data
                 )
                 features.append(feature)

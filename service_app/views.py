@@ -363,7 +363,7 @@ class FeatureListCreateView(AccountScopedQuerysetMixin, generics.ListCreateAPIVi
         service_id = self.request.query_params.get('service', None)
         if service_id:
             queryset = queryset.filter(service_id=service_id)
-        return queryset.order_by('service__name', 'name')
+        return queryset.order_by('service__name', 'order', 'name')
 
     def perform_create(self, serializer):
         service = serializer.validated_data.get('service')
