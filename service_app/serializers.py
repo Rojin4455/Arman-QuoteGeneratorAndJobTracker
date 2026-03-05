@@ -1,6 +1,7 @@
 # serializers.py
 from rest_framework import serializers
 from django.contrib.auth import authenticate
+from django.db.models import Max
 from decimal import Decimal
 from .models import (
     User, Location, Service, Package, Feature, PackageFeature,
@@ -102,15 +103,16 @@ class PackageSerializer(serializers.ModelSerializer):
         read_only_fields = ['id', 'created_at', 'updated_at']
 
     def get_features(self, obj):
-        """Get features included in the package"""
-        package_features = PackageFeature.objects.filter(package=obj)
+        """Get features included in the package (ordered by order field)"""
+        package_features = PackageFeature.objects.filter(package=obj).order_by('order', 'created_at')
         return [
             {
-                'id':pf.id,
+                'id': pf.id,
                 'feature': pf.feature.id,
                 'name': pf.feature.name,
                 'description': pf.feature.description,
-                'is_included': pf.is_included
+                'is_included': pf.is_included,
+                'order': pf.order
             }
             for pf in package_features
         ]
@@ -122,8 +124,8 @@ class PackageSerializer(serializers.ModelSerializer):
         # Automatically link to all existing features under the same service
         features = Feature.objects.filter(service=package.service, is_active=True)
         package_features = [
-            PackageFeature(package=package, feature=feature, is_included=False)
-            for feature in features
+            PackageFeature(package=package, feature=feature, is_included=False, order=idx)
+            for idx, feature in enumerate(features)
         ]
         PackageFeature.objects.bulk_create(package_features)
         return package
@@ -205,10 +207,14 @@ class FeatureSerializer(serializers.ModelSerializer):
 
         # Automatically link to all existing packages under the same service
         packages = Package.objects.filter(service=feature.service, is_active=True)
-        package_features = [
-            PackageFeature(package=package, feature=feature, is_included=False)
-            for package in packages
-        ]
+        package_features = []
+        for package in packages:
+            max_order = PackageFeature.objects.filter(package=package).aggregate(
+                m=Max('order')
+            )['m'] or 0
+            package_features.append(
+                PackageFeature(package=package, feature=feature, is_included=False, order=max_order + 1)
+            )
         PackageFeature.objects.bulk_create(package_features)
         return feature
 
@@ -222,7 +228,7 @@ class PackageFeatureSerializer(serializers.ModelSerializer):
         model = PackageFeature
         fields = [
             'id', 'package', 'package_name', 'feature', 'feature_name',
-            'is_included', 'created_at'
+            'is_included', 'order', 'created_at'
         ]
         read_only_fields = ['id', 'created_at']
 
@@ -515,13 +521,18 @@ class PackageWithFeaturesSerializer(serializers.ModelSerializer):
         read_only_fields = ['id', 'created_at', 'updated_at']
 
     def get_features(self, obj):
-        package_features = PackageFeature.objects.filter(package=obj, is_included=True)
+        """Get included features for the package (ordered by order field)"""
+        package_features = PackageFeature.objects.filter(
+            package=obj, is_included=True
+        ).order_by('order', 'created_at')
         return [
             {
-                'id': pf.feature.id,
+                'id': pf.id,
+                'feature_id': pf.feature.id,
                 'name': pf.feature.name,
                 'description': pf.feature.description,
-                'is_included': pf.is_included
+                'is_included': pf.is_included,
+                'order': pf.order
             }
             for pf in package_features
         ]

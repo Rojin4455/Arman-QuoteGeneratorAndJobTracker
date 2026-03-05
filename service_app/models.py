@@ -195,11 +195,13 @@ class PackageFeature(models.Model):
     package = models.ForeignKey(Package, related_name='package_features', on_delete=models.CASCADE)
     feature = models.ForeignKey(Feature, related_name='package_features', on_delete=models.CASCADE)
     is_included = models.BooleanField(default=True)
+    order = models.PositiveIntegerField(default=0)
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
         db_table = 'package_features'
         unique_together = ['package', 'feature']
+        ordering = ['order', 'created_at']
 
     def __str__(self):
         return f"{self.package.name} - {self.feature.name}"

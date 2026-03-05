@@ -86,11 +86,12 @@ class Command(BaseCommand):
 
             for assignment in feature_assignments:
                 package = assignment['package']
-                for feature_idx in assignment['features']:
+                for order, feature_idx in enumerate(assignment['features']):
                     PackageFeature.objects.create(
                         package=package,
                         feature=features[feature_idx],
-                        is_included=True
+                        is_included=True,
+                        order=order
                     )
 
             # Create sample questions
