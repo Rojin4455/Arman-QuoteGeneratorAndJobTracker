@@ -141,18 +141,41 @@ class BulkSubQuestionPricingSerializer(serializers.Serializer):
 
 
 class BulkQuestionOrderItemSerializer(serializers.Serializer):
-    """Serializer for a single question order update"""
-    question_id = serializers.UUIDField()
+    """Serializer for a single question order update. Accepts question_id or id."""
+    question_id = serializers.UUIDField(required=False)
+    id = serializers.UUIDField(required=False)
     service_id = serializers.UUIDField()
     order = serializers.IntegerField(min_value=0)
 
+    def validate(self, data):
+        qid = data.get('question_id') or data.get('id')
+        if not qid:
+            raise serializers.ValidationError(
+                'Either question_id or id is required for each item'
+            )
+        data['question_id'] = qid
+        data.pop('id', None)  # Normalize to question_id only
+        return data
+
 
 class BulkQuestionOrderSerializer(serializers.Serializer):
-    """Serializer for bulk reordering service questions"""
+    """Serializer for bulk reordering service questions. Accepts {"questions": [...]} or raw array."""
     questions = serializers.ListField(
         child=BulkQuestionOrderItemSerializer(),
-        allow_empty=False
+        allow_empty=False,
+        required=False
     )
+
+    def to_internal_value(self, data):
+        # Accept raw array: [{"question_id": "...", "service_id": "...", "order": 0}]
+        if isinstance(data, list):
+            data = {'questions': data}
+        return super().to_internal_value(data)
+
+    def validate(self, data):
+        if not data.get('questions'):
+            raise serializers.ValidationError({'questions': 'This field is required and cannot be empty.'})
+        return data
 
 
 class OptionResponseSerializer(serializers.ModelSerializer):

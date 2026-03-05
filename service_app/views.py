@@ -634,7 +634,13 @@ class BulkQuestionOrderView(APIView):
     permission_classes = [AccountScopedPermission, IsAdminPermission]
 
     def patch(self, request):
-        serializer = BulkQuestionOrderSerializer(data=request.data)
+        data = request.data
+        if data is None or (isinstance(data, (dict, list)) and len(data) == 0):
+            return Response(
+                {'error': 'Request body is required. Send {"questions": [{"question_id": "...", "service_id": "...", "order": 0}]} or a raw array.'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        serializer = BulkQuestionOrderSerializer(data=data)
         if not serializer.is_valid():
             return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
