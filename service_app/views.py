@@ -636,25 +636,7 @@ class BulkQuestionOrderView(APIView):
     def patch(self, request):
         import json
         data = request.data
-        # Handle empty body: try parsing raw JSON (some clients send incorrectly)
-        if data is None or data == '' or (isinstance(data, dict) and len(data) == 0):
-            try:
-                raw = request.body
-                if raw:
-                    data = json.loads(raw.decode() if isinstance(raw, bytes) else raw)
-            except (json.JSONDecodeError, ValueError, AttributeError):
-                data = None
-        if data is None or (isinstance(data, (dict, list)) and len(data) == 0):
-            return Response(
-                {'error': 'Request body is required. Send {"questions": [{"question_id": "...", "service_id": "...", "order": 0}]} or a raw array.'},
-                status=status.HTTP_400_BAD_REQUEST
-            )
-        # Normalize: accept "items" or "data" as alias for "questions"
-        if isinstance(data, dict) and 'questions' not in data:
-            for key in ('items', 'data'):
-                if key in data and isinstance(data[key], list):
-                    data = {'questions': data[key]}
-                    break
+        
         serializer = BulkQuestionOrderSerializer(data=data)
         if not serializer.is_valid():
             return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
@@ -666,26 +648,23 @@ class BulkQuestionOrderView(APIView):
                 status=status.HTTP_403_FORBIDDEN
             )
 
-        items = serializer.validated_data['questions']
         try:
             with transaction.atomic():
-                for item in items:
-                    question_id = item['question_id']
-                    service_id = item['service_id']
-                    order = item['order']
+                question_id = serializer.validated_data['question_id']
+                service_id = serializer.validated_data['service_id']
+                order = serializer.validated_data['order']
 
-                    question = get_object_or_404(
-                        Question,
-                        id=question_id,
-                        service_id=service_id,
-                        service__account=account
-                    )
-                    question.order = order
-                    question.save()
+                question = get_object_or_404(
+                    Question,
+                    id=question_id,
+                    service_id=service_id,
+                    service__account=account
+                )
+                question.order = order
+                question.save()
 
             return Response({
                 'message': 'Question order updated successfully',
-                'updated_count': len(items)
             })
         except Exception as e:
             return Response({'error': str(e)}, status=status.HTTP_400_BAD_REQUEST)
