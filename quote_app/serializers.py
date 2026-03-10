@@ -105,23 +105,43 @@ class GlobalSizePackagePublicSerializer(serializers.ModelSerializer):
 
 # Customer submission serializers
 class CustomerSubmissionCreateSerializer(serializers.ModelSerializer):
-    """Serializer for creating customer submissions"""
+    """Serializer for creating customer submissions. Optional location_id applies that location's trip_surcharge to the quote."""
     contact = serializers.PrimaryKeyRelatedField(queryset=Contact.objects.all())
     address = serializers.PrimaryKeyRelatedField(queryset=Address.objects.all(), required=False, allow_null=True)
     quoted_by = serializers.PrimaryKeyRelatedField(queryset=User.objects.all(), write_only=True, required=False, allow_null=True)
     first_time = serializers.BooleanField(write_only=True)
+    location = serializers.PrimaryKeyRelatedField(
+        queryset=Location.objects.filter(is_active=True),
+        required=False,
+        allow_null=True,
+        write_only=True,
+        help_text='Optional location ID; when provided, the location\'s trip_surcharge is applied to the quote.',
+    )
     class Meta:
         model = CustomerSubmission
         fields = [
-            'contact', 'address', 'house_sqft','quoted_by','first_time'
+            'contact', 'address', 'house_sqft', 'quoted_by', 'first_time', 'location'
         ]
-    
+
+    def _get_location_queryset(self):
+        """Scope location queryset to request account when available."""
+        request = self.context.get('request')
+        account = getattr(request, 'account', None) if request else None
+        if account:
+            return Location.objects.filter(is_active=True, account=account)
+        return Location.objects.filter(is_active=True)
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.fields['location'].queryset = self._get_location_queryset()
+
     def create(self, validated_data):
         from django.utils import timezone
         from datetime import timedelta
 
         quoted_by_user = validated_data.pop('quoted_by', None)
         first_time = validated_data.pop('first_time')
+        location = validated_data.pop('location', None)
         # Avoid duplicate 'account' (can be in validated_data when passed via serializer.save(account=...))
         account = validated_data.pop('account', None)
         if account is None:
@@ -132,9 +152,15 @@ class CustomerSubmissionCreateSerializer(serializers.ModelSerializer):
         submission = CustomerSubmission.objects.create(
             **validated_data,
             quoted_by=quoted_by_user,
-            account=account
+            account=account,
+            location=location,
         )
         submission.expires_at = timezone.now() + timedelta(days=30)
+
+        # Apply location trip_surcharge when location is provided and has a surcharge
+        if location and location.trip_surcharge and location.trip_surcharge > Decimal('0.00'):
+            submission.total_surcharges = location.trip_surcharge
+            submission.quote_surcharge_applicable = True
         submission.save()
 
         # Store quoted_by as string in QuoteSchedule for backward compatibility

@@ -42,8 +42,15 @@ class CustomerSubmission(models.Model):
     
     # House Information
     house_sqft = models.PositiveIntegerField()
-    # location = models.ForeignKey(Location, on_delete=models.SET_NULL, null=True, blank=True)
-    
+    location = models.ForeignKey(
+        Location,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='customer_submissions',
+        help_text='Service location; when set, trip_surcharge from this location is applied to the quote.',
+    )
+
     # Submission Details
     selected_services = models.ManyToManyField(Service, through='CustomerServiceSelection')
     status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='draft')

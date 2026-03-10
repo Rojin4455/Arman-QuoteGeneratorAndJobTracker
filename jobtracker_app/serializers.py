@@ -54,14 +54,21 @@ class CalendarEventSerializer(serializers.ModelSerializer):
     job_id = serializers.UUIDField(source='id')
     company_name = serializers.SerializerMethodField()
     assigned_user_ids = serializers.SerializerMethodField()
+    job_address = serializers.SerializerMethodField()
 
     class Meta:
         model = Job
         fields = [
             'job_id', 'title', 'scheduled_at', 'status', 'priority',
             'duration_hours', 'total_price', 'customer_name', 'company_name',
-            'series_id', 'series_sequence', 'job_type', 'assigned_user_ids'
+            'series_id', 'series_sequence', 'job_type', 'assigned_user_ids', 'job_address'
         ]
+
+    def get_job_address(self, obj):
+        """Return job address from Address FK or customer_address."""
+        if obj.address:
+            return obj.address.get_full_address() or None
+        return obj.customer_address or None
 
     def get_company_name(self, obj):
         if obj.contact:
