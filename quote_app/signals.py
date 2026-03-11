@@ -132,7 +132,9 @@ def handle_quote_submission(sender, instance, created, **kwargs):
             # Ignore errors converting global price so we still create the job
             pass
 
-    total_price = _quantize_currency(total_price)
+    # Add surcharge from submission (e.g. trip surcharge from location)
+    surcharge_amount = Decimal(submission.total_surcharges or 0).quantize(Decimal("0.01"))
+    total_price = _quantize_currency(total_price + surcharge_amount)
     total_duration = total_duration.quantize(Decimal("0.01"))
 
     # Get quoted_by user from submission model (ForeignKey)
@@ -155,6 +157,7 @@ def handle_quote_submission(sender, instance, created, **kwargs):
         "duration_hours": total_duration,
         "scheduled_at": instance.scheduled_date,
         "total_price": total_price,
+        "total_surcharge": surcharge_amount,
         "customer_name": customer_name or None,
         "customer_phone": customer_phone,
         "customer_email": customer_email,

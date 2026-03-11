@@ -60,7 +60,7 @@ class CalendarEventSerializer(serializers.ModelSerializer):
         model = Job
         fields = [
             'job_id', 'title', 'scheduled_at', 'status', 'priority',
-            'duration_hours', 'total_price', 'customer_name', 'company_name',
+            'duration_hours', 'total_price', 'total_surcharge', 'customer_name', 'company_name',
             'series_id', 'series_sequence', 'job_type', 'assigned_user_ids', 'job_address'
         ]
 
@@ -405,7 +405,7 @@ class JobSerializer(serializers.ModelSerializer):
         model = Job
         fields = [
             'id', 'submission', 'title', 'description', 'priority', 'duration_hours', 'scheduled_at',
-            'total_price', 'discount_type', 'discount_value', 'revised_total',
+            'total_price', 'total_surcharge', 'discount_type', 'discount_value', 'revised_total',
             'contact', 'address', 'contact_id', 'address_id', 'contact_details', 'address_details',  # New fields
             'customer_name', 'customer_phone', 'customer_email', 'customer_address', 'ghl_contact_id',
             'quoted_by', 'quoted_by_name', 'created_by', 'created_by_email',

@@ -84,6 +84,12 @@ class Job(models.Model):
     duration_hours = models.DecimalField(max_digits=5, decimal_places=2, default=Decimal('0.00'))
     scheduled_at = models.DateTimeField(null=True, blank=True)
     total_price = models.DecimalField(max_digits=12, decimal_places=2, default=Decimal('0.00'))
+    total_surcharge = models.DecimalField(
+        max_digits=12,
+        decimal_places=2,
+        default=Decimal('0.00'),
+        help_text='Surcharge amount (e.g. trip surcharge from location) applied to this job.',
+    )
 
     # Customer info - can be linked to Contact/Address models or provided manually
     contact = models.ForeignKey(
