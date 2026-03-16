@@ -199,12 +199,7 @@ def get_slot_reserved_info_for_job(job):
             for a in appointment_debug:
                 print("appointment:", a.id)
                 print("--------------------------------")
-                print("calendar:", a.calendar.name, "assigned_user:", a.assigned_user.username, "contact:", a.contact.name if a.contact else None)
-                print("start_time:", a.start_time, "end_time:", a.end_time)
-                print("appointment_status:", a.appointment_status, "estimate_status:", a.estimate_status)
-                print("notes:", a.notes)
-                print("address:", a.address)
-                print("contact:", a.contact.name if a.contact else None)
+                print("calendar:", a.calendar.name, "contact:", a.contact.email if a.contact else None)
                 print("--------------------------------")
 
             if appointment:
