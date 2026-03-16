@@ -7,7 +7,7 @@ from datetime import timedelta
 import pytz
 from django.utils import timezone as django_timezone
 
-from accounts.models import GHLAuthCredentials
+from accounts.models import GHLAuthCredentials, Contact
 from service_app.models import Appointment
 
 
@@ -129,24 +129,49 @@ def _job_contact_dict(contact):
     }
 
 
+def _resolve_job_contact(job):
+    """
+    Resolve a Contact instance for the job for appointment matching.
+    Tries in order: job.contact FK, submission.contact, then Contact table by
+    job.ghl_contact_id, then by job.customer_email.
+    """
+    contact = getattr(job, 'contact', None)
+    if contact:
+        return contact
+    if getattr(job, 'submission_id', None):
+        try:
+            submission = getattr(job, 'submission', None)
+            if submission and getattr(submission, 'contact', None):
+                return submission.contact
+        except Exception:
+            pass
+    ghl_id = getattr(job, 'ghl_contact_id', None)
+    if ghl_id:
+        contact = Contact.objects.filter(contact_id=ghl_id).first()
+        if contact:
+            return contact
+    email = getattr(job, 'customer_email', None)
+    if email:
+        contact = Contact.objects.filter(email__iexact=email).first()
+        if contact:
+            return contact
+    return None
+
+
 def get_slot_reserved_info_for_job(job):
     """
     Same manual check as JobSerializer.get_slot_reserved_info: returns slot_reserved and
     appointment details if any assignee has a matching appointment (optionally filtered by
     job contact), else slot_reserved=False. Includes job_contact when available.
+    Contact is resolved from job.contact, submission.contact, or Contact table by
+    ghl_contact_id / customer_email.
     """
     slot = _get_job_slot_utc_and_location(job)
     if not slot:
         return None
     job_start_utc, job_end_utc, location_id = slot
 
-    job_contact = getattr(job, 'contact', None)
-    if not job_contact and getattr(job, 'submission_id', None):
-        try:
-            submission = getattr(job, 'submission', None)
-            job_contact = getattr(submission, 'contact', None) if submission else None
-        except Exception:
-            job_contact = None
+    job_contact = _resolve_job_contact(job)
 
     base_filter = {
         'start_time': job_start_utc,
@@ -165,6 +190,20 @@ def get_slot_reserved_info_for_job(job):
                 **base_filter,
                 assigned_user=assignment.user,
             ).select_related('calendar', 'assigned_user', 'contact').first()
+
+            appointment_debug = Appointment.objects.filter(
+                **base_filter,
+                assigned_user=assignment.user,
+            ).select_related('calendar', 'assigned_user', 'contact')
+            for a in appointment_debug:
+                print("--------------------------------")
+                print("calendar:", a.calendar.name, "assigned_user:", a.assigned_user.username, "contact:", a.contact.name if a.contact else None)
+                print("start_time:", a.start_time, "end_time:", a.end_time)
+                print("appointment_status:", a.appointment_status, "estimate_status:", a.estimate_status)
+                print("notes:", a.notes)
+                print("address:", a.address)
+                print("contact:", a.contact.name if a.contact else None)
+                print("--------------------------------")
 
             if appointment:
                 result = {

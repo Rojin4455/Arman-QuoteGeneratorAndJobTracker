@@ -30,10 +30,13 @@ def find_nearest_location(latitude, longitude, max_distance_km=3):
     return None, None
 
 
-def calculate_question_price_adjustment(question, answer_value, package):
+PERCENT_OF_TOTAL_TYPES = ('upcharge_percent_of_total', 'discount_percent_of_total')
+
+
+def calculate_question_price_adjustment(question, answer_value, package, subtotal=None):
     """
-    Calculate price adjustment for a question answer
-    Returns Decimal adjustment amount
+    Calculate price adjustment for a question answer.
+    For percent-of-total types, pass subtotal (base + trip_surcharge + fixed adjustments).
     """
     try:
         pricing_rule = QuestionPricing.objects.get(question=question, package=package)
@@ -41,21 +44,21 @@ def calculate_question_price_adjustment(question, answer_value, package):
         return Decimal('0.00')
     
     if question.question_type == 'yes_no':
-        # Only apply pricing if answer is True (Yes) and pricing type is not 'ignore'
         if answer_value and pricing_rule.yes_pricing_type != 'ignore':
             return apply_pricing_logic(
                 pricing_rule.yes_pricing_type,
                 pricing_rule.yes_value,
-                package.base_price
+                package.base_price,
+                subtotal=subtotal,
             )
     
     return Decimal('0.00')
 
 
-def calculate_option_price_adjustment(option, package):
+def calculate_option_price_adjustment(option, package, subtotal=None):
     """
-    Calculate price adjustment for a selected option
-    Returns Decimal adjustment amount
+    Calculate price adjustment for a selected option.
+    For percent-of-total types, pass subtotal.
     """
     try:
         pricing_rule = OptionPricing.objects.get(option=option, package=package)
@@ -66,80 +69,134 @@ def calculate_option_price_adjustment(option, package):
         return apply_pricing_logic(
             pricing_rule.pricing_type,
             pricing_rule.value,
-            package.base_price
+            package.base_price,
+            subtotal=subtotal,
         )
     
     return Decimal('0.00')
 
 
-def apply_pricing_logic(pricing_type, value, base_price):
+def apply_pricing_logic(pricing_type, value, base_price, subtotal=None):
     """
-    Apply pricing logic based on type and value - FIXED AMOUNTS ONLY
-    Returns Decimal adjustment amount
+    Apply pricing logic. Fixed types use base_price; percent-of-total use subtotal when provided.
     """
-    if pricing_type == 'upcharge_percent':  # Now treats as fixed upcharge
+    if pricing_type in PERCENT_OF_TOTAL_TYPES:
+        if subtotal is None or subtotal == 0:
+            return Decimal('0.00')
+        pct = value / Decimal('100')
+        return (subtotal * pct) if pricing_type == 'upcharge_percent_of_total' else -(subtotal * pct)
+    if pricing_type == 'upcharge_percent':  # fixed upcharge
         return value
-    elif pricing_type == 'discount_percent':  # Now treats as fixed discount
+    if pricing_type == 'discount_percent':  # fixed discount
         return -value
-    elif pricing_type == 'fixed_price':
+    if pricing_type == 'fixed_price':
         return value
-    else:  # ignore
+    return Decimal('0.00')
+
+
+def _get_fixed_adjustment_question(question, answer_value, package):
+    """Return fixed-only adjustment for a question (0 for percent-of-total)."""
+    try:
+        pricing_rule = QuestionPricing.objects.get(question=question, package=package)
+    except QuestionPricing.DoesNotExist:
         return Decimal('0.00')
+    if question.question_type != 'yes_no' or not answer_value or pricing_rule.yes_pricing_type == 'ignore':
+        return Decimal('0.00')
+    if pricing_rule.yes_pricing_type in PERCENT_OF_TOTAL_TYPES:
+        return Decimal('0.00')
+    return apply_pricing_logic(
+        pricing_rule.yes_pricing_type, pricing_rule.yes_value, package.base_price, subtotal=None
+    )
+
+
+def _get_fixed_adjustment_option(option, package):
+    """Return fixed-only adjustment for an option (0 for percent-of-total)."""
+    try:
+        pricing_rule = OptionPricing.objects.get(option=option, package=package)
+    except OptionPricing.DoesNotExist:
+        return Decimal('0.00')
+    if pricing_rule.pricing_type == 'ignore' or pricing_rule.pricing_type in PERCENT_OF_TOTAL_TYPES:
+        return Decimal('0.00')
+    return apply_pricing_logic(
+        pricing_rule.pricing_type, pricing_rule.value, package.base_price, subtotal=None
+    )
+
+
+def _get_percent_of_total_entries_question(question, answer_value, package):
+    """Return [(sign, value)] for percent-of-total pricing on this question."""
+    try:
+        pricing_rule = QuestionPricing.objects.get(question=question, package=package)
+    except QuestionPricing.DoesNotExist:
+        return []
+    if question.question_type != 'yes_no' or not answer_value or pricing_rule.yes_pricing_type not in PERCENT_OF_TOTAL_TYPES:
+        return []
+    sign = 1 if pricing_rule.yes_pricing_type == 'upcharge_percent_of_total' else -1
+    return [(sign, pricing_rule.yes_value)]
+
+
+def _get_percent_of_total_entries_option(option, package):
+    """Return [(sign, value)] for percent-of-total pricing on this option."""
+    try:
+        pricing_rule = OptionPricing.objects.get(option=option, package=package)
+    except OptionPricing.DoesNotExist:
+        return []
+    if pricing_rule.pricing_type not in PERCENT_OF_TOTAL_TYPES:
+        return []
+    sign = 1 if pricing_rule.pricing_type == 'upcharge_percent_of_total' else -1
+    return [(sign, pricing_rule.value)]
 
 
 def calculate_total_quote_price(contact, package, answers_data):
     """
-    Calculate total price for a quote including all adjustments
-    Returns dict with price breakdown
+    Calculate total price for a quote. Two-pass: fixed adjustments first, then % of subtotal.
     """
     base_price = package.base_price
     trip_surcharge = Decimal('0.00')
-    question_adjustments = Decimal('0.00')
-    
-    # Find nearest location and apply trip surcharge
     nearest_location, distance = find_nearest_location(
-        contact.latitude, 
-        contact.longitude
+        contact.latitude,
+        contact.longitude,
     )
-    
     if nearest_location:
         trip_surcharge = nearest_location.trip_surcharge
-    
-    # Calculate question adjustments
+
+    fixed_sum = Decimal('0.00')
+    percent_entries = []
+
     for answer_data in answers_data:
-        question_id = answer_data['question_id']
-        
+        question_id = answer_data.get('question_id')
         try:
             question = package.service.questions.get(id=question_id, is_active=True)
-        except:
+        except Exception:
             continue
-        
+
         if question.question_type == 'yes_no':
             yes_no_answer = answer_data.get('yes_no_answer', False)
-            adjustment = calculate_question_price_adjustment(
-                question, yes_no_answer, package
-            )
-            question_adjustments += adjustment
-            
+            fixed_sum += _get_fixed_adjustment_question(question, yes_no_answer, package)
+            percent_entries.extend(_get_percent_of_total_entries_question(question, yes_no_answer, package))
         elif question.question_type == 'options':
             option_id = answer_data.get('selected_option_id')
             if option_id:
                 try:
                     option = question.options.get(id=option_id, is_active=True)
-                    adjustment = calculate_option_price_adjustment(option, package)
-                    question_adjustments += adjustment
-                except:
-                    continue
-    
+                    fixed_sum += _get_fixed_adjustment_option(option, package)
+                    percent_entries.extend(_get_percent_of_total_entries_option(option, package))
+                except Exception:
+                    pass
+
+    subtotal = base_price + trip_surcharge + fixed_sum
+    percent_sum = Decimal('0.00')
+    for sign, value in percent_entries:
+        percent_sum += subtotal * (Decimal(sign) * value / Decimal('100'))
+    question_adjustments = fixed_sum + percent_sum
     total_price = base_price + trip_surcharge + question_adjustments
-    
+
     return {
         'base_price': base_price,
         'trip_surcharge': trip_surcharge,
         'question_adjustments': question_adjustments,
         'total_price': total_price,
         'nearest_location': nearest_location,
-        'distance_to_location': distance
+        'distance_to_location': distance,
     }
 
 

@@ -307,23 +307,27 @@ class QuestionPricing(models.Model):
     PRICING_TYPES = [
         ('upcharge_percent', 'Fixed Upcharge Amount'),
         ('discount_percent', 'Fixed Discount Amount'),
+        ('upcharge_percent_of_total', 'Upcharge % of Package Total'),
+        ('discount_percent_of_total', 'Discount % of Package Total'),
         ('fixed_price', 'Fixed Price'),
         ('ignore', 'Ignore'),
     ]
+    # Types that are applied as percentage of package subtotal (base + sqft + surcharge + fixed adjustments)
+    PERCENT_OF_TOTAL_TYPES = ('upcharge_percent_of_total', 'discount_percent_of_total')
     
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     question = models.ForeignKey(Question, related_name='pricing_rules', on_delete=models.CASCADE)
     package = models.ForeignKey('Package', related_name='question_pricing', on_delete=models.CASCADE)
     
     # For Yes/No questions - pricing when answer is "Yes"
-    yes_pricing_type = models.CharField(max_length=20, choices=PRICING_TYPES, default='ignore')
+    yes_pricing_type = models.CharField(max_length=30, choices=PRICING_TYPES, default='ignore')
     yes_value = models.DecimalField(
-        max_digits=10, 
-        decimal_places=2, 
+        max_digits=10,
+        decimal_places=2,
         default=Decimal('0.00'),
-        help_text="Fixed amount to add/subtract (e.g., 12.00 for $12)"
+        help_text="Fixed amount (e.g. 12.00) or percentage for percent-of-total (e.g. 10 for 10%)",
     )
-    
+
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -341,15 +345,18 @@ class SubQuestionPricing(models.Model):
     PRICING_TYPES = [
         ('upcharge_percent', 'Fixed Upcharge Amount'),
         ('discount_percent', 'Fixed Discount Amount'),
+        ('upcharge_percent_of_total', 'Upcharge % of Package Total'),
+        ('discount_percent_of_total', 'Discount % of Package Total'),
         ('fixed_price', 'Fixed Price'),
         ('ignore', 'Ignore'),
     ]
+    PERCENT_OF_TOTAL_TYPES = ('upcharge_percent_of_total', 'discount_percent_of_total')
     
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     sub_question = models.ForeignKey(SubQuestion, related_name='pricing_rules', on_delete=models.CASCADE)
     package = models.ForeignKey('Package', related_name='sub_question_pricing', on_delete=models.CASCADE)
     
-    yes_pricing_type = models.CharField(max_length=20, choices=PRICING_TYPES, default='ignore')
+    yes_pricing_type = models.CharField(max_length=30, choices=PRICING_TYPES, default='ignore')
     yes_value = models.DecimalField(
         max_digits=10, 
         decimal_places=2, 
@@ -374,16 +381,19 @@ class OptionPricing(models.Model):
     PRICING_TYPES = [
         ('upcharge_percent', 'Fixed Upcharge Amount'),
         ('discount_percent', 'Fixed Discount Amount'),
+        ('upcharge_percent_of_total', 'Upcharge % of Package Total'),
+        ('discount_percent_of_total', 'Discount % of Package Total'),
         ('fixed_price', 'Fixed Price'),
         ('per_quantity', 'Price Per Quantity'),  # New for quantity questions
         ('ignore', 'Ignore'),
     ]
+    PERCENT_OF_TOTAL_TYPES = ('upcharge_percent_of_total', 'discount_percent_of_total')
     
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     option = models.ForeignKey(QuestionOption, related_name='pricing_rules', on_delete=models.CASCADE)
     package = models.ForeignKey('Package', related_name='option_pricing', on_delete=models.CASCADE)
     
-    pricing_type = models.CharField(max_length=20, choices=PRICING_TYPES, default='ignore')
+    pricing_type = models.CharField(max_length=30, choices=PRICING_TYPES, default='ignore')
     value = models.DecimalField(
         max_digits=10, 
         decimal_places=2, 

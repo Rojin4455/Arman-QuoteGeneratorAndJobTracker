@@ -1,4 +1,7 @@
 # conditional_pricing_logic.py - Pricing calculations for conditional questions
+from decimal import Decimal
+
+from service_app.models import QuestionPricing, OptionPricing, SubQuestionPricing
 
 """
 CONDITIONAL QUESTION PRICING LOGIC
@@ -47,19 +50,28 @@ def calculate_conditional_question_pricing(service_selection, package):
                     question=question, package=package
                 ).first()
                 if pricing and pricing.yes_pricing_type != 'ignore':
-                    total_adjustment += pricing.yes_value
-        
+                    if pricing.yes_pricing_type in ('upcharge_percent_of_total', 'discount_percent_of_total'):
+                        continue  # percent-of-total needs subtotal; not supported in this flow
+                    if pricing.yes_pricing_type == 'discount_percent':
+                        total_adjustment -= pricing.yes_value
+                    else:
+                        total_adjustment += pricing.yes_value
+
         elif question.question_type in ['describe', 'quantity']:
             for option_response in question_response.option_responses.all():
                 pricing = OptionPricing.objects.filter(
                     option=option_response.option, package=package
                 ).first()
                 if pricing and pricing.pricing_type != 'ignore':
+                    if pricing.pricing_type in ('upcharge_percent_of_total', 'discount_percent_of_total'):
+                        continue
                     if pricing.pricing_type == 'per_quantity':
                         total_adjustment += pricing.value * option_response.quantity
+                    elif pricing.pricing_type == 'discount_percent':
+                        total_adjustment -= pricing.value
                     else:
                         total_adjustment += pricing.value
-        
+
         elif question.question_type == 'multiple_yes_no':
             for sub_response in question_response.sub_question_responses.all():
                 if sub_response.answer is True:
@@ -67,7 +79,12 @@ def calculate_conditional_question_pricing(service_selection, package):
                         sub_question=sub_response.sub_question, package=package
                     ).first()
                     if pricing and pricing.yes_pricing_type != 'ignore':
-                        total_adjustment += pricing.yes_value
+                        if pricing.yes_pricing_type in ('upcharge_percent_of_total', 'discount_percent_of_total'):
+                            continue
+                        if pricing.yes_pricing_type == 'discount_percent':
+                            total_adjustment -= pricing.yes_value
+                        else:
+                            total_adjustment += pricing.yes_value
     
     return total_adjustment
 
