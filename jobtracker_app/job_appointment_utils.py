@@ -117,31 +117,57 @@ def get_assignee_ghl_ids_without_matching_appointment(job):
     return without
 
 
+def _job_contact_dict(contact):
+    """Build contact dict for API response."""
+    if not contact:
+        return None
+    name = f"{getattr(contact, 'first_name', '') or ''} {getattr(contact, 'last_name', '') or ''}".strip()
+    return {
+        'id': getattr(contact, 'contact_id', None),
+        'name': name or getattr(contact, 'name', None),
+        'email': getattr(contact, 'email', None),
+    }
+
+
 def get_slot_reserved_info_for_job(job):
     """
     Same manual check as JobSerializer.get_slot_reserved_info: returns slot_reserved and
-    appointment details if any assignee has a matching appointment, else slot_reserved=False.
-    Used by the serializer so logic lives in one place.
+    appointment details if any assignee has a matching appointment (optionally filtered by
+    job contact), else slot_reserved=False. Includes job_contact when available.
     """
     slot = _get_job_slot_utc_and_location(job)
     if not slot:
         return None
     job_start_utc, job_end_utc, location_id = slot
 
+    job_contact = getattr(job, 'contact', None)
+    if not job_contact and getattr(job, 'submission_id', None):
+        try:
+            submission = getattr(job, 'submission', None)
+            job_contact = getattr(submission, 'contact', None) if submission else None
+        except Exception:
+            job_contact = None
+
+    base_filter = {
+        'start_time': job_start_utc,
+        'end_time': job_end_utc,
+        'calendar__name': 'Reccuring Service Calendar',
+        'location_id': location_id,
+    }
+    if job_contact is not None:
+        base_filter['contact'] = job_contact
+
     for assignment in job.assignments.select_related('user').all():
         if not assignment.user:
             continue
         try:
             appointment = Appointment.objects.filter(
-                start_time=job_start_utc,
-                end_time=job_end_utc,
-                calendar__name="Reccuring Service Calendar",
-                location_id=location_id,
+                **base_filter,
                 assigned_user=assignment.user,
             ).select_related('calendar', 'assigned_user', 'contact').first()
 
             if appointment:
-                return {
+                result = {
                     'slot_reserved': True,
                     'appointment': {
                         'id': str(appointment.id),
@@ -157,16 +183,18 @@ def get_slot_reserved_info_for_job(job):
                             'name': appointment.assigned_user.get_full_name() or appointment.assigned_user.username,
                             'email': appointment.assigned_user.email,
                         } if appointment.assigned_user else None,
-                        'contact': {
-                            'id': appointment.contact.contact_id,
-                            'name': f"{appointment.contact.first_name or ''} {appointment.contact.last_name or ''}".strip(),
-                            'email': appointment.contact.email,
-                        } if appointment.contact else None,
+                        'contact': _job_contact_dict(appointment.contact),
                         'notes': appointment.notes,
                         'address': appointment.address,
                     },
                 }
+                if job_contact is not None:
+                    result['job_contact'] = _job_contact_dict(job_contact)
+                return result
         except Exception:
             continue
 
-    return {'slot_reserved': False, 'appointment': None}
+    out = {'slot_reserved': False, 'appointment': None}
+    if job_contact is not None:
+        out['job_contact'] = _job_contact_dict(job_contact)
+    return out
