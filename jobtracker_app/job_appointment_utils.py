@@ -195,7 +195,9 @@ def get_slot_reserved_info_for_job(job):
                 **base_filter,
                 assigned_user=assignment.user,
             ).select_related('calendar', 'assigned_user', 'contact')
+            print("appointment_debug:", appointment_debug.count())
             for a in appointment_debug:
+                print("appointment:", a.id)
                 print("--------------------------------")
                 print("calendar:", a.calendar.name, "assigned_user:", a.assigned_user.username, "contact:", a.contact.name if a.contact else None)
                 print("start_time:", a.start_time, "end_time:", a.end_time)
