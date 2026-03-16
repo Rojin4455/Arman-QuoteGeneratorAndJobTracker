@@ -179,8 +179,8 @@ def get_slot_reserved_info_for_job(job):
         'calendar__name': 'Reccuring Service Calendar',
         'location_id': location_id,
     }
-    if job_contact is not None:
-        base_filter['contact'] = job_contact
+    # if job_contact is not None:
+    #     base_filter['contact'] = job_contact
 
     for assignment in job.assignments.select_related('user').all():
         if not assignment.user:
