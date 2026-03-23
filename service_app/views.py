@@ -473,10 +473,10 @@ class QuestionDetailView(AccountScopedQuerysetMixin, generics.RetrieveUpdateDest
             return QuestionCreateSerializer
         return QuestionSerializer
 
-    def perform_destroy(self, instance):
-        # Soft delete
-        instance.is_active = False
-        instance.save()
+    # def perform_destroy(self, instance):
+    #     # Soft delete
+    #     instance.is_active = False
+    #     instance.save()
 
 # Question Option Views
 class QuestionOptionListCreateView(AccountScopedQuerysetMixin, generics.ListCreateAPIView):
