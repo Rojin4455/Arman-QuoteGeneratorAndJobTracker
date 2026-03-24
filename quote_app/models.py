@@ -169,7 +169,7 @@ class CustomService(models.Model):
     product_name = models.CharField(max_length=200)
     description = models.TextField(blank=True, null=True)
     is_active = models.BooleanField(default=True)
-    price = models.IntegerField()
+    price = models.DecimalField(max_digits=12, decimal_places=2, default=Decimal('0.00'))
 
 
 
