@@ -119,14 +119,16 @@ class InitialDataView(APIView):
         services = Service.objects.filter(is_active=True, account=account).order_by('order', 'name')
         size_ranges = GlobalSizePackage.objects.filter(account=account).order_by('order', 'min_sqft')
         
-        # Get project-based employees (active only)
+        # Get project-based employees (active only, exclude Django superusers)
         project_employees = EmployeeProfile.objects.filter(
             pay_scale_type='project',
-            status='active'
+            status='active',
+            user__isnull=False,
+            user__is_active=True,
+            user__is_superuser=False,
         ).select_related('user').order_by('user__first_name', 'user__last_name', 'user__username')
-        
-        # Extract User objects from EmployeeProfile (filter out None users)
-        project_users = [emp.user for emp in project_employees if emp.user and emp.user.is_active]
+
+        project_users = [emp.user for emp in project_employees]
         
         return Response({
             'locations': LocationPublicSerializer(locations, many=True).data,
