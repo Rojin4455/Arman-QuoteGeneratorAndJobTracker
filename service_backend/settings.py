@@ -57,6 +57,7 @@ INSTALLED_APPS = [
     'jobtracker_app',
     'payroll_app',
     'dashboard_app',
+    'onestepgps_app'
 ]
 
 MIDDLEWARE = [
@@ -165,6 +166,10 @@ REST_FRAMEWORK = {
     "DEFAULT_PAGINATION_CLASS": "rest_framework.pagination.PageNumberPagination",
     "PAGE_SIZE": 20,
 }
+
+# One Step GPS inbound webhooks (Basic auth). Set both in .env for production.
+ONESTEPGPS_WEBHOOK_USERNAME = config('ONESTEPGPS_WEBHOOK_USERNAME', default='')
+ONESTEPGPS_WEBHOOK_PASSWORD = config('ONESTEPGPS_WEBHOOK_PASSWORD', default='')
 
 
 SIMPLE_JWT = {

@@ -82,6 +82,12 @@ def resolve_user_identifier(identifier):
     return None
 
 
+def is_truthy_param(value):
+    if value is None:
+        return False
+    return str(value).strip().lower() in {'1', 'true', 'yes', 'y', 'on'}
+
+
 def apply_job_filters(queryset, request, skip_assignee_ids=False, allow_to_convert=False):
     """
     Apply common filters to job queryset based on query parameters.
@@ -135,8 +141,14 @@ def apply_job_filters(queryset, request, skip_assignee_ids=False, allow_to_conve
         except (ValueError, AttributeError):
             pass  # Invalid UUID format, skip this filter
     
+    # Filter by unassigned jobs (no technician assignment).
+    # If unassigned=true, this takes precedence over assignee_ids.
+    unassigned = is_truthy_param(params.get('unassigned'))
+    if unassigned:
+        queryset = queryset.filter(assignments__isnull=True)
+
     # Filter by assignees (user IDs, UUIDs, or emails); exclude superusers when account is set
-    if not skip_assignee_ids:
+    if not skip_assignee_ids and not unassigned:
         assignee_ids = params.get('assignee_ids')
         if assignee_ids:
             assignee_list = [a.strip() for a in assignee_ids.split(',') if a.strip()]
@@ -506,13 +518,17 @@ class OccurrenceListView(APIView):
             return Response([], status=200)
         
         is_admin = getattr(user, 'is_admin', False)
+        unassigned = is_truthy_param(request.query_params.get('unassigned'))
         assignee_ids_param = request.query_params.get('assignee_ids')
         
         # Handle assignee_ids filtering based on user role
         skip_assignee_ids_in_filter = False
         if is_admin:
+            if unassigned:
+                qs = qs.filter(assignments__isnull=True)
+                skip_assignee_ids_in_filter = True
             # Admin: if assignee_ids provided, filter by those assignees only (within account)
-            if assignee_ids_param:
+            elif assignee_ids_param:
                 assignee_list = [a.strip() for a in assignee_ids_param.split(',') if a.strip()]
                 if assignee_list:
                     user_ids = []
@@ -596,33 +612,37 @@ class AppointmentCalendarView(APIView):
             return Response([], status=200)
         
         is_admin = getattr(user, 'is_admin', False)
+        unassigned = is_truthy_param(request.query_params.get('unassigned'))
         
         # Filter by assigned users (check this first for admin users)
         assigned_user_ids = request.query_params.get('assigned_user_ids')
         
         # For admin users: require assigned_user_ids to be provided, otherwise return empty
         if is_admin:
-            if not assigned_user_ids:
+            if unassigned:
+                qs = qs.filter(assigned_user__isnull=True, users__isnull=True).distinct()
+            elif not assigned_user_ids:
                 # Return empty appointments if assigned_user_ids is not provided
                 return Response([], status=200)
             
             # Parse assigned_user_ids for admin
-            assigned_list = [a.strip() for a in assigned_user_ids.split(',') if a.strip()]
-            if not assigned_list:
-                # Return empty if assigned_user_ids is empty after parsing
-                return Response([], status=200)
-            
-            user_ids = []
-            for assignee in assigned_list:
-                user_id = resolve_user_identifier(assignee)
-                if user_id:
-                    user_ids.append(user_id)
-            
-            if user_ids:
-                qs = qs.filter(assigned_user__id__in=user_ids)
-            else:
-                # No valid user IDs found, return empty
-                return Response([], status=200)
+            if not unassigned:
+                assigned_list = [a.strip() for a in assigned_user_ids.split(',') if a.strip()]
+                if not assigned_list:
+                    # Return empty if assigned_user_ids is empty after parsing
+                    return Response([], status=200)
+                
+                user_ids = []
+                for assignee in assigned_list:
+                    user_id = resolve_user_identifier(assignee)
+                    if user_id:
+                        user_ids.append(user_id)
+                
+                if user_ids:
+                    qs = qs.filter(assigned_user__id__in=user_ids)
+                else:
+                    # No valid user IDs found, return empty
+                    return Response([], status=200)
         else:
             # Normal users: only appointments assigned to them or where they are in users list
             qs = qs.filter(
@@ -640,6 +660,9 @@ class AppointmentCalendarView(APIView):
                             user_ids.append(user_id)
                     if user_ids:
                         qs = qs.filter(assigned_user__id__in=user_ids)
+
+            if unassigned:
+                qs = qs.filter(assigned_user__isnull=True, users__isnull=True).distinct()
 
         # Filter by status
         status = request.query_params.get('status')
@@ -730,9 +753,15 @@ class AppointmentViewSet(AccountScopedQuerysetMixin, viewsets.ModelViewSet):
             if status_list:
                 qs = qs.filter(appointment_status__in=status_list)
         
+        # Filter by unassigned appointments:
+        # no primary assigned_user and no users in the many-to-many assignee list.
+        unassigned = is_truthy_param(self.request.query_params.get('unassigned'))
+        if unassigned:
+            qs = qs.filter(assigned_user__isnull=True, users__isnull=True).distinct()
+
         # Filter by assigned_user_ids (comma-separated list of IDs, UUIDs, or emails)
         assigned_user_ids = self.request.query_params.get('assigned_user_ids')
-        if assigned_user_ids:
+        if assigned_user_ids and not unassigned:
             assigned_list = [a.strip() for a in assigned_user_ids.split(',') if a.strip()]
             if assigned_list:
                 user_ids = []
@@ -745,7 +774,7 @@ class AppointmentViewSet(AccountScopedQuerysetMixin, viewsets.ModelViewSet):
         
         # Filter by assigned_user_id (single ID, UUID, or email)
         assigned_user_id = self.request.query_params.get('assigned_user_id')
-        if assigned_user_id:
+        if assigned_user_id and not unassigned:
             user_id = resolve_user_identifier(assigned_user_id)
             if user_id:
                 qs = qs.filter(assigned_user__id=user_id)

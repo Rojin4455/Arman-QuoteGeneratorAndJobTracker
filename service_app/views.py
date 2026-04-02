@@ -9,6 +9,7 @@ from django.contrib.auth import authenticate
 from django.db.models import Count, Avg, Prefetch
 from django.db import transaction
 from django.shortcuts import get_object_or_404
+from django.utils import timezone
 from decimal import Decimal
 import requests
 import os
@@ -26,6 +27,7 @@ from .models import (
     Question, QuestionOption, QuestionPricing, OptionPricing,
     Order, OrderQuestionAnswer,SubQuestionPricing,SubQuestion,QuestionResponse, GlobalBasePrice
 )
+from jobtracker_app.models import JobAssignment
 from .serializers import (
     UserSerializer, LoginSerializer, LocationSerializer, ServiceSerializer,
     ServiceListSerializer, ServiceBasicSerializer, PackageSerializer, FeatureSerializer,
@@ -1239,3 +1241,39 @@ class UserDetailView(AccountScopedQuerysetMixin, generics.RetrieveUpdateDestroyA
                 return obj
             raise permissions.PermissionDenied('Not allowed')
         return obj
+
+
+class UserFutureJobUnassignView(APIView):
+    """
+    Admin endpoint to remove a technician from all future jobs in the same account.
+    Past jobs are not modified.
+    """
+    permission_classes = [AccountScopedPermission, IsAdminPermission]
+
+    def post(self, request, pk):
+        account = getattr(request, 'account', None)
+        if not account:
+            return Response({'detail': 'Account scope required.'}, status=status.HTTP_403_FORBIDDEN)
+
+        technician = get_object_or_404(
+            User.objects.filter(account=account, is_superuser=False),
+            pk=pk,
+        )
+
+        now = timezone.now()
+        assignments_qs = JobAssignment.objects.filter(
+            user=technician,
+            job__account=account,
+            job__scheduled_at__gt=now,
+        )
+
+        distinct_jobs_count = assignments_qs.values('job_id').distinct().count()
+        removed_assignments_count, _ = assignments_qs.delete()
+
+        return Response({
+            'detail': 'Technician unassigned from future jobs successfully.',
+            'user_id': technician.id,
+            'future_jobs_affected': distinct_jobs_count,
+            'assignments_removed': removed_assignments_count,
+            'cutoff': now.isoformat(),
+        }, status=status.HTTP_200_OK)
