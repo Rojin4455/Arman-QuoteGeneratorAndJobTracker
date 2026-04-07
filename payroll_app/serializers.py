@@ -4,7 +4,12 @@ import pytz
 from django.utils import timezone as django_timezone
 from service_app.models import User
 from .models import (
-    EmployeeProfile, CollaborationRate, TimeEntry, Payout, PayrollSettings
+    EmployeeProfile,
+    CollaborationRate,
+    TimeEntry,
+    Payout,
+    PayrollSettings,
+    EmployeeTimeOff,
 )
 from .utils import get_user_timezone, convert_utc_to_user_timezone
 
@@ -177,6 +182,61 @@ class CollaborationRateCreateSerializer(serializers.ModelSerializer):
         if value < 0 or value > 100:
             raise serializers.ValidationError("percentage must be between 0 and 100")
         return value
+
+
+class AvailableEmployeeSerializer(serializers.ModelSerializer):
+    """Minimal user shape for who is not on time off in a date range."""
+    full_name = serializers.SerializerMethodField()
+
+    class Meta:
+        model = User
+        fields = ['id', 'username', 'email', 'first_name', 'last_name', 'full_name']
+
+    def get_full_name(self, obj):
+        return obj.get_full_name() or obj.username
+
+
+class EmployeeTimeOffSerializer(serializers.ModelSerializer):
+    employee_name = serializers.CharField(source='employee.get_full_name', read_only=True)
+    employee_email = serializers.EmailField(source='employee.email', read_only=True)
+
+    class Meta:
+        model = EmployeeTimeOff
+        fields = [
+            'id',
+            'employee',
+            'employee_name',
+            'employee_email',
+            'start_date',
+            'end_date',
+            'kind',
+            'notes',
+            'created_at',
+            'updated_at',
+        ]
+        read_only_fields = ['id', 'created_at', 'updated_at']
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        request = self.context.get('request')
+        if request and request.user.is_authenticated and not getattr(
+            request.user, 'is_admin', False
+        ):
+            self.fields['employee'].read_only = True
+
+    def validate(self, data):
+        start = data.get('start_date')
+        end = data.get('end_date')
+        if self.instance:
+            if start is None:
+                start = self.instance.start_date
+            if end is None:
+                end = self.instance.end_date
+        if start and end and end < start:
+            raise serializers.ValidationError({
+                'end_date': 'End date must be on or after start date.',
+            })
+        return data
 
 
 class TimeEntrySerializer(serializers.ModelSerializer):

@@ -77,6 +77,59 @@ class EmployeeProfile(models.Model):
         super().save(*args, **kwargs)
 
 
+class EmployeeTimeOff(models.Model):
+    """
+    Calendar time off for an employee: single day (start_date == end_date)
+    or inclusive date range. Scoped via employee.account like TimeEntry.
+    """
+    KIND_CHOICES = [
+        ('day_off', 'Day off'),
+        ('vacation', 'Vacation'),
+        ('sick', 'Sick'),
+        ('personal', 'Personal'),
+        ('other', 'Other'),
+    ]
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    employee = models.ForeignKey(
+        User,
+        on_delete=models.CASCADE,
+        related_name='time_off_entries',
+    )
+    start_date = models.DateField()
+    end_date = models.DateField(
+        help_text='Last day off (inclusive).'
+    )
+    kind = models.CharField(
+        max_length=20,
+        choices=KIND_CHOICES,
+        default='day_off',
+    )
+    notes = models.TextField(blank=True, null=True)
+
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = 'employee_time_off'
+        ordering = ['-start_date', '-created_at']
+        indexes = [
+            models.Index(fields=['employee', 'start_date', 'end_date']),
+        ]
+
+    def __str__(self):
+        return (
+            f"{self.employee.get_full_name() or self.employee.username} "
+            f"{self.start_date}–{self.end_date} ({self.kind})"
+        )
+
+    def clean(self):
+        if self.end_date and self.start_date and self.end_date < self.start_date:
+            raise ValidationError({
+                'end_date': 'End date must be on or after start date.',
+            })
+
+
 class CollaborationRate(models.Model):
     """Percentage rates for project-based employees based on team size"""
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)

@@ -29,6 +29,26 @@ class User(AbstractUser):
     )
     ghl_user_id = models.CharField(max_length=255, unique=True, null=True, blank=True)
     is_admin = models.BooleanField(default=False)
+    payroll_can_view_team_data = models.BooleanField(
+        default=True,
+        help_text=(
+            'When True (and user is admin: manager/supervisor), payroll reads see all account '
+            'team data for payouts list, time-entries today, and active-session. '
+            "When False, those endpoints only return the user's own data (worker scope)."
+        ),
+    )
+    can_access_service_management_tool = models.BooleanField(
+        default=False,
+        help_text='Grants access to the service management tool for this user.',
+    )
+    can_access_location_management_tool = models.BooleanField(
+        default=False,
+        help_text='Grants access to the location management tool for this user.',
+    )
+    can_access_house_size_management_tool = models.BooleanField(
+        default=,
+        help_text='Grants access to the house size management tool for this user.',
+    )
     role = models.CharField(max_length=20, choices=ROLE_CHOICES, default=ROLE_WORKER)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)

@@ -598,12 +598,21 @@ class InvoiceViewSet(AccountScopedQuerysetMixin, viewsets.ModelViewSet):
         """
         Sales Forecasting endpoint (Job-based).
         Timeline: Previous 3 months (Actual) + Next 6 months (Forecast).
-        Forecast per month = (Average of same month from previous 5 years, from completed jobs)
-                            + (Total scheduled jobs for that month).
-        Data source: Job table only (no Invoice). Actual = completed job revenue; scheduled = non-cancelled jobs.
-        Optional assignee_ids (comma-separated user IDs): when provided, only jobs assigned to those users
-        are included, so scheduled/forecast totals match the calendar view (job/occurrences with same filter).
-        Scoped to request.account.
+
+        Forecast is fixed once a month begins:
+        - baseline_scheduled_revenue = jobs scheduled in that calendar month with qualifying statuses
+          that existed before the first day of that month (created_at < month start). This approximates
+          the schedule as-of month open; jobs created later are \"bonus\" and do not change the forecast.
+        - historical_average = mean completed revenue for the same calendar month in the prior 5 years
+          (target year excluded, so the target month is not blended with its own actuals).
+        - forecast = historical_average + baseline_scheduled_revenue (locked after month start).
+
+        Months not yet started use the same formula with all currently scheduled jobs in that month as a
+        provisional forecast until the month locks.
+
+        Actual = all completed job revenue in the month (includes jobs added mid-month). Variance = actual - forecast.
+        Data source: Job table only (no Invoice).
+        Optional assignee_ids: same as calendar filter. Scoped to request.account.
         """
         account = getattr(request, 'account', None)
         if not account:
@@ -647,22 +656,18 @@ class InvoiceViewSet(AccountScopedQuerysetMixin, viewsets.ModelViewSet):
                 next_first = datetime(y, m + 1, 1)
             return timezone.make_aware(next_first, timezone.get_current_timezone()) - timedelta(microseconds=1)
 
-        # Historical: average of same month completed job revenue over previous years.
-        # Includes current year for months that have already passed (so e.g. Jan 2026 counts for January).
-        # Years used dynamically: last 5 years + current year when month_num <= current_month. Divide by count.
+        # Historical: average of same month completed revenue over the 5 calendar years before the target year.
+        # The target year is excluded so the month's forecast is not mixed with that year's same-month actuals.
         YEARS_BACK = 5
 
-        def historical_average_for_month(month_num):
-            years_included = list(range(current_year - YEARS_BACK, current_year))
-            if month_num <= current_month:
-                years_included.append(current_year)
-            years_included = [y for y in years_included if y >= 2000]
+        def historical_average_for_year_month(target_year, month_num):
+            years_included = [yy for yy in range(target_year - YEARS_BACK, target_year) if yy >= 2000]
             if not years_included:
                 return 0.0
             totals = []
-            for y in years_included:
-                start = first_day_tz(y, month_num)
-                end = last_day_tz(y, month_num)
+            for yy in years_included:
+                start = first_day_tz(yy, month_num)
+                end = last_day_tz(yy, month_num)
                 agg = (
                     jobs_base()
                     .filter(status='completed', scheduled_at__isnull=False, scheduled_at__gte=start, scheduled_at__lte=end)
@@ -676,31 +681,30 @@ class InvoiceViewSet(AccountScopedQuerysetMixin, viewsets.ModelViewSet):
         # pending, confirmed, on_the_way, completed, in_progress, service_due. Exclude cancelled and to_convert.
         SCHEDULED_STATUSES = ['pending', 'confirmed', 'on_the_way', 'completed', 'in_progress', 'service_due']
 
-        def scheduled_revenue_for_month(year, month):
+        def scheduled_aggregate_for_month(year, month, created_before=None):
             start = first_day_tz(year, month)
             end = last_day_tz(year, month)
-            agg = (
-                jobs_base()
-                .filter(
-                    status__in=SCHEDULED_STATUSES,
-                    scheduled_at__isnull=False,
-                    scheduled_at__gte=start,
-                    scheduled_at__lte=end,
-                )
-                .aggregate(s=Sum('total_price'))
+            qs = jobs_base().filter(
+                status__in=SCHEDULED_STATUSES,
+                scheduled_at__isnull=False,
+                scheduled_at__gte=start,
+                scheduled_at__lte=end,
             )
-            return float(agg['s'] or 0)
+            if created_before is not None:
+                qs = qs.filter(created_at__lt=created_before)
+            agg = qs.aggregate(s=Sum('total_price'), c=Count('id'))
+            return float(agg['s'] or 0), int(agg['c'] or 0)
 
         # Actual revenue for (year, month): completed jobs whose scheduled_at falls in that month (same as calendar)
-        def actual_revenue_for_month(year, month):
+        def actual_aggregate_for_month(year, month):
             start = first_day_tz(year, month)
             end = last_day_tz(year, month)
             agg = (
                 jobs_base()
                 .filter(status='completed', scheduled_at__isnull=False, scheduled_at__gte=start, scheduled_at__lte=end)
-                .aggregate(s=Sum('total_price'))
+                .aggregate(s=Sum('total_price'), c=Count('id'))
             )
-            return float(agg['s'] or 0)
+            return float(agg['s'] or 0), int(agg['c'] or 0)
 
         MONTH_NAMES = ['', 'January', 'February', 'March', 'April', 'May', 'June',
                        'July', 'August', 'September', 'October', 'November', 'December']
@@ -726,26 +730,72 @@ class InvoiceViewSet(AccountScopedQuerysetMixin, viewsets.ModelViewSet):
 
         result_months = []
         for kind, y, m in months_list:
-            hist_avg = historical_average_for_month(m)
-            sched = scheduled_revenue_for_month(y, m)
-            forecast_val = hist_avg + sched
-            actual_val = actual_revenue_for_month(y, m) if (y < current_year or (y == current_year and m <= current_month)) else None
+            month_start = first_day_tz(y, m)
+            hist_avg = historical_average_for_year_month(y, m)
+            sched_total, sched_count_total = scheduled_aggregate_for_month(y, m, created_before=None)
+
+            if month_start <= now:
+                baseline_sched, baseline_count = scheduled_aggregate_for_month(y, m, created_before=month_start)
+                forecast_locked = True
+            else:
+                baseline_sched, baseline_count = sched_total, sched_count_total
+                forecast_locked = False
+
+            forecast_val = hist_avg + baseline_sched
+            additional_sched = max(0.0, sched_total - baseline_sched) if forecast_locked else 0.0
+            additional_sched_count = max(0, sched_count_total - baseline_count) if forecast_locked else 0
+
+            has_actual_period = y < current_year or (y == current_year and m <= current_month)
+            if has_actual_period:
+                actual_val, actual_job_count = actual_aggregate_for_month(y, m)
+            else:
+                actual_val, actual_job_count = None, None
+
+            if actual_val is not None:
+                variance = actual_val - forecast_val
+                variance_percent = round((variance / forecast_val) * 100, 2) if forecast_val else None
+                vs_hist = actual_val - hist_avg
+            else:
+                variance = None
+                variance_percent = None
+                vs_hist = None
+
             month_label = f"{MONTH_NAMES[m]} {y}"
             result_months.append({
                 'type': kind,
                 'year': y,
                 'month': m,
                 'month_label': month_label,
+                'forecast_is_locked': forecast_locked,
                 'historical_average': round(hist_avg, 2),
-                'scheduled_revenue': round(sched, 2),
+                'baseline_scheduled_revenue': round(baseline_sched, 2),
+                'baseline_scheduled_job_count': baseline_count,
+                'scheduled_revenue': round(sched_total, 2),
+                'scheduled_revenue_total': round(sched_total, 2),
+                'scheduled_job_count_total': sched_count_total,
+                'additional_scheduled_revenue': round(additional_sched, 2),
+                'additional_scheduled_job_count': additional_sched_count,
                 'forecast': round(forecast_val, 2),
                 'actual': round(actual_val, 2) if actual_val is not None else None,
+                'actual_job_count': actual_job_count,
+                'variance': round(variance, 2) if variance is not None else None,
+                'variance_percent': variance_percent,
+                'actual_vs_historical_average': round(vs_hist, 2) if vs_hist is not None else None,
             })
 
         return Response({
             'forecast_generated_at': now.isoformat(),
             'data_source': 'Job table only',
-            'forecast_formula': 'Forecast = scheduled_revenue + historical_average. historical_average = (sum of same month completed job revenue for previous 5 years) / 5. scheduled_revenue = jobs scheduled for that month with status in: pending, confirmed, on_the_way, completed, in_progress, service_due (cancelled and to_convert excluded).',
+            'forecast_formula': (
+                'Locked forecast (month has started) = historical_average + baseline_scheduled_revenue. '
+                'historical_average = mean completed revenue for that calendar month over the 5 years before '
+                'the target year. baseline_scheduled_revenue = sum of total_price for jobs with scheduled_at in '
+                'that month, status in pending/confirmed/on_the_way/completed/in_progress/service_due, and '
+                'created_at strictly before the first instant of that month (schedule as of month open). '
+                'Jobs created on or after month start add to scheduled_revenue_total and actual when completed, '
+                'but do not change forecast. Future months not yet started use provisional forecast = '
+                'historical_average + all scheduled jobs in that month until the month begins.'
+            ),
             'timeline': {
                 'previous_3_months_actual': [r for r in result_months if r['type'] == 'actual'],
                 'next_6_months_forecast': [r for r in result_months if r['type'] == 'forecast'],

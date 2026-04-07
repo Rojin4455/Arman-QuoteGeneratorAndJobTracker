@@ -5,6 +5,7 @@ from . import views
 router = DefaultRouter()
 router.register(r'employees', views.EmployeeProfileViewSet, basename='employee-profile')
 router.register(r'time-entries', views.TimeEntryViewSet, basename='time-entry')
+router.register(r'time-off', views.EmployeeTimeOffViewSet, basename='employee-time-off')
 router.register(r'payouts', views.PayoutViewSet, basename='payout')
 router.register(r'settings', views.PayrollSettingsViewSet, basename='payroll-settings')
 

@@ -13,16 +13,36 @@ from accounts.permissions import AccountScopedPermission
 from accounts.mixins import AccountScopedQuerysetMixin
 from service_app.models import User
 from .models import (
-    EmployeeProfile, CollaborationRate, TimeEntry, Payout, PayrollSettings
+    EmployeeProfile,
+    CollaborationRate,
+    EmployeeTimeOff,
+    TimeEntry,
+    Payout,
+    PayrollSettings,
 )
 from .serializers import (
-    EmployeeProfileSerializer, CollaborationRateCreateSerializer,
-    TimeEntrySerializer, PayoutSerializer, PayrollSettingsSerializer
+    EmployeeProfileSerializer,
+    CollaborationRateCreateSerializer,
+    EmployeeTimeOffSerializer,
+    AvailableEmployeeSerializer,
+    TimeEntrySerializer,
+    PayoutSerializer,
+    PayrollSettingsSerializer,
 )
 
 # Minimum duration (in hours) to include in today_entries API. Entries with total_hours
 # below this are excluded from the response (e.g. accidental check-in/out within 60 seconds).
 MIN_DURATION_HOURS_FOR_TODAY = Decimal('1') / 60  # 60 seconds = 1 minute
+
+
+def _payroll_can_view_team_data(user):
+    """
+    Scope for account-wide payroll reads: payouts list, time-entries/today,
+    time-entries/active-session. Requires admin role (manager/supervisor) plus flag.
+    """
+    if not getattr(user, 'is_admin', False):
+        return False
+    return getattr(user, 'payroll_can_view_team_data', True)
 
 
 def _resolve_calculator_user_id(identifier, account):
@@ -289,25 +309,25 @@ class TimeEntryViewSet(AccountScopedQuerysetMixin, viewsets.ModelViewSet):
         """
         Get active check-in session.
         
-        Normal users: Get their own active session (no employee_id needed)
-        Admin users: Can query any employee's active session or all active sessions
+        Limited payroll scope: Get their own active session (no employee_id needed).
+        Team payroll scope: Can query any employee's active session or all active sessions.
         
-        Query params (normal user): None
+        Query params (limited scope): None
         
-        Query params (admin user):
+        Query params (manager/supervisor with payroll_can_view_team_data=True):
         - employee_id: Optional - Get specific employee's active session
         - all: Optional - Set to 'true' to get all active sessions
         
         Examples:
-        - GET /api/payroll/time-entries/active-session/ (normal user - their own)
-        - GET /api/payroll/time-entries/active-session/?employee_id=123 (admin - specific employee)
-        - GET /api/payroll/time-entries/active-session/?all=true (admin - all active sessions)
+        - GET /api/payroll/time-entries/active-session/ (limited scope - their own)
+        - GET /api/payroll/time-entries/active-session/?employee_id=123 (team scope - specific employee)
+        - GET /api/payroll/time-entries/active-session/?all=true (team scope - all active sessions)
         """
         user = request.user
-        is_admin = getattr(user, 'is_admin', False)
+        can_view_team = _payroll_can_view_team_data(user)
         
         account = getattr(request, 'account', None)
-        if is_admin:
+        if can_view_team:
             # Admin can query all active sessions or a specific employee's (within account)
             get_all = request.query_params.get('all', '').lower() == 'true'
             employee_id = request.query_params.get('employee_id')
@@ -444,26 +464,26 @@ class TimeEntryViewSet(AccountScopedQuerysetMixin, viewsets.ModelViewSet):
         """
         Get today's time entries.
         
-        Normal users: Get their own today's entries (no employee_id needed)
-        Admin users: Can view all today's entries or filter by specific employee
+        Limited payroll scope: Get their own today's entries (no employee_id needed).
+        Team payroll scope: Can view all today's entries or filter by specific employee.
         
-        Query params (normal user): None
+        Query params (limited scope): None
         
-        Query params (admin user):
+        Query params (manager/supervisor with payroll_can_view_team_data=True):
         - employee_id: Optional - Filter by specific employee ID
-        - all: Optional - Set to 'true' to get all employees' entries (default for admin)
+        - all: Optional - Set to 'true' to get all employees' entries (default when team scope)
         
         Examples:
-        - GET /api/payroll/time-entries/today/ (normal user - their own)
-        - GET /api/payroll/time-entries/today/?employee_id=123 (admin - specific employee)
-        - GET /api/payroll/time-entries/today/?all=true (admin - all employees)
+        - GET /api/payroll/time-entries/today/ (limited scope - their own)
+        - GET /api/payroll/time-entries/today/?employee_id=123 (team scope - specific employee)
+        - GET /api/payroll/time-entries/today/?all=true (team scope - all employees)
         """
         user = request.user
-        is_admin = getattr(user, 'is_admin', False)
+        can_view_team = _payroll_can_view_team_data(user)
         account = getattr(request, 'account', None)
         today = timezone.now().date()
         
-        if is_admin:
+        if can_view_team:
             employee_id = request.query_params.get('employee_id')
             get_all = request.query_params.get('all', 'true').lower() == 'true'
             
@@ -501,11 +521,161 @@ class TimeEntryViewSet(AccountScopedQuerysetMixin, viewsets.ModelViewSet):
         })
 
 
+class EmployeeTimeOffViewSet(AccountScopedQuerysetMixin, viewsets.ModelViewSet):
+    """
+    Employee calendar time off (single day or inclusive range).
+    - Non-admin: create/list/retrieve/update/delete only their own entries.
+    - Admin: all employees in account; optional ?employee=<user_id>.
+    - Optional calendar window: ?from_date=YYYY-MM-DD&to_date=YYYY-MM-DD returns
+      entries that overlap that range.
+    """
+    queryset = EmployeeTimeOff.objects.all().select_related('employee')
+    serializer_class = EmployeeTimeOffSerializer
+    permission_classes = [AccountScopedPermission, IsAdminOrEmployeePermission]
+    account_lookup = 'employee__account'
+
+    def get_queryset(self):
+        queryset = super().get_queryset()
+        user = self.request.user
+        if not getattr(user, 'is_admin', False):
+            queryset = queryset.filter(employee=user)
+        else:
+            queryset = queryset.exclude(employee__is_superuser=True)
+            employee_id = self.request.query_params.get('employee')
+            if employee_id:
+                queryset = queryset.filter(employee_id=employee_id)
+
+        from_date = self.request.query_params.get('from_date')
+        to_date = self.request.query_params.get('to_date')
+        if from_date and to_date:
+            try:
+                from_d = datetime.strptime(from_date, '%Y-%m-%d').date()
+                to_d = datetime.strptime(to_date, '%Y-%m-%d').date()
+                queryset = queryset.filter(start_date__lte=to_d, end_date__gte=from_d)
+            except ValueError:
+                pass
+        elif from_date:
+            try:
+                from_d = datetime.strptime(from_date, '%Y-%m-%d').date()
+                queryset = queryset.filter(end_date__gte=from_d)
+            except ValueError:
+                pass
+        elif to_date:
+            try:
+                to_d = datetime.strptime(to_date, '%Y-%m-%d').date()
+                queryset = queryset.filter(start_date__lte=to_d)
+            except ValueError:
+                pass
+
+        return queryset.order_by('-start_date', '-created_at')
+
+    def perform_create(self, serializer):
+        user = self.request.user
+        if not getattr(user, 'is_admin', False):
+            serializer.save(employee=user)
+        else:
+            serializer.save()
+
+    def get_object(self):
+        obj = super().get_object()
+        user = self.request.user
+        if not getattr(user, 'is_admin', False) and obj.employee != user:
+            raise PermissionDenied('You can only access your own time off entries.')
+        return obj
+
+    @action(
+        detail=False,
+        methods=['get'],
+        url_path='available-employees',
+    )
+    def available_employees(self, request):
+        """
+        Employees in the current account who have **no** time off overlapping
+        the window (inclusive).
+
+        Query (choose one):
+        - date=YYYY-MM-DD — single day (not off on that day)
+        - start_date=YYYY-MM-DD & end_date=YYYY-MM-DD — any inclusive range
+        """
+        account = getattr(request, 'account', None)
+        if not account:
+            return Response(
+                {'error': 'Account context is required.'},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+
+        date_s = (request.query_params.get('date') or '').strip()
+        if date_s:
+            try:
+                start_d = end_d = datetime.strptime(date_s, '%Y-%m-%d').date()
+            except ValueError:
+                return Response(
+                    {'error': 'date must be a valid date (YYYY-MM-DD).'},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+        else:
+            start_s = request.query_params.get('start_date')
+            end_s = request.query_params.get('end_date')
+            if not start_s or not end_s:
+                return Response(
+                    {
+                        'error': (
+                            'Provide date=YYYY-MM-DD for a single day, or both '
+                            'start_date and end_date (YYYY-MM-DD).'
+                        ),
+                    },
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            try:
+                start_d = datetime.strptime(start_s, '%Y-%m-%d').date()
+                end_d = datetime.strptime(end_s, '%Y-%m-%d').date()
+            except ValueError:
+                return Response(
+                    {
+                        'error': (
+                            'start_date and end_date must be valid dates (YYYY-MM-DD).'
+                        ),
+                    },
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
+        if end_d < start_d:
+            return Response(
+                {'error': 'end_date must be on or after start_date.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        # Overlap: time_off.start_date <= range_end AND time_off.end_date >= range_start
+        
+        off_employee_ids = EmployeeTimeOff.objects.filter(
+            employee__account=account,
+            start_date__lte=end_d,
+            end_date__gte=start_d,
+        ).values_list('employee_id', flat=True).distinct()
+
+        queryset = (
+            User.objects.filter(account=account, is_superuser=False)
+            .exclude(pk__in=list(off_employee_ids))
+            .order_by('first_name', 'last_name', 'id')
+        )
+
+        employees = list(queryset)
+        serializer = AvailableEmployeeSerializer(employees, many=True)
+        return Response(
+            {
+                'start_date': start_d.isoformat(),
+                'end_date': end_d.isoformat(),
+                'employees': serializer.data,
+                'count': len(employees),
+            }
+        )
+
+
 class PayoutViewSet(AccountScopedQuerysetMixin, viewsets.ModelViewSet):
     """
     Payouts. Account-scoped: list/detail only for current account.
-    - is_admin: see all payouts in that account (optionally filter by employee).
-    - Non-admin: see only their own payouts in that account.
+    - Manager/supervisor with payroll_can_view_team_data=True: all payouts (optional ?employee=).
+    - Otherwise: only that user’s payouts (worker scope).
     """
     queryset = Payout.objects.all().select_related('employee', 'job', 'time_entry')
     serializer_class = PayoutSerializer
@@ -520,16 +690,16 @@ class PayoutViewSet(AccountScopedQuerysetMixin, viewsets.ModelViewSet):
     def get_queryset(self):
         queryset = super().get_queryset()  # already filtered by employee__account
         user = self.request.user
-        # Non-admin: only their own payouts within the account
-        if not getattr(user, 'is_admin', False):
+        # Limited scope: only their own payouts within the account
+        if not _payroll_can_view_team_data(user):
             queryset = queryset.filter(employee=user)
         else:
             # Exclude super admin (superuser) from payout list for admins
             queryset = queryset.exclude(employee__is_superuser=True)
         
-        # Filter by employee (admin only)
+        # Filter by employee (team-scope payroll only)
         employee_id = self.request.query_params.get('employee', None)
-        if employee_id and getattr(user, 'is_admin', False):
+        if employee_id and _payroll_can_view_team_data(user):
             queryset = queryset.filter(employee_id=employee_id)
         
         # Filter by payout type
@@ -567,7 +737,7 @@ class PayoutViewSet(AccountScopedQuerysetMixin, viewsets.ModelViewSet):
         employee_id = self.request.query_params.get('employee', None)
         
         base = User.objects.filter(account=account).exclude(is_superuser=True) if account else User.objects.none()
-        if not getattr(user, 'is_admin', False):
+        if not _payroll_can_view_team_data(user):
             return base.filter(pk=user.id)
         if employee_id:
             return base.filter(pk=employee_id)
