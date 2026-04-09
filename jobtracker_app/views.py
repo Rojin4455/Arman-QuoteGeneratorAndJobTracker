@@ -1244,6 +1244,7 @@ class JobImageViewSet(AccountScopedQuerysetMixin, viewsets.ModelViewSet):
     - Admins: Full access to all job images in account
     - Normal users: Can only access images for jobs assigned to them
     """
+    queryset = JobImage.objects.all()
     serializer_class = JobImageSerializer
     permission_classes = [AccountScopedPermission, permissions.IsAuthenticated]
     account_lookup = "job__account"

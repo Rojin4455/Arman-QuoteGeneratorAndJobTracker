@@ -46,7 +46,7 @@ class User(AbstractUser):
         help_text='Grants access to the location management tool for this user.',
     )
     can_access_house_size_management_tool = models.BooleanField(
-        default=,
+        default=False,
         help_text='Grants access to the house size management tool for this user.',
     )
     role = models.CharField(max_length=20, choices=ROLE_CHOICES, default=ROLE_WORKER)
