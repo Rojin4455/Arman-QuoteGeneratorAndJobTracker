@@ -409,6 +409,8 @@ class InvoiceViewSet(AccountScopedQuerysetMixin, viewsets.ModelViewSet):
         Lead Funnel Report endpoint (scoped to current account).
         Returns comprehensive metrics for the sales funnel including leads, estimates, and jobs.
         Supports date range filter via start_date and end_date (default: current year).
+        Optional assignee_ids: comma-separated user ids, UUIDs, or emails (same as calendar / sales_forecasting).
+        When omitted, metrics include all assignees.
         """
         account = getattr(request, 'account', None)
         if not account:
@@ -419,6 +421,20 @@ class InvoiceViewSet(AccountScopedQuerysetMixin, viewsets.ModelViewSet):
         location_filter = {}
         if location_id:
             location_filter['location_id'] = location_id
+
+        User = get_user_model()
+        assignee_ids_param = request.query_params.get('assignee_ids')
+        assignee_user_ids = []
+        if assignee_ids_param:
+            for assignee in (a.strip() for a in assignee_ids_param.split(',') if a.strip()):
+                uid = resolve_user_identifier(assignee)
+                if uid is not None:
+                    assignee_user_ids.append(uid)
+        if assignee_user_ids:
+            valid_ids = set(
+                User.objects.filter(account=account).exclude(is_superuser=True).values_list('id', flat=True)
+            )
+            assignee_user_ids = [uid for uid in assignee_user_ids if uid in valid_ids]
         
         now = timezone.now()
         # Date range filter: default current year (01-01 to 31-12)
@@ -442,36 +458,76 @@ class InvoiceViewSet(AccountScopedQuerysetMixin, viewsets.ModelViewSet):
         except (ValueError, TypeError):
             start_dt = timezone.make_aware(datetime(now.year, 1, 1), timezone.get_current_timezone())
             end_dt = timezone.make_aware(datetime(now.year, 12, 31, 23, 59, 59, 999999), timezone.get_current_timezone())
+
+        filter_description = 'Date range filter applied to all counts (default: current year)'
+        if assignee_user_ids:
+            filter_description += '; assignee_ids filter applied to leads, estimates, and jobs'
         
         # 1. New Lead Count (contacts created in date range) — scoped to account
         contacts_qs = Contact.objects.filter(account=account)
         if location_filter:
             contacts_qs = contacts_qs.filter(**location_filter)
-        new_leads_count = contacts_qs.filter(
-            date_added__gte=start_dt,
-            date_added__lte=end_dt
-        ).count()
+        if assignee_user_ids:
+            sc_for_leads = CustomerSubmission.objects.filter(
+                account=account,
+                created_at__gte=start_dt,
+                created_at__lte=end_dt,
+            )
+            if location_filter:
+                sc_for_leads = sc_for_leads.filter(contact__location_id=location_filter['location_id'])
+            sc_for_leads = sc_for_leads.filter(
+                Q(quoted_by_id__in=assignee_user_ids)
+                | Q(jobs__assignments__user_id__in=assignee_user_ids, jobs__account=account)
+            )
+            jobs_for_leads = Job.objects.filter(
+                account=account,
+                created_at__gte=start_dt,
+                created_at__lte=end_dt,
+                assignments__user_id__in=assignee_user_ids,
+            )
+            if location_filter:
+                jobs_for_leads = jobs_for_leads.filter(contact__location_id=location_filter['location_id'])
+            contact_ids = set(sc_for_leads.values_list('contact_id', flat=True)) | set(
+                jobs_for_leads.values_list('contact_id', flat=True)
+            )
+            contact_ids.discard(None)
+            new_leads_count = contacts_qs.filter(
+                date_added__gte=start_dt,
+                date_added__lte=end_dt,
+                pk__in=contact_ids,
+            ).count()
+        else:
+            new_leads_count = contacts_qs.filter(
+                date_added__gte=start_dt,
+                date_added__lte=end_dt
+            ).count()
         
-        # 2. Open Estimate (submissions with status: draft, responses_completed, packages_selected) — scoped to account
+        # 2–5. Estimates — scoped to account; assignee = quoted_by OR any linked job assignment
         open_statuses = ['draft', 'responses_completed', 'packages_selected']
         submissions_qs = CustomerSubmission.objects.filter(account=account)
         if location_filter:
             submissions_qs = submissions_qs.filter(contact__location_id=location_filter['location_id'])
         submissions_qs = submissions_qs.filter(created_at__gte=start_dt, created_at__lte=end_dt)
-        open_estimate_count = submissions_qs.filter(status__in=open_statuses).count()
+        if assignee_user_ids:
+            submissions_qs = submissions_qs.filter(
+                Q(quoted_by_id__in=assignee_user_ids)
+                | Q(jobs__assignments__user_id__in=assignee_user_ids, jobs__account=account)
+            )
+        submissions_scoped = CustomerSubmission.objects.filter(id__in=submissions_qs.values('id').distinct())
+        open_estimate_count = submissions_scoped.filter(status__in=open_statuses).count()
         
         # 3. Rejected Estimate (status: rejected)
-        rejected_estimate_count = submissions_qs.filter(status='rejected').count()
-        rejected_estimates = submissions_qs.filter(status='rejected')
+        rejected_estimate_count = submissions_scoped.filter(status='rejected').count()
+        rejected_estimates = submissions_scoped.filter(status='rejected')
         rejected_estimate_total_value = rejected_estimates.aggregate(Sum('final_total'))['final_total__sum'] or 0
         
         # 4. Accepted Estimate (quote status = submitted — when customer accepts/signs)
-        accepted_estimate_count = submissions_qs.filter(status='submitted').count()
-        accepted_estimates = submissions_qs.filter(status='submitted')
+        accepted_estimate_count = submissions_scoped.filter(status='submitted').count()
+        accepted_estimates = submissions_scoped.filter(status='submitted')
         accepted_estimate_total_value = accepted_estimates.aggregate(Sum('final_total'))['final_total__sum'] or 0
         
         # 5. Scheduled Quotes (submissions with status: accepted, within date range)
-        scheduled_quotes_qs = submissions_qs.filter(status='accepted')
+        scheduled_quotes_qs = submissions_scoped.filter(status='accepted')
         scheduled_quotes_count = scheduled_quotes_qs.count()
         scheduled_quotes_total_value = scheduled_quotes_qs.aggregate(Sum('final_total'))['final_total__sum'] or 0
         
@@ -479,9 +535,12 @@ class InvoiceViewSet(AccountScopedQuerysetMixin, viewsets.ModelViewSet):
         jobs_qs = Job.objects.filter(account=account, created_at__gte=start_dt, created_at__lte=end_dt)
         if location_filter:
             jobs_qs = jobs_qs.filter(contact__location_id=location_filter['location_id'])
+        if assignee_user_ids:
+            jobs_qs = jobs_qs.filter(assignments__user_id__in=assignee_user_ids)
+        jobs_scoped = Job.objects.filter(id__in=jobs_qs.values('id').distinct())
         
         # 6. Estimate to Convert (jobs with status: to_convert)
-        estimate_to_convert_jobs_qs = jobs_qs.filter(status='to_convert')
+        estimate_to_convert_jobs_qs = jobs_scoped.filter(status='to_convert')
         estimate_to_convert_count = estimate_to_convert_jobs_qs.count()
         estimate_to_convert_total_value = estimate_to_convert_jobs_qs.aggregate(Sum('total_price'))['total_price__sum'] or 0
         
@@ -496,21 +555,24 @@ class InvoiceViewSet(AccountScopedQuerysetMixin, viewsets.ModelViewSet):
         )
         if location_filter:
             scheduled_jobs_qs = scheduled_jobs_qs.filter(contact__location_id=location_filter['location_id'])
-        scheduled_job_count = scheduled_jobs_qs.count()
-        scheduled_job_total_value = scheduled_jobs_qs.aggregate(Sum('total_price'))['total_price__sum'] or 0
+        if assignee_user_ids:
+            scheduled_jobs_qs = scheduled_jobs_qs.filter(assignments__user_id__in=assignee_user_ids)
+        scheduled_jobs_scoped = Job.objects.filter(id__in=scheduled_jobs_qs.values('id').distinct())
+        scheduled_job_count = scheduled_jobs_scoped.count()
+        scheduled_job_total_value = scheduled_jobs_scoped.aggregate(Sum('total_price'))['total_price__sum'] or 0
         
         # 8. In Progress Jobs
-        in_progress_jobs_qs = jobs_qs.filter(status='in_progress')
+        in_progress_jobs_qs = jobs_scoped.filter(status='in_progress')
         in_progress_job_count = in_progress_jobs_qs.count()
         in_progress_job_total_value = in_progress_jobs_qs.aggregate(Sum('total_price'))['total_price__sum'] or 0
         
         # 9. Cancelled Jobs
-        cancelled_jobs_qs = jobs_qs.filter(status='cancelled')
+        cancelled_jobs_qs = jobs_scoped.filter(status='cancelled')
         cancelled_job_count = cancelled_jobs_qs.count()
         cancelled_job_total_value = cancelled_jobs_qs.aggregate(Sum('total_price'))['total_price__sum'] or 0
         
         # 10. Closed Jobs (status: completed)
-        closed_jobs_qs = jobs_qs.filter(status='completed')
+        closed_jobs_qs = jobs_scoped.filter(status='completed')
         closed_job_count = closed_jobs_qs.count()
         closed_job_total_value = closed_jobs_qs.aggregate(Sum('total_price'))['total_price__sum'] or 0
         
@@ -527,7 +589,8 @@ class InvoiceViewSet(AccountScopedQuerysetMixin, viewsets.ModelViewSet):
             'report_period': {
                 'start_date': start_dt.date().isoformat(),
                 'end_date': end_dt.date().isoformat(),
-                'filter_description': 'Date range filter applied to all counts (default: current year)'
+                'filter_description': filter_description,
+                'assignee_user_ids': assignee_user_ids if assignee_user_ids else None,
             },
             'lead_funnel': {
                 'new_leads': {
