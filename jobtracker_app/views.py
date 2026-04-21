@@ -16,6 +16,7 @@ from rest_framework.exceptions import PermissionDenied
 from rest_framework.pagination import PageNumberPagination
 from rest_framework.response import Response
 
+from accounts.account_scope import get_account_from_request
 from accounts.models import Webhook, GHLAuthCredentials, GHLCustomField, Contact, Address
 from accounts.permissions import AccountScopedPermission
 from accounts.mixins import AccountScopedQuerysetMixin
@@ -468,6 +469,84 @@ class JobViewSet(AccountScopedQuerysetMixin, viewsets.ModelViewSet):
         if account and not job.account_id:
             job.account = account
             job.save(update_fields=['account'])
+
+
+class PublicJobViewSet(AccountScopedQuerysetMixin, viewsets.ReadOnlyModelViewSet):
+    """
+    Same read API as JobViewSet (list, retrieve, mine, onhold) without authentication.
+    Account is resolved via location_id query/header/body or DEFAULT_LOCATION_ID (see account_scope).
+    List/detail behave like an admin view: all jobs in the account with the same query filters.
+    """
+
+    queryset = Job.objects.all().select_related('submission', 'contact', 'address').prefetch_related(
+        'images', 'images__uploaded_by'
+    )
+    serializer_class = JobSerializer
+    permission_classes = [permissions.AllowAny]
+    account_lookup = 'account'
+
+    def initial(self, request, *args, **kwargs):
+        super().initial(request, *args, **kwargs)
+        get_account_from_request(request, allow_superadmin_override=True)
+
+    def get_queryset(self):
+        queryset = super().get_queryset()
+
+        submission_id = self.request.query_params.get('submission_id')
+        if submission_id:
+            queryset = queryset.filter(submission_id=submission_id)
+
+        queryset = apply_job_filters(queryset, self.request, allow_to_convert=False)
+        return queryset
+
+    def get_object(self):
+        return super().get_object()
+
+    def get_serializer_context(self):
+        context = super().get_serializer_context()
+        context['include_slot_reserved_info'] = self.action == 'retrieve'
+        return context
+
+    def retrieve(self, request, *args, **kwargs):
+        instance = self.get_object()
+        instance = Job.objects.prefetch_related(
+            'assignments__user',
+            'appointment',
+            'images',
+            'images__uploaded_by',
+        ).get(pk=instance.pk)
+        serializer = self.get_serializer(instance)
+        return Response(serializer.data)
+
+    @action(detail=False, methods=['get'], url_path='mine')
+    def mine(self, request):
+        """No authenticated user; matches unauthenticated behavior of JobViewSet.mine."""
+        return Response([], status=200)
+
+    @action(detail=False, methods=['get'], url_path='onhold')
+    def onhold(self, request):
+        """Same filtering as admin onhold: optional user_ids within the resolved account."""
+        qs = self.get_queryset().filter(status='onhold')
+        user_ids_param = request.query_params.get('user_ids')
+        if user_ids_param:
+            assignee_list = [a.strip() for a in user_ids_param.split(',') if a.strip()]
+            user_ids = []
+            for assignee in assignee_list:
+                uid = resolve_user_identifier(assignee)
+                if uid:
+                    user_ids.append(uid)
+            if user_ids:
+                account = getattr(request, 'account', None)
+                if account:
+                    user_ids = list(
+                        User.objects.filter(id__in=user_ids, account=account)
+                        .exclude(is_superuser=True)
+                        .values_list('id', flat=True)
+                    )
+                if user_ids:
+                    qs = qs.filter(assignments__user_id__in=user_ids).distinct()
+        serializer = self.get_serializer(qs, many=True)
+        return Response(serializer.data)
 
 
 class _IsAdminOnly(permissions.BasePermission):

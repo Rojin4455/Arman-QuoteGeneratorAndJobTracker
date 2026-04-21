@@ -55,7 +55,8 @@ class AdminContactViewSet(AccountScopedQuerysetMixin, ReadOnlyModelViewSet):
     **List** ``GET /api/dashboard/contacts/``
     Optional query params: ``search``, ``location_id``, ``ordering``, ``page``, ``page_size``.
 
-    **Detail** ``GET /api/dashboard/contacts/{id}/``
+    **Detail** ``GET /api/dashboard/contacts/{ghl_contact_id}/``
+    ``ghl_contact_id`` is the GHL contact id (model field ``contact_id``).
     Returns nested addresses, customer submissions (quotes), jobs (with assignees),
     matching invoices, appointments, and a numeric summary block.
     """
@@ -63,6 +64,8 @@ class AdminContactViewSet(AccountScopedQuerysetMixin, ReadOnlyModelViewSet):
     queryset = Contact.objects.all()
     permission_classes = [AllowAny]
     account_lookup = 'account'
+    lookup_field = 'contact_id'
+    lookup_url_kwarg = 'ghl_contact_id'
 
     def initial(self, request, *args, **kwargs):
         super().initial(request, *args, **kwargs)

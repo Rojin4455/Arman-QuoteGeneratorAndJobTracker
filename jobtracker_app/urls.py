@@ -1,9 +1,10 @@
 from django.urls import path, include
 from rest_framework.routers import DefaultRouter
-from .views import JobViewSet, OccurrenceListView, JobSeriesCreateView, JobBySeriesView, LocationJobListView, LocationJobDetailView, webhook_handler, tip_webhook_handler, AppointmentCalendarView, AppointmentViewSet, JobImageViewSet, EstimateAppointmentListView, EstimateAppointmentUpdateStatusView
+from .views import JobViewSet, PublicJobViewSet, OccurrenceListView, JobSeriesCreateView, JobBySeriesView, LocationJobListView, LocationJobDetailView, webhook_handler, tip_webhook_handler, AppointmentCalendarView, AppointmentViewSet, JobImageViewSet, EstimateAppointmentListView, EstimateAppointmentUpdateStatusView
 
 router = DefaultRouter()
 router.register(r'jobs', JobViewSet, basename='job')
+router.register(r'public/jobs', PublicJobViewSet, basename='job-public')
 router.register(r'appointments', AppointmentViewSet, basename='appointment')
 router.register(r'job-images', JobImageViewSet, basename='job-image')
 

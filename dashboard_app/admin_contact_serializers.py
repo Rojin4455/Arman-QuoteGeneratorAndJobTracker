@@ -124,6 +124,7 @@ class AdminContactAppointmentSerializer(serializers.ModelSerializer):
 
 class AdminContactListSerializer(serializers.ModelSerializer):
     """Paginated list row; counts come from queryset annotations in the view."""
+    ghl_contact_id = serializers.CharField(source='contact_id', read_only=True)
     submissions_count = serializers.IntegerField(read_only=True, default=0)
     jobs_count = serializers.IntegerField(read_only=True, default=0)
     addresses_count = serializers.IntegerField(read_only=True, default=0)
@@ -134,7 +135,7 @@ class AdminContactListSerializer(serializers.ModelSerializer):
     class Meta:
         model = Contact
         fields = [
-            'id', 'contact_id', 'first_name', 'last_name', 'email', 'phone',
+            'id', 'contact_id', 'ghl_contact_id', 'first_name', 'last_name', 'email', 'phone',
             'company_name', 'country', 'location_id', 'date_added', 'dnd', 'tags',
             'submissions_count', 'jobs_count', 'addresses_count', 'pending_jobs_count',
             'appointments_count', 'invoices_count',
