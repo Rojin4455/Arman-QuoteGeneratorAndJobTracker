@@ -14,12 +14,12 @@ from django.db.models import (
 from django.db.models.functions import Coalesce
 from rest_framework import filters as drf_filters
 from rest_framework.pagination import PageNumberPagination
-from rest_framework.permissions import IsAuthenticated
+from rest_framework.permissions import AllowAny
 from rest_framework.viewsets import ReadOnlyModelViewSet
 
+from accounts.account_scope import get_account_from_request
 from accounts.mixins import AccountScopedQuerysetMixin
 from accounts.models import Address, Contact
-from accounts.permissions import AccountScopedPermission
 from dashboard_app.admin_contact_serializers import (
     AdminContactDetailSerializer,
     AdminContactListSerializer,
@@ -50,7 +50,7 @@ _NON_TERMINAL_JOB_STATUSES = (
 
 class AdminContactViewSet(AccountScopedQuerysetMixin, ReadOnlyModelViewSet):
     """
-    List and retrieve GHL contacts for the authenticated account.
+    List and retrieve GHL contacts scoped to an account (via auth user, location_id, or default).
 
     **List** ``GET /api/dashboard/contacts/``
     Optional query params: ``search``, ``location_id``, ``ordering``, ``page``, ``page_size``.
@@ -61,8 +61,12 @@ class AdminContactViewSet(AccountScopedQuerysetMixin, ReadOnlyModelViewSet):
     """
 
     queryset = Contact.objects.all()
-    permission_classes = [AccountScopedPermission, IsAuthenticated]
+    permission_classes = [AllowAny]
     account_lookup = 'account'
+
+    def initial(self, request, *args, **kwargs):
+        super().initial(request, *args, **kwargs)
+        get_account_from_request(request, allow_superadmin_override=True)
     pagination_class = AdminContactPagination
     filter_backends = [drf_filters.SearchFilter, drf_filters.OrderingFilter]
     search_fields = ['first_name', 'last_name', 'email', 'phone', 'company_name', 'contact_id']
