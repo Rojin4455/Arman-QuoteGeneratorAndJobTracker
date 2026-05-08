@@ -25,9 +25,18 @@ from dashboard_app.admin_contact_serializers import (
     AdminContactListSerializer,
 )
 from dashboard_app.models import Invoice
-from jobtracker_app.models import Job, JobAssignment
+from jobtracker_app.models import Job
 from quote_app.models import CustomerSubmission
 from service_app.models import Appointment
+
+
+def _jobs_for_contact_subquery(**job_filters):
+    """Correlated count of jobs tied to a contact via FK and/or submission.contact."""
+    qs = Job.objects.filter(
+        Q(contact_id=OuterRef('pk')) | Q(submission__contact_id=OuterRef('pk')),
+        **job_filters,
+    )
+    return qs.annotate(_grp=Value(1)).values('_grp').annotate(_cnt=Count('id')).values('_cnt')[:1]
 
 
 class AdminContactPagination(PageNumberPagination):
@@ -39,6 +48,7 @@ class AdminContactPagination(PageNumberPagination):
 # Jobs that are still in play (not finished or cancelled).
 _NON_TERMINAL_JOB_STATUSES = (
     'to_convert',
+    'reschedule_pending',
     'pending',
     'confirmed',
     'service_due',
@@ -92,15 +102,19 @@ class AdminContactViewSet(AccountScopedQuerysetMixin, ReadOnlyModelViewSet):
                 .annotate(cnt=Count('id'))
                 .values('cnt')[:1]
             )
+            jobs_count_sq = Subquery(
+                _jobs_for_contact_subquery(),
+                output_field=IntegerField(),
+            )
+            pending_jobs_sq = Subquery(
+                _jobs_for_contact_subquery(status__in=_NON_TERMINAL_JOB_STATUSES),
+                output_field=IntegerField(),
+            )
             qs = qs.annotate(
                 submissions_count=Count('customersubmission', distinct=True),
-                jobs_count=Count('jobs', distinct=True),
+                jobs_count=Coalesce(jobs_count_sq, Value(0)),
                 addresses_count=Count('contact_location', distinct=True),
-                pending_jobs_count=Count(
-                    'jobs',
-                    filter=Q(jobs__status__in=_NON_TERMINAL_JOB_STATUSES),
-                    distinct=True,
-                ),
+                pending_jobs_count=Coalesce(pending_jobs_sq, Value(0)),
                 appointments_count=Count('appointments', distinct=True),
                 invoices_count=Coalesce(
                     Subquery(invoices_sq, output_field=IntegerField()),
@@ -111,23 +125,11 @@ class AdminContactViewSet(AccountScopedQuerysetMixin, ReadOnlyModelViewSet):
             submission_qs = CustomerSubmission.objects.select_related(
                 'quoted_by', 'location', 'address'
             ).order_by('-created_at')
-            job_qs = (
-                Job.objects.select_related('quoted_by', 'submission')
-                .prefetch_related(
-                    Prefetch(
-                        'assignments',
-                        queryset=JobAssignment.objects.select_related('user'),
-                    ),
-                    'items',
-                )
-                .order_by('-created_at')
-            )
             appointment_qs = Appointment.objects.select_related(
                 'calendar', 'assigned_user'
             ).order_by('-start_time', '-created_at')
             qs = qs.prefetch_related(
                 Prefetch('customersubmission_set', queryset=submission_qs),
-                Prefetch('jobs', queryset=job_qs),
                 Prefetch('contact_location', queryset=Address.objects.order_by('order', 'id')),
                 Prefetch('appointments', queryset=appointment_qs),
             )

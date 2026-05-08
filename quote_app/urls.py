@@ -75,4 +75,22 @@ urlpatterns = [
     path("global-base-price/", views.GlobalSettingsView.as_view(), name="global-settings"),
 
     path("schedule-calendar-appointment/", views.ScheduleCalendarAppointmentView.as_view(), name="schedule-calendar-appointment"),
+    path("<uuid:submission_id>/book-schedule/", views.BookQuoteScheduleView.as_view(), name="book-quote-schedule"),
+    path("calendar/free-slots/", views.CalendarFreeSlotsView.as_view(), name="calendar-free-slots"),
+
+    path(
+        "reschedule/from-job/<uuid:job_id>/",
+        views.JobRescheduleQuoteCreateView.as_view(),
+        name="reschedule-quote-from-job",
+    ),
+    path(
+        "reschedule/jobs/",
+        views.ReschedulePendingJobListView.as_view(),
+        name="reschedule-jobs-list",
+    ),
+    path(
+        "reschedule/jobs/<uuid:job_id>/convert/",
+        views.RescheduleConvertToJobView.as_view(),
+        name="reschedule-job-convert",
+    ),
 ]

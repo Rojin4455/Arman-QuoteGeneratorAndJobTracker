@@ -13,7 +13,8 @@ from datetime import timedelta
 from django.utils import timezone
 from accounts.permissions import AccountScopedPermission
 from accounts.mixins import AccountScopedQuerysetMixin
-from .account_scope_utils import get_submission_for_account
+from .account_scope_utils import get_submission_for_account, get_job_for_account
+from .reschedule_utils import clone_submission_for_reschedule
 from service_app.account_scope_utils import get_service_for_account
 from service_app.models import ServiceSettings
 from service_app.models import (
@@ -30,11 +31,14 @@ from .serializers import (
     QuestionPublicSerializer, GlobalSizePackagePublicSerializer,
     CustomerSubmissionCreateSerializer, CustomerSubmissionDetailSerializer,AddressSerializer,
     ServiceQuestionResponseSerializer, PricingCalculationRequestSerializer,SubmitFinalQuoteSerializer,ContactSerializer,
-    ConditionalQuestionRequestSerializer, CustomerPackageQuoteSerializer,ConditionalQuestionResponseSerializer,ServiceResponseSubmissionSerializer,QuoteScheduleUpdateSerializer, CustomerSubmissionImageSerializer
+    ConditionalQuestionRequestSerializer, CustomerPackageQuoteSerializer,ConditionalQuestionResponseSerializer,ServiceResponseSubmissionSerializer,QuoteScheduleUpdateSerializer, CustomerSubmissionImageSerializer,
+    JobRescheduleQuoteCreateSerializer, RescheduleConvertToJobSerializer,
 )
 from service_app.serializers import GlobalBasePriceSerializer, UserSerializer
 from service_app.models import User
 from payroll_app.models import EmployeeProfile
+from jobtracker_app.models import Job
+from jobtracker_app.serializers import JobSerializer
 
 from quote_app.helpers import create_or_update_ghl_contact
 from accounts.utils import (
@@ -59,6 +63,9 @@ import re
 import uuid
 from django.http import JsonResponse
 from django.utils.dateparse import parse_datetime
+from decouple import config
+
+DEFAULT_CALENDAR_ID = config("DEFAULT_CALENDAR_ID", default="")
 
 class ContactPagination(PageNumberPagination):
     page_size = 20  # items per page
@@ -645,21 +652,19 @@ class SubmitServiceResponsesView(APIView):
         surcharge_amount = Decimal('0.00')
         surcharge_applied = False
         surcharge_amount_applied = Decimal('0.00')
-        # if submission.location and hasattr(service, 'settings'):
-        #     try:
-        #         settings = service.settings
-        #         if settings.apply_trip_charge_to_bid:
-        #             print("reached hererer")
-        #             surcharge_amount_applied = submission.location.trip_surcharge
-        #             # surcharge_amount = submission.location.trip_surcharge
-        #             service_selection.surcharge_applicable = True
-        #             service_selection.surcharge_amount = surcharge_amount
-        #             surcharge_applied = True
-        #             service_selection.save()
-        #             print("submission.surcharge_applicable",submission.quote_surcharge_applicable)
-        #     except ServiceSettings.DoesNotExist:
-        #         # Service doesn't have settings, no surcharge
-        #         pass
+        if submission.location and hasattr(service, 'settings'):
+            try:
+                settings = service.settings
+                if settings.apply_trip_charge_to_bid:
+                    surcharge_amount = submission.location.trip_surcharge or Decimal('0.00')
+                    surcharge_amount_applied = surcharge_amount
+                    service_selection.surcharge_applicable = surcharge_amount > Decimal('0.00')
+                    service_selection.surcharge_amount = surcharge_amount
+                    surcharge_applied = service_selection.surcharge_applicable
+                    service_selection.save(update_fields=['surcharge_applicable', 'surcharge_amount'])
+            except ServiceSettings.DoesNotExist:
+                # Service doesn't have settings, no surcharge
+                pass
         
         # Clear existing quotes for this service
         service_selection.package_quotes.all().delete()
@@ -1117,14 +1122,15 @@ class SubmitFinalQuoteView(APIView):
             if selected_quote:
                 total_base_price += selected_quote.base_price + selected_quote.sqft_price
                 total_adjustments += selected_quote.question_adjustments
-                # total_surcharges += submission.total_surcharges
+                total_surcharges += selected_quote.surcharge_amount
 
         
         
-        final_total = total_base_price + total_adjustments + submission.total_surcharges + submission.custom_service_total
+        final_total = total_base_price + total_adjustments + total_surcharges + submission.custom_service_total
         
         submission.total_base_price = total_base_price
         submission.total_adjustments = total_adjustments
+        submission.total_surcharges = total_surcharges
         global_settings = GlobalBasePrice.objects.first()
         if global_settings:
             base_price = global_settings.base_price
@@ -1477,6 +1483,164 @@ class ScheduleCalendarAppointmentView(APIView):
             return JsonResponse({"error": str(e)}, status=500)
         
 
+@method_decorator(csrf_exempt, name='dispatch')
+class BookQuoteScheduleView(APIView):
+    """
+    Book a quote schedule directly from custom calendar UI.
+    """
+    permission_classes = [AllowAny]
+
+    def post(self, request, submission_id, *args, **kwargs):
+        try:
+            data = request.data or {}
+
+            start_time = data.get("scheduled_date") or data.get("start_time")
+            if not start_time:
+                return JsonResponse(
+                    {"error": "scheduled_date or start_time is required"},
+                    status=400
+                )
+
+            scheduled_date = parse_datetime(start_time)
+            if not scheduled_date:
+                return JsonResponse({"error": "Invalid datetime format"}, status=400)
+
+            duration = data.get("duration")
+            if duration in [None, ""]:
+                return JsonResponse({"error": "duration is required"}, status=400)
+
+            try:
+                duration = int(duration)
+            except (TypeError, ValueError):
+                return JsonResponse({"error": "duration must be an integer"}, status=400)
+
+            if duration <= 0:
+                return JsonResponse({"error": "duration must be greater than 0"}, status=400)
+
+            appointment_id = data.get("appointment_id") or f"local_{uuid.uuid4()}"
+
+            submission = get_object_or_404(CustomerSubmission, id=submission_id)
+            quote_schedule, _ = QuoteSchedule.objects.get_or_create(
+                submission=submission,
+                defaults={
+                    "quoted_by": (
+                        getattr(submission.quoted_by, "email", None)
+                        or getattr(submission.quoted_by, "username", None)
+                        or ""
+                    )
+                }
+            )
+
+            quote_schedule.scheduled_date = scheduled_date
+            quote_schedule.appointment_id = str(appointment_id)
+            quote_schedule.is_submitted = True
+            quote_schedule.save(update_fields=["scheduled_date", "appointment_id", "is_submitted"])
+
+            additional_data = submission.additional_data or {}
+            additional_data.update({
+                "booking_duration_minutes": duration,
+                "booking_source": "custom_calendar",
+                "booking_submitted_at": timezone.now().isoformat(),
+            })
+            submission.additional_data = additional_data
+            submission.save(update_fields=["additional_data", "updated_at"])
+
+            return JsonResponse({
+                "status": "success",
+                "message": f"QuoteSchedule updated for submission {submission_id}",
+                "scheduled_date": scheduled_date.isoformat(),
+                "duration": duration,
+                "appointment_id": str(appointment_id),
+            }, status=200)
+
+        except Exception as e:
+            return JsonResponse({"error": str(e)}, status=500)
+
+
+class CalendarFreeSlotsView(APIView):
+    """
+    Proxy endpoint to fetch free slots from GHL calendar API.
+    """
+    permission_classes = [AccountScopedPermission, AllowAny]
+
+    def get(self, request, *args, **kwargs):
+        try:
+            account = getattr(request, "account", None)
+            if not account:
+                return Response(
+                    {"error": "Account could not be determined."},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+
+            calendar_id = request.query_params.get("calendarId") or DEFAULT_CALENDAR_ID
+            if not calendar_id:
+                return Response(
+                    {"error": "calendarId is required (or set DEFAULT_CALENDAR_ID in environment)."},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+
+            start_date = request.query_params.get("startDate")
+            end_date = request.query_params.get("endDate")
+            if not start_date or not end_date:
+                return Response(
+                    {"error": "startDate and endDate are required query params."},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+
+            version = request.query_params.get("version", "2021-07-28")
+            timezone_param = request.query_params.get("timezone")
+            user_id = request.query_params.get("userId")
+
+            ghl_url = f"https://services.leadconnectorhq.com/calendars/{calendar_id}/free-slots"
+            query_params = {
+                "startDate": start_date,
+                "endDate": end_date,
+            }
+            if timezone_param:
+                query_params["timezone"] = timezone_param
+            if user_id:
+                query_params["userId"] = user_id
+
+            headers = {
+                "Authorization": f"Bearer {account.access_token}",
+                "Version": version,
+                "Accept": "application/json",
+            }
+
+            ghl_response = requests.get(ghl_url, headers=headers, params=query_params, timeout=30)
+            content_type = ghl_response.headers.get("Content-Type", "")
+            response_data = ghl_response.json() if "application/json" in content_type else {
+                "error": "Non-JSON response from GHL",
+                "raw_response": ghl_response.text[:1000],
+            }
+
+            if ghl_response.status_code >= 400:
+                return Response(
+                    {
+                        "error": "Failed to fetch free slots from GHL",
+                        "ghl_status_code": ghl_response.status_code,
+                        "details": response_data,
+                    },
+                    status=ghl_response.status_code
+                )
+
+            # Return GHL payload as-is so frontend can consume it directly.
+            return Response(response_data, status=status.HTTP_200_OK)
+
+        except requests.RequestException as e:
+            return Response(
+                {"error": f"Network error while fetching free slots: {str(e)}"},
+                status=status.HTTP_502_BAD_GATEWAY
+            )
+        except ValueError:
+            return Response(
+                {"error": "Invalid JSON received from GHL free slots API."},
+                status=status.HTTP_502_BAD_GATEWAY
+            )
+        except Exception as e:
+            return Response({"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
 
 
 from django.db import models
@@ -1679,3 +1843,138 @@ class CustomerSubmissionImageViewSet(AccountScopedQuerysetMixin, viewsets.ModelV
                 except Exception:
                     pass
         instance.delete()
+
+
+def _apply_reschedule_pending_job_prefetch(queryset):
+    """Prefetch for JobSerializer on reschedule-pending job lists and detail."""
+    return queryset.select_related(
+        'submission',
+        'submission__quote_schedule',
+        'submission__contact',
+        'submission__address',
+        'submission__quoted_by',
+        'contact',
+        'address',
+        'quoted_by',
+        'account',
+    ).prefetch_related(
+        'items__service',
+        'assignments__user',
+        'images',
+        'schedule_occurrences',
+    )
+
+
+class JobRescheduleQuoteCreateView(APIView):
+    """Clone the job's quote: new accepted submission + new job with status reschedule_pending."""
+
+    permission_classes = [AccountScopedPermission, AllowAny]
+
+    def post(self, request, job_id, *args, **kwargs):
+        account = getattr(request, 'account', None)
+        job = get_job_for_account(job_id, account)
+        if not job.submission_id:
+            return Response(
+                {'error': 'This job has no linked quote submission to copy.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        serializer = JobRescheduleQuoteCreateSerializer(data=request.data or {})
+        serializer.is_valid(raise_exception=True)
+
+        raw_dt = serializer.validated_data['scheduled_date']
+        scheduled_date = parse_datetime(raw_dt)
+        if not scheduled_date:
+            return Response(
+                {'error': 'Invalid scheduled_date. Use ISO 8601 format.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        notes = serializer.validated_data.get('notes') or ''
+        quoted_by_str = serializer.validated_data.get('quoted_by') or ''
+        source = job.submission
+        if not quoted_by_str and source and source.quoted_by:
+            qb = source.quoted_by
+            quoted_by_str = getattr(qb, 'email', None) or getattr(qb, 'username', None) or ''
+
+        _new_sub, new_job = clone_submission_for_reschedule(
+            source,
+            scheduled_at=scheduled_date,
+            job=job,
+            notes=notes,
+            quoted_by_str=quoted_by_str,
+        )
+        detail = _apply_reschedule_pending_job_prefetch(Job.objects.filter(pk=new_job.pk)).first()
+        data = JobSerializer(detail, context={'request': request}).data
+        return Response(data, status=status.HTTP_201_CREATED)
+
+
+class ReschedulePendingJobListView(AccountScopedQuerysetMixin, ListAPIView):
+    """List jobs awaiting reschedule confirmation (Job.status = reschedule_pending)."""
+
+    queryset = Job.objects.all()
+    serializer_class = JobSerializer
+    permission_classes = [AccountScopedPermission, AllowAny]
+    pagination_class = ContactPagination
+    account_lookup = 'account'
+
+    def get_queryset(self):
+        qs = super().get_queryset().filter(status='reschedule_pending')
+        return _apply_reschedule_pending_job_prefetch(qs).order_by('-created_at')
+
+
+class RescheduleConvertToJobView(APIView):
+    """Submit the QuoteSchedule for a reschedule job (same signal path as booking → to_convert)."""
+
+    permission_classes = [AccountScopedPermission, AllowAny]
+
+    def post(self, request, job_id, *args, **kwargs):
+        account = getattr(request, 'account', None)
+        job = get_job_for_account(job_id, account)
+
+        if job.status != 'reschedule_pending':
+            return Response(
+                {'error': 'Only reschedule_pending jobs can be converted.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        submission = job.submission
+        if not submission:
+            return Response(
+                {'error': 'Job has no linked submission.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        serializer = RescheduleConvertToJobSerializer(data=request.data or {})
+        serializer.is_valid(raise_exception=True)
+
+        quote_schedule = get_object_or_404(QuoteSchedule, submission=submission)
+
+        scheduled_override = serializer.validated_data.get('scheduled_date')
+        override_clean = (scheduled_override or '').strip() if scheduled_override else ''
+        if override_clean:
+            dt = parse_datetime(override_clean)
+            if not dt:
+                return Response(
+                    {'error': 'Invalid scheduled_date.'},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            quote_schedule.scheduled_date = dt
+
+        quote_schedule.is_submitted = True
+        update_fields = ['is_submitted']
+        if override_clean:
+            update_fields.append('scheduled_date')
+        quote_schedule.save(update_fields=update_fields)
+
+        job.refresh_from_db()
+        detail = _apply_reschedule_pending_job_prefetch(Job.objects.filter(pk=job.pk)).first()
+        return Response(
+            {
+                'detail': 'Reschedule confirmed; job moved to needs conversion like an accepted quote.',
+                'job_id': str(job.id),
+                'job_status': job.status,
+                'job': JobSerializer(detail, context={'request': request}).data,
+            },
+            status=status.HTTP_200_OK,
+        )

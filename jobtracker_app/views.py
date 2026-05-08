@@ -120,7 +120,10 @@ def apply_job_filters(queryset, request, skip_assignee_ids=False, allow_to_conve
         # Only exclude to_convert if not explicitly allowed
         if not allow_to_convert:
             queryset = queryset.exclude(
-                Q(status__isnull=True) | Q(status="") | Q(status="to_convert")
+                Q(status__isnull=True)
+                | Q(status="")
+                | Q(status="to_convert")
+                | Q(status="reschedule_pending")
             )
     
     # Filter by job_type (supports multiple job types)

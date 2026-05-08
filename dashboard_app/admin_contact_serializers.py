@@ -1,7 +1,7 @@
 """
 Serializers for the admin contact hub API (list + full detail with related entities).
 """
-from django.db.models import Q, Sum
+from django.db.models import Prefetch, Q, Sum
 from django.utils import timezone
 from rest_framework import serializers
 
@@ -10,6 +10,23 @@ from dashboard_app.models import Invoice
 from jobtracker_app.models import Job, JobAssignment
 from quote_app.models import CustomerSubmission
 from service_app.models import Appointment, User
+
+
+def jobs_queryset_for_contact(contact):
+    """Jobs linked by FK or only via quote submission (legacy rows had contact unset)."""
+    return (
+        Job.objects.filter(Q(contact=contact) | Q(submission__contact=contact))
+        .distinct()
+        .select_related('quoted_by', 'submission')
+        .prefetch_related(
+            Prefetch(
+                'assignments',
+                queryset=JobAssignment.objects.select_related('user'),
+            ),
+            'items',
+        )
+        .order_by('-created_at')
+    )
 
 
 def contact_invoice_filter(contact):
@@ -147,7 +164,7 @@ class AdminContactDetailSerializer(serializers.ModelSerializer):
     submissions = AdminContactSubmissionSerializer(
         source='customersubmission_set', many=True, read_only=True
     )
-    jobs = AdminContactJobSerializer(many=True, read_only=True)
+    jobs = serializers.SerializerMethodField()
     invoices = serializers.SerializerMethodField()
     appointments = AdminContactAppointmentSerializer(many=True, read_only=True)
     summary = serializers.SerializerMethodField()
@@ -161,6 +178,12 @@ class AdminContactDetailSerializer(serializers.ModelSerializer):
             'addresses', 'submissions', 'jobs', 'invoices', 'appointments', 'summary',
         ]
 
+    def get_jobs(self, obj):
+        qs = jobs_queryset_for_contact(obj)
+        jobs_list = list(qs)
+        obj._admin_contact_jobs_evaluated = jobs_list
+        return AdminContactJobSerializer(jobs_list, many=True).data
+
     def get_invoices(self, obj):
         if not obj.account_id:
             return []
@@ -173,7 +196,9 @@ class AdminContactDetailSerializer(serializers.ModelSerializer):
 
     def get_summary(self, obj):
         submissions = list(obj.customersubmission_set.all())
-        jobs = list(obj.jobs.all())
+        jobs = getattr(obj, '_admin_contact_jobs_evaluated', None)
+        if jobs is None:
+            jobs = list(jobs_queryset_for_contact(obj))
         appointments = list(obj.appointments.all())
 
         open_quote_statuses = {'draft', 'responses_completed', 'packages_selected'}
@@ -181,6 +206,7 @@ class AdminContactDetailSerializer(serializers.ModelSerializer):
 
         pending_statuses = {
             'pending', 'confirmed', 'on_the_way', 'service_due', 'to_convert',
+            'reschedule_pending',
             'in_progress', 'onhold',
         }
         pending_jobs = [j for j in jobs if j.status in pending_statuses]

@@ -876,7 +876,7 @@ class TechnicianWorkloadHeatmapView(APIView):
     permission_classes = [AccountScopedPermission, IsAuthenticated]
     DEFAULT_STATUSES = [
         status for status, _ in Job.STATUS_CHOICES
-        if status not in ('to_convert',)
+        if status not in ('to_convert', 'reschedule_pending')
     ]
     LOAD_THRESHOLDS = (
         (0, 'none'),

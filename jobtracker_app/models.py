@@ -36,6 +36,7 @@ class Job(models.Model):
     ]
     STATUS_CHOICES = [
         ('to_convert', 'Needs Conversion'),
+        ('reschedule_pending', 'Reschedule Pending'),
         ('pending', 'Pending'),
         ('confirmed', 'Confirmed'),
         ('service_due', 'Service Due'),

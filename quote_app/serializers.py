@@ -523,3 +523,17 @@ class QuoteScheduleUpdateSerializer(serializers.ModelSerializer):
     class Meta:
         model = QuoteSchedule
         fields = ['first_time', 'quoted_by', 'scheduled_date', 'notes', 'is_submitted']
+
+
+class JobRescheduleQuoteCreateSerializer(serializers.Serializer):
+    scheduled_date = serializers.CharField(required=True, help_text='ISO 8601 datetime for the new booking.')
+    notes = serializers.CharField(required=False, allow_blank=True, default='')
+    quoted_by = serializers.CharField(required=False, allow_blank=True, default='')
+
+
+class RescheduleConvertToJobSerializer(serializers.Serializer):
+    scheduled_date = serializers.CharField(
+        required=False,
+        allow_blank=True,
+        help_text='Optional: override scheduled time before conversion (same as booking).',
+    )
