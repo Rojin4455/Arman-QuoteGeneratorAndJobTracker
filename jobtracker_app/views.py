@@ -513,11 +513,14 @@ class PublicJobViewSet(AccountScopedQuerysetMixin, viewsets.ReadOnlyModelViewSet
     def get_queryset(self):
         queryset = super().get_queryset()
 
+        if self.action == 'retrieve':
+            return queryset
+
         submission_id = self.request.query_params.get('submission_id')
         if submission_id:
             queryset = queryset.filter(submission_id=submission_id)
 
-        queryset = apply_job_filters(queryset, self.request, allow_to_convert=False)
+        queryset = apply_job_filters(queryset, self.request, allow_to_convert=bool(submission_id))
         return queryset
 
     def get_object(self):

@@ -1873,6 +1873,12 @@ class JobRescheduleQuoteCreateView(APIView):
     def post(self, request, job_id, *args, **kwargs):
         account = getattr(request, 'account', None)
         job = get_job_for_account(job_id, account)
+        if job.status != 'completed':
+            return Response(
+                {'error': 'Only completed jobs can request a repeat job.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
         if not job.submission_id:
             return Response(
                 {'error': 'This job has no linked quote submission to copy.'},

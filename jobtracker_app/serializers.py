@@ -1010,9 +1010,9 @@ class JobConvertToSeriesSerializer(serializers.Serializer):
 
         with transaction.atomic():
             source_job = Job.objects.select_for_update().get(pk=job.pk)
-            if source_job.status != 'to_convert':
+            if source_job.status not in ['to_convert', 'reschedule_pending']:
                 raise serializers.ValidationError({
-                    'status': 'Only jobs with status "to_convert" can be converted to a recurring series.'
+                    'status': 'Only jobs with status "to_convert" or "reschedule_pending" can be converted to a recurring series.'
                 })
 
             contact = self._resolve_contact()

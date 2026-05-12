@@ -38,6 +38,10 @@ def contact_invoice_filter(contact):
     return q
 
 
+_DETAIL_JOBS_EXCLUDED_STATUSES = {'to_convert', 'reschedule_pending'}
+_RESCHEDULE_PENDING_STATUS = 'reschedule_pending'
+
+
 class UserBriefSerializer(serializers.ModelSerializer):
     full_name = serializers.SerializerMethodField()
 
@@ -165,6 +169,7 @@ class AdminContactDetailSerializer(serializers.ModelSerializer):
         source='customersubmission_set', many=True, read_only=True
     )
     jobs = serializers.SerializerMethodField()
+    reschedule_pending_jobs = serializers.SerializerMethodField()
     invoices = serializers.SerializerMethodField()
     appointments = AdminContactAppointmentSerializer(many=True, read_only=True)
     summary = serializers.SerializerMethodField()
@@ -175,13 +180,29 @@ class AdminContactDetailSerializer(serializers.ModelSerializer):
             'id', 'contact_id', 'account_id', 'first_name', 'last_name', 'email', 'phone',
             'company_name', 'country', 'location_id', 'date_added', 'dnd', 'tags',
             'custom_fields', 'timestamp',
-            'addresses', 'submissions', 'jobs', 'invoices', 'appointments', 'summary',
+            'addresses', 'submissions', 'jobs', 'reschedule_pending_jobs', 'invoices',
+            'appointments', 'summary',
         ]
 
+    def _get_jobs_list(self, obj):
+        jobs = getattr(obj, '_admin_contact_jobs_evaluated', None)
+        if jobs is None:
+            jobs = list(jobs_queryset_for_contact(obj))
+            obj._admin_contact_jobs_evaluated = jobs
+        return jobs
+
     def get_jobs(self, obj):
-        qs = jobs_queryset_for_contact(obj)
-        jobs_list = list(qs)
-        obj._admin_contact_jobs_evaluated = jobs_list
+        jobs_list = [
+            job for job in self._get_jobs_list(obj)
+            if job.status not in _DETAIL_JOBS_EXCLUDED_STATUSES
+        ]
+        return AdminContactJobSerializer(jobs_list, many=True).data
+
+    def get_reschedule_pending_jobs(self, obj):
+        jobs_list = [
+            job for job in self._get_jobs_list(obj)
+            if job.status == _RESCHEDULE_PENDING_STATUS
+        ]
         return AdminContactJobSerializer(jobs_list, many=True).data
 
     def get_invoices(self, obj):
@@ -196,18 +217,22 @@ class AdminContactDetailSerializer(serializers.ModelSerializer):
 
     def get_summary(self, obj):
         submissions = list(obj.customersubmission_set.all())
-        jobs = getattr(obj, '_admin_contact_jobs_evaluated', None)
-        if jobs is None:
-            jobs = list(jobs_queryset_for_contact(obj))
+        all_jobs = self._get_jobs_list(obj)
+        jobs = [
+            job for job in all_jobs
+            if job.status not in _DETAIL_JOBS_EXCLUDED_STATUSES
+        ]
+        reschedule_pending_jobs = [
+            job for job in all_jobs
+            if job.status == _RESCHEDULE_PENDING_STATUS
+        ]
         appointments = list(obj.appointments.all())
 
         open_quote_statuses = {'draft', 'responses_completed', 'packages_selected'}
         open_quotes = [s for s in submissions if s.status in open_quote_statuses]
 
         pending_statuses = {
-            'pending', 'confirmed', 'on_the_way', 'service_due', 'to_convert',
-            'reschedule_pending',
-            'in_progress', 'onhold',
+            'pending', 'confirmed', 'on_the_way', 'service_due', 'in_progress', 'onhold',
         }
         pending_jobs = [j for j in jobs if j.status in pending_statuses]
 
@@ -222,6 +247,7 @@ class AdminContactDetailSerializer(serializers.ModelSerializer):
             'open_quotes_count': len(open_quotes),
             'jobs_total': len(jobs),
             'pending_jobs_count': len(pending_jobs),
+            'reschedule_pending_jobs_count': len(reschedule_pending_jobs),
             'invoices_total': inv_base.count(),
             'appointments_total': len(appointments),
             'invoiced_amount_sum': float(inv_agg['total_invoiced'] or 0),
