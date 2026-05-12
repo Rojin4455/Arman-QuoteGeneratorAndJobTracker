@@ -33,6 +33,7 @@ from .models import Job, JobOccurrence, JobServiceItem, JobAssignment, JobImage
 from .ghl_appointment_sync import delete_appointment_from_ghl
 from .serializers import (
     CalendarEventSerializer,
+    JobConvertToSeriesSerializer,
     JobSeriesCreateSerializer,
     JobSerializer,
     LocationSummarySerializer,
@@ -320,6 +321,22 @@ class JobViewSet(AccountScopedQuerysetMixin, viewsets.ModelViewSet):
                         qs = qs.filter(assignments__user_id__in=user_ids).distinct()
         serializer = self.get_serializer(qs, many=True)
         return Response(serializer.data)
+
+    @action(detail=True, methods=['post'], url_path='convert-to-series')
+    def convert_to_series(self, request, pk=None):
+        """Convert a quote placeholder job into a recurring job series."""
+        account = getattr(request, 'account', None)
+        if not account:
+            return Response({'detail': 'Account context is required.'}, status=403)
+
+        job = get_object_or_404(
+            Job.objects.filter(account=account).prefetch_related('items', 'assignments'),
+            pk=pk,
+        )
+        serializer = JobConvertToSeriesSerializer(data=request.data, context={'request': request})
+        serializer.is_valid(raise_exception=True)
+        result = serializer.save(job=job)
+        return Response(result, status=201)
 
     @action(detail=True, methods=['patch'], url_path='update-payment-method')
     def update_payment_method(self, request, pk=None):

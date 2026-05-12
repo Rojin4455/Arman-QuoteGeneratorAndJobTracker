@@ -926,6 +926,293 @@ class JobSeriesCreateSerializer(serializers.Serializer):
         return str(u.id) if u else None
 
 
+class JobConvertToSeriesSerializer(serializers.Serializer):
+    title = serializers.CharField(required=False, allow_blank=True, allow_null=True)
+    description = serializers.CharField(required=False, allow_blank=True, allow_null=True)
+    priority = serializers.ChoiceField(choices=['low', 'medium', 'high'], required=False)
+    duration_hours = serializers.DecimalField(max_digits=5, decimal_places=2, required=False)
+    scheduled_at = serializers.DateTimeField(required=False)
+    total_price = serializers.DecimalField(max_digits=12, decimal_places=2, required=False)
+    total_surcharge = serializers.DecimalField(max_digits=12, decimal_places=2, required=False)
+    discount_type = serializers.ChoiceField(
+        choices=[Job.DISCOUNT_TYPE_AMOUNT, Job.DISCOUNT_TYPE_PERCENTAGE],
+        required=False,
+        allow_blank=True,
+        allow_null=True,
+    )
+    discount_value = serializers.DecimalField(max_digits=12, decimal_places=2, required=False, allow_null=True)
+    contact_id = serializers.IntegerField(required=False, allow_null=True)
+    address_id = serializers.IntegerField(required=False, allow_null=True)
+    customer_name = serializers.CharField(required=False, allow_blank=True, allow_null=True)
+    customer_phone = serializers.CharField(required=False, allow_blank=True, allow_null=True)
+    customer_email = serializers.EmailField(required=False, allow_blank=True, allow_null=True)
+    customer_address = serializers.CharField(required=False, allow_blank=True, allow_null=True)
+    ghl_contact_id = serializers.CharField(required=False, allow_blank=True, allow_null=True)
+    quoted_by = serializers.CharField(required=False, allow_blank=True, allow_null=True)
+    notes = serializers.CharField(required=False, allow_blank=True, allow_null=True)
+    payment_method = serializers.ChoiceField(
+        choices=[choice[0] for choice in Job.PAYMENT_METHOD_CHOICES],
+        required=False,
+        allow_blank=True,
+        allow_null=True,
+    )
+    repeat_every = serializers.IntegerField(min_value=1)
+    repeat_unit = serializers.ChoiceField(choices=['day', 'week', 'month', 'quarter', 'semi_annual', 'year'])
+    occurrences = serializers.IntegerField(min_value=1)
+    day_of_week = serializers.IntegerField(min_value=0, max_value=6, required=False, allow_null=True)
+    items = JobServiceItemSerializer(many=True, required=False)
+    assignments = JobAssignmentSerializer(many=True, required=False)
+
+    def validate(self, data):
+        repeat_unit = data.get('repeat_unit')
+        day_of_week = data.get('day_of_week')
+
+        if repeat_unit == 'week' and day_of_week is None:
+            raise serializers.ValidationError({
+                'day_of_week': 'day_of_week is required when repeat_unit is "week"'
+            })
+
+        if repeat_unit and repeat_unit != 'week' and day_of_week is not None:
+            raise serializers.ValidationError({
+                'day_of_week': 'day_of_week should only be provided when repeat_unit is "week"'
+            })
+
+        return data
+
+    def save(self, **kwargs):
+        job = kwargs.get('job')
+        if job is None:
+            raise serializers.ValidationError({'job': 'A source job is required.'})
+
+        request = self.context.get('request')
+        account = getattr(request, 'account', None) if request else None
+        creator = request.user if request and request.user.is_authenticated else None
+
+        repeat_every = self.validated_data['repeat_every']
+        repeat_unit = self.validated_data['repeat_unit']
+        count = self.validated_data['occurrences']
+        day_of_week = self.validated_data.get('day_of_week')
+        base_dt = self.validated_data.get('scheduled_at') or job.scheduled_at
+        items_data = self.validated_data.get('items')
+        assignments_data = self.validated_data.get('assignments')
+        quoted_by_raw = self.validated_data.get('quoted_by', None)
+
+        if not base_dt:
+            raise serializers.ValidationError({
+                'scheduled_at': 'scheduled_at is required when the source job has no scheduled date.'
+            })
+
+        dates = JobSerializer._build_occurrence_datetimes(
+            base_dt, repeat_every, repeat_unit, count, day_of_week=day_of_week
+        )
+
+        from uuid import uuid4
+
+        with transaction.atomic():
+            source_job = Job.objects.select_for_update().get(pk=job.pk)
+            if source_job.status != 'to_convert':
+                raise serializers.ValidationError({
+                    'status': 'Only jobs with status "to_convert" can be converted to a recurring series.'
+                })
+
+            contact = self._resolve_contact()
+            address = self._resolve_address()
+            if contact and address and address.contact_id != contact.id:
+                raise serializers.ValidationError({
+                    'address_id': 'The provided address does not belong to the provided contact.'
+                })
+
+            series = uuid4()
+            self._apply_job_updates(source_job, contact=contact, address=address)
+            source_job.scheduled_at = dates[0]
+            source_job.job_type = 'recurring'
+            source_job.repeat_every = repeat_every
+            source_job.repeat_unit = repeat_unit
+            source_job.occurrences = count
+            source_job.day_of_week = day_of_week
+            source_job.status = 'pending'
+            source_job.series_id = series
+            source_job.series_sequence = 1
+            if account and not source_job.account_id:
+                source_job.account = account
+            if creator and not source_job.created_by_id:
+                source_job.created_by = creator
+            if creator and not source_job.created_by_email:
+                source_job.created_by_email = getattr(creator, 'email', None)
+            if 'quoted_by' in self.validated_data:
+                source_job.quoted_by_id = self._resolve_user_id_or_error(quoted_by_raw)
+
+            source_job.save()
+            JobOccurrence.objects.filter(job=source_job).delete()
+
+            if items_data is not None:
+                source_job.items.all().delete()
+                for item in items_data:
+                    JobServiceItem.objects.create(job=source_job, **item)
+            if assignments_data is not None:
+                source_job.assignments.all().delete()
+                for assignment in assignments_data:
+                    JobAssignment.objects.create(job=source_job, **assignment)
+
+            source_items = list(
+                JobServiceItem.objects.filter(job=source_job).select_related('service')
+            )
+            source_assignments = list(
+                JobAssignment.objects.filter(job=source_job).select_related('user')
+            )
+
+            created_ids = [str(source_job.id)]
+            job_account = source_job.account or account
+            created_by = source_job.created_by or creator
+            created_by_email = source_job.created_by_email or getattr(creator, 'email', None)
+
+            for idx, dt in enumerate(dates[1:], start=2):
+                new_job = Job.objects.create(
+                    submission=source_job.submission,
+                    title=source_job.title,
+                    description=source_job.description,
+                    priority=source_job.priority,
+                    duration_hours=source_job.duration_hours,
+                    scheduled_at=dt,
+                    total_price=source_job.total_price,
+                    total_surcharge=source_job.total_surcharge,
+                    contact=source_job.contact,
+                    address=source_job.address,
+                    customer_name=source_job.customer_name,
+                    customer_phone=source_job.customer_phone,
+                    customer_email=source_job.customer_email,
+                    customer_address=source_job.customer_address,
+                    ghl_contact_id=source_job.ghl_contact_id,
+                    quoted_by=source_job.quoted_by,
+                    created_by=created_by,
+                    created_by_email=created_by_email,
+                    job_type='recurring',
+                    repeat_every=repeat_every,
+                    repeat_unit=repeat_unit,
+                    occurrences=count,
+                    day_of_week=day_of_week,
+                    status='pending',
+                    notes=source_job.notes,
+                    payment_method=source_job.payment_method,
+                    discount_type=source_job.discount_type,
+                    discount_value=source_job.discount_value,
+                    invoice_url=source_job.invoice_url,
+                    series_id=series,
+                    series_sequence=idx,
+                    account=job_account,
+                )
+
+                for item in source_items:
+                    JobServiceItem.objects.create(
+                        job=new_job,
+                        service=item.service,
+                        custom_name=item.custom_name,
+                        price=item.price,
+                        duration_hours=item.duration_hours,
+                    )
+                for assignment in source_assignments:
+                    JobAssignment.objects.create(
+                        job=new_job,
+                        user=assignment.user,
+                        role=assignment.role,
+                    )
+
+                created_ids.append(str(new_job.id))
+
+        return {
+            'series_id': str(series),
+            'job_ids': created_ids,
+            'converted_job_id': str(source_job.id),
+        }
+
+    def _resolve_contact(self):
+        if 'contact_id' not in self.validated_data:
+            return None
+        contact_id = self.validated_data.get('contact_id')
+        if contact_id is None:
+            return None
+        try:
+            return Contact.objects.get(id=contact_id)
+        except Contact.DoesNotExist:
+            raise serializers.ValidationError({
+                'contact_id': f'Contact with id {contact_id} does not exist.'
+            })
+
+    def _resolve_address(self):
+        if 'address_id' not in self.validated_data:
+            return None
+        address_id = self.validated_data.get('address_id')
+        if address_id is None:
+            return None
+        try:
+            return Address.objects.get(id=address_id)
+        except Address.DoesNotExist:
+            raise serializers.ValidationError({
+                'address_id': f'Address with id {address_id} does not exist.'
+            })
+
+    def _apply_job_updates(self, source_job, contact=None, address=None):
+        scalar_fields = [
+            'title', 'description', 'priority', 'duration_hours', 'total_price',
+            'total_surcharge', 'discount_type', 'discount_value', 'customer_name',
+            'customer_phone', 'customer_email', 'customer_address', 'ghl_contact_id',
+            'notes', 'payment_method',
+        ]
+        for field in scalar_fields:
+            if field in self.validated_data:
+                setattr(source_job, field, self.validated_data[field])
+
+        if 'contact_id' in self.validated_data:
+            source_job.contact = contact
+            if contact:
+                name_parts = [contact.first_name, contact.last_name]
+                if 'customer_name' not in self.validated_data:
+                    source_job.customer_name = ' '.join(filter(None, name_parts)) or None
+                if 'customer_phone' not in self.validated_data:
+                    source_job.customer_phone = contact.phone
+                if 'customer_email' not in self.validated_data:
+                    source_job.customer_email = contact.email
+                if 'ghl_contact_id' not in self.validated_data:
+                    source_job.ghl_contact_id = contact.contact_id
+
+        if 'address_id' in self.validated_data:
+            source_job.address = address
+            if address and 'customer_address' not in self.validated_data:
+                source_job.customer_address = address.get_full_address()
+
+    def _resolve_user_id_or_error(self, ref):
+        if ref in (None, ''):
+            return None
+
+        ref_str = str(ref).strip()
+        if not ref_str:
+            return None
+
+        if ref_str.isdigit():
+            user_id = int(ref_str)
+            if User.objects.filter(id=user_id).exists():
+                return user_id
+
+        if len(ref_str) == 36 and ref_str.count('-') == 4:
+            try:
+                if User.objects.filter(id=ref_str).exists():
+                    return ref_str
+            except (TypeError, ValueError):
+                pass
+
+        if '@' in ref_str:
+            user = User.objects.filter(email=ref_str).only('id').first()
+        else:
+            user = User.objects.filter(username=ref_str).only('id').first()
+
+        if user:
+            return user.id
+
+        raise serializers.ValidationError({
+            'quoted_by': f'User "{ref_str}" could not be found.'
+        })
+
+
 class LocationSummarySerializer(serializers.Serializer):
     """Serializer for location summary card data"""
     address = serializers.CharField()
