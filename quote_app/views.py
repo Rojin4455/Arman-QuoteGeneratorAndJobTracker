@@ -340,17 +340,9 @@ class SubmitServiceResponsesView(APIView):
                 # Update service selection totals
                 service_selection.question_adjustments = total_adjustment
                 service_selection.save()
-                surcharge_for_submission = False
-                # Generate package quotes for ALL packages
-                surcharge_applied, surcharge_price = self._generate_all_package_quotes(service_selection, submission)
-                # if surcharge_applied:
-                #     surcharge_for_submission = True
+                # Generate package quotes for ALL packages (per-package surcharge when apply_trip_charge_to_bid)
+                self._generate_all_package_quotes(service_selection, submission)
 
-                # After all services processed
-                if surcharge_for_submission:
-                    submission.quote_surcharge_applicable = True
-                    submission.total_surcharges = surcharge_price
-                
                 # Check if all services have responses
                 all_services_completed = self._check_all_services_completed(submission)
                 all_services_completed = True
@@ -359,11 +351,7 @@ class SubmitServiceResponsesView(APIView):
                     submission.save()
 
                 create_or_update_ghl_contact(submission)
-                
-                print("submissionsssss:", submission.quote_surcharge_applicable)
-                print("submissionsssss:", surcharge_price)
-                print("submissionsssss:", submission.id)
-                
+
                 return Response({
                     'message': 'Responses submitted successfully',
                     'all_services_completed': all_services_completed,
@@ -1042,9 +1030,6 @@ class SubmitFinalQuoteView(APIView):
                 # You might want to store this in a separate field or model
                 # For now, we'll add it to a JSON field if you have one
                 submission.additional_data = additional_data
-                # submission.final_total += submission.total_surcharges
-                print("FFFFFFFFFF:", submission.total_surcharges,submission.final_total)
-                
                 submission.save()
                 
                 # Calculate final totals if not already done
@@ -1106,7 +1091,29 @@ class SubmitFinalQuoteView(APIView):
         # Update submission status
         submission.status = 'packages_selected'
         submission.save()
-    
+
+    def _effective_trip_surcharge_for_submission(self, submission):
+        """
+        Trip fee used at submission level when selected package rows have no surcharge
+        (e.g. apply_trip_charge_to_bid is false). Uses explicit submission.location when set;
+        otherwise, if the account has exactly one active location with a trip charge, use that
+        so totals match create-submission behavior when the client omits location FK.
+        """
+        if getattr(submission, 'location_id', None):
+            loc = submission.location
+            if loc and loc.trip_surcharge and loc.trip_surcharge > Decimal('0.00'):
+                return Decimal(loc.trip_surcharge)
+        account_id = getattr(submission, 'account_id', None)
+        if not account_id:
+            return Decimal('0.00')
+        loc_qs = Location.objects.filter(
+            account_id=account_id,
+            is_active=True,
+        ).exclude(trip_surcharge__lte=Decimal('0.00'))
+        if loc_qs.count() == 1:
+            return Decimal(loc_qs.first().trip_surcharge)
+        return Decimal('0.00')
+
     def _calculate_final_totals(self, submission):
         """Calculate final totals for the submission"""
         service_selections = submission.customerserviceselection_set.filter(
@@ -1115,22 +1122,57 @@ class SubmitFinalQuoteView(APIView):
         
         total_base_price = Decimal('0.00')
         total_adjustments = Decimal('0.00')
-        total_surcharges = Decimal('0.00')
-        
+        package_surcharge_total = Decimal('0.00')
+
         for selection in service_selections:
             selected_quote = selection.package_quotes.filter(is_selected=True).first()
             if selected_quote:
                 total_base_price += selected_quote.base_price + selected_quote.sqft_price
                 total_adjustments += selected_quote.question_adjustments
-                total_surcharges += selected_quote.surcharge_amount
+                package_surcharge_total += selected_quote.surcharge_amount
 
-        
-        
+        # Package rows include trip only when apply_trip_charge_to_bid is true. Otherwise use one
+        # submission-level trip (explicit location, or single trip-bearing location for the account).
+        # Trip is not written onto per-service rows so one-service quotes match multi-service: line
+        # totals are base + sqft + question adjustments only; total_surcharges + final_total on the
+        # submission carry the trip once.
+        if package_surcharge_total > Decimal('0.00'):
+            total_surcharges = package_surcharge_total
+        else:
+            trip = self._effective_trip_surcharge_for_submission(submission)
+            if trip > Decimal('0.00'):
+                total_surcharges = trip
+            else:
+                total_surcharges = Decimal('0.00')
+
+        submission.quote_surcharge_applicable = total_surcharges > Decimal('0.00')
+
         final_total = total_base_price + total_adjustments + total_surcharges + submission.custom_service_total
         
         submission.total_base_price = total_base_price
         submission.total_adjustments = total_adjustments
         submission.total_surcharges = total_surcharges
+
+        # Trip lives on the submission only (not on each line). Sync selections and selected quotes
+        # so they never carry a stale trip from older logic or mismatched saves.
+        if package_surcharge_total == Decimal('0.00') and total_surcharges > Decimal('0.00'):
+            for selection in service_selections:
+                selected_quote = selection.package_quotes.filter(is_selected=True).first()
+                if not selected_quote:
+                    continue
+                line_total = (
+                    selected_quote.base_price
+                    + selected_quote.sqft_price
+                    + selected_quote.question_adjustments
+                )
+                selected_quote.surcharge_amount = Decimal('0.00')
+                selected_quote.total_price = line_total
+                selected_quote.save()
+                selection.surcharge_amount = Decimal('0.00')
+                selection.surcharge_applicable = False
+                selection.final_total_price = line_total
+                selection.save()
+
         global_settings = GlobalBasePrice.objects.first()
         if global_settings:
             base_price = global_settings.base_price

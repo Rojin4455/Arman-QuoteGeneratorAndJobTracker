@@ -308,8 +308,7 @@ class CustomerSubmissionDetailSerializer(serializers.ModelSerializer):
     quote_schedule = QuoteScheduleSerializer(read_only=True)
     quoted_by_details = serializers.SerializerMethodField()
     images = CustomerSubmissionImageSerializer(many=True, read_only=True)
-    print("erererereererrerere")
-    
+
     class Meta:
         model = CustomerSubmission
         fields = [
