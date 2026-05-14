@@ -49,7 +49,7 @@ from accounts.utils import (
 )
 from rest_framework.generics import ListAPIView
 import requests
-from accounts.models import GHLAuthCredentials, GHLCustomField, Contact, Address
+from accounts.models import GHLAuthCredentials, GHLCustomField, Contact, Address, Calendar
 from accounts.account_scope import DEFAULT_LOCATION_ID
 
 from rest_framework import viewsets
@@ -63,9 +63,8 @@ import re
 import uuid
 from django.http import JsonResponse
 from django.utils.dateparse import parse_datetime
-from decouple import config
-
-DEFAULT_CALENDAR_ID = config("DEFAULT_CALENDAR_ID", default="")
+# Must match GHL calendar name and jobtracker_app lookups (typo is intentional in GHL).
+RECURRING_SERVICE_CALENDAR_NAME = "Reccuring Service Calendar"
 
 class ContactPagination(PageNumberPagination):
     page_size = 20  # items per page
@@ -1614,11 +1613,23 @@ class CalendarFreeSlotsView(APIView):
                     status=status.HTTP_400_BAD_REQUEST
                 )
 
-            calendar_id = request.query_params.get("calendarId") or DEFAULT_CALENDAR_ID
+            calendar_id = request.query_params.get("calendarId")
+            if not calendar_id:
+                cal = (
+                    Calendar.objects.filter(account=account, name=RECURRING_SERVICE_CALENDAR_NAME)
+                    .values_list("ghl_calendar_id", flat=True)
+                    .first()
+                )
+                calendar_id = cal or ""
             if not calendar_id:
                 return Response(
-                    {"error": "calendarId is required (or set DEFAULT_CALENDAR_ID in environment)."},
-                    status=status.HTTP_400_BAD_REQUEST
+                    {
+                        "error": (
+                            "calendarId is required, or sync calendars from GHL and ensure "
+                            f"'{RECURRING_SERVICE_CALENDAR_NAME}' exists for this account."
+                        )
+                    },
+                    status=status.HTTP_400_BAD_REQUEST,
                 )
 
             start_date = request.query_params.get("startDate")
