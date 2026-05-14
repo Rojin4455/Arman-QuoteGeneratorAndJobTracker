@@ -73,10 +73,11 @@ def create_product(access_token, location_id, product_name, custom_data=None):
         "prices": [
             {
                 "name": "Default",
+                "type": "one_time",
                 "amount": price,
-                "currency": "USD"
+                "currency": "USD",
             }
-        ]
+        ],
     }
 
     url = "https://services.leadconnectorhq.com/products/"
@@ -86,7 +87,11 @@ def create_product(access_token, location_id, product_name, custom_data=None):
         print(response.json(), 'product_create_response')
         if response.status_code in (200, 201):
             product = response.json()
-            return {"productId": product.get('_id')}
+            out = {"productId": product.get("_id")}
+            prices = product.get("prices") or []
+            if prices and prices[0].get("_id"):
+                out["priceId"] = prices[0]["_id"]
+            return out
         print(f"Failed to create product {product_name}: {response.status_code} - {response.text}")
     except Exception as exc:
         print(f"Error creating product '{product_name}': {exc}")
@@ -251,6 +256,8 @@ def create_invoice(name, contact_id, services, credentials, customer_address, ad
             "amount": service.get("price", 0.0),
             "productId": product_info["productId"],
         }
+        if product_info.get("priceId"):
+            line_item["priceId"] = product_info["priceId"]
 
         if service.get("price", 0.0) > 0:
             line_item["taxes"] = [
