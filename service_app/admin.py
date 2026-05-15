@@ -5,7 +5,6 @@ from django.contrib.auth.admin import UserAdmin as DjangoUserAdmin
 
 admin.site.register(Package)
 admin.site.register(GlobalSizePackage)
-admin.site.register(User)
 
 @admin.register(User)
 class UserAdmin(DjangoUserAdmin):
@@ -117,6 +116,4 @@ class UserAdmin(DjangoUserAdmin):
     )
 
 
-admin.site.register(Package)
-admin.site.register(GlobalSizePackage)
 
