@@ -15,6 +15,18 @@ class GHLAuthCredentials(models.Model):
     company_id = models.CharField(max_length=255, null=True, blank=True)
     location_id = models.CharField(max_length=255, null=True, blank=True)
     timezone = models.CharField(max_length=100, null=True, blank=True, default="America/Chicago")
+    company_name = models.CharField(
+        max_length=255,
+        blank=True,
+        null=True,
+        help_text="Business name shown on GHL invoices for this account/location.",
+    )
+    company_logo_url = models.URLField(
+        max_length=500,
+        blank=True,
+        null=True,
+        help_text="Public URL for logo shown on GHL invoices (same bucket CDN URLs work well).",
+    )
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 

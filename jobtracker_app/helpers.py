@@ -362,16 +362,23 @@ def create_invoice(name, contact_id, services, credentials, customer_address, ad
         "phoneNo": phoneNo
     }
 
-    businessDetails = {
-        "logoUrl":'https://storage.googleapis.com/msgsndr/b8qvo7VooP3JD3dIZU42/media/683efc8fd5817643ff8194f0.jpeg',
-        "name":"TruShine Window Cleaning",
-    }
+    biz_name = (getattr(credentials, "company_name", None) or "").strip() or "Business"
+    business_details_payload = {"name": biz_name}
+    logo_url = (getattr(credentials, "company_logo_url", None) or "").strip()
+    if logo_url:
+        business_details_payload["logoUrl"] = logo_url
+
+    businessDetails = business_details_payload
 
     sentTo = {
         "email":[contact.email]
     }
 
-    issue_date = datetime.now(ZoneInfo("America/Chicago")).strftime("%Y-%m-%d")
+    tz_name = (getattr(credentials, "timezone", None) or "America/Chicago").strip() or "America/Chicago"
+    try:
+        issue_date = datetime.now(ZoneInfo(tz_name)).strftime("%Y-%m-%d")
+    except Exception:
+        issue_date = datetime.now(ZoneInfo("America/Chicago")).strftime("%Y-%m-%d")
 
     payload = {
         "altId": credentials.location_id,
