@@ -3,16 +3,67 @@ import requests
 from decouple import config
 
 
+def resolve_ghl_credentials_for_submission(submission):
+    """
+    Resolve GHLAuthCredentials for a customer submission.
+
+    Priority: submission.account -> contact.account -> lookup by contact.location_id.
+    """
+    account = getattr(submission, 'account', None)
+    if account is not None:
+        return account
+
+    if getattr(submission, 'account_id', None):
+        account = GHLAuthCredentials.objects.filter(pk=submission.account_id).first()
+        if account:
+            return account
+
+    contact = getattr(submission, 'contact', None)
+    if contact is None:
+        return None
+
+    contact_account = getattr(contact, 'account', None)
+    if contact_account is not None:
+        return contact_account
+
+    if getattr(contact, 'account_id', None):
+        account = GHLAuthCredentials.objects.filter(pk=contact.account_id).first()
+        if account:
+            return account
+
+    location_id = (getattr(contact, 'location_id', None) or '').strip()
+    if location_id:
+        return GHLAuthCredentials.objects.filter(location_id=location_id).first()
+
+    return None
+
+
+def resolve_location_id_for_submission(submission, credentials):
+    """GHL location id for API calls (contact location preferred, then credentials)."""
+    contact = getattr(submission, 'contact', None)
+    if contact:
+        contact_loc = (getattr(contact, 'location_id', None) or '').strip()
+        if contact_loc:
+            return contact_loc
+    if credentials:
+        return (getattr(credentials, 'location_id', None) or '').strip() or None
+    return None
+
+
 def create_or_update_ghl_contact(submission, is_submit=False):
     try:
         print("🔹 Starting GHL contact sync...")
-        credentials = GHLAuthCredentials.objects.first()
+        credentials = resolve_ghl_credentials_for_submission(submission)
         if not credentials:
-            print("❌ No GHLAuthCredentials found in DB.")
+            print("❌ No GHLAuthCredentials found for this submission (account or location_id).")
+            return
+
+        location_id = resolve_location_id_for_submission(submission, credentials)
+        if not location_id:
+            print("❌ No location_id available for this submission.")
             return
 
         token = credentials.access_token
-        location_id = credentials.location_id
         print(f"✅ Using token (truncated): {token[:10]}..., locationId: {location_id}")
 
         headers = {
