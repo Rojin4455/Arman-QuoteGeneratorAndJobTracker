@@ -5,6 +5,7 @@ from decimal import Decimal
 from jobtracker_app.models import Job
 from service_app.models import User
 from .models import Payout, PayrollSettings, EmployeeProfile, CollaborationRate
+from .utils import is_first_time_bonus_eligible
 
 
 @receiver(pre_save, sender=Job)
@@ -56,6 +57,8 @@ def _create_project_payouts(job):
        - Create a 'project' payout based on their individual rate
     2. For the quoted_by person:
        - Create a bonus payout (first_time or quoted_by bonus)
+       - one_time jobs always get first_time rate; recurring jobs get first_time
+         rate only on the first completed occurrence in the series
        - This is separate from assignee payouts, so if quoted_by is also
          an assignee, they get BOTH payouts
     """
@@ -79,8 +82,8 @@ def _create_project_payouts(job):
     # Get payroll settings for the job's account (so bonus % etc. are account-specific)
     settings = PayrollSettings.get_settings(account=getattr(job, 'account', None))
     
-    # Determine if first-time project
-    is_first_time = (job.job_type == 'one_time')
+    # Determine if quoted-by gets first-time bonus % (one_time, or first completed in series)
+    is_first_time = is_first_time_bonus_eligible(job)
     
     # Get number of assigned employees (in job's account)
     employee_count = len(assignments)
