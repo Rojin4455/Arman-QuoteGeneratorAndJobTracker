@@ -15,6 +15,7 @@ from accounts.tasks import sync_calendars_from_ghl_task
 from dashboard_app.tasks import sync_single_invoice_task,delete_invoice_task
 from dashboard_app.models import Invoice
 from accounts.utils import fetch_location_custom_fields
+from jobtracker_app.helpers import update_job_invoice_status_by_invoice_id
 
 
 
@@ -209,6 +210,10 @@ def webhook_handler(request):
                                 invoice.status = new_status
                                 invoice.save(update_fields=["status"])
                                 print(f"✅ Updated invoice status to '{new_status}' for {event_type}: invoice_id={invoice_id}")
+                            new_status = INVOICE_EVENT_STATUS_MAP[event_type]
+                            job_count = update_job_invoice_status_by_invoice_id(invoice_id, new_status)
+                            if job_count:
+                                print(f"✅ Updated invoice_status on {job_count} job(s) for {event_type}: invoice_id={invoice_id}")
                         except Exception as e:
                             print(f"⚠️ Could not update invoice status for {event_type}: {e}")
                     # Sync invoice for create, update, paid, partially paid, sent, void
@@ -242,6 +247,10 @@ def webhook_handler(request):
                                         invoice.status = new_status
                                         invoice.save(update_fields=["status"])
                                         print(f"✅ Updated invoice status to '{new_status}' for {event_type}: invoice_id={invoice_id}")
+                                    new_status = INVOICE_EVENT_STATUS_MAP[event_type]
+                                    job_count = update_job_invoice_status_by_invoice_id(invoice_id, new_status)
+                                    if job_count:
+                                        print(f"✅ Updated invoice_status on {job_count} job(s) for {event_type}: invoice_id={invoice_id}")
                                 except Exception as e:
                                     print(f"⚠️ Could not update invoice status for {event_type}: {e}")
                             sync_single_invoice_task.delay(location_id, invoice_id)

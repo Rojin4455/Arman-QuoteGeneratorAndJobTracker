@@ -524,6 +524,11 @@ class TimeEntryViewSet(AccountScopedQuerysetMixin, viewsets.ModelViewSet):
 class EmployeeTimeOffViewSet(AccountScopedQuerysetMixin, viewsets.ModelViewSet):
     """
     Employee calendar time off (single day or inclusive range).
+
+    Coverage (single day: ``coverage``; multi-day: ``start_day_coverage`` /
+    ``end_day_coverage`` on first/last day; middle days are full off):
+    ``full_day``, ``half_day_am``, ``half_day_pm``, ``custom`` (requires times).
+
     - Non-admin: create/list/retrieve/update/delete only their own entries.
     - Admin: all employees in account; optional ?employee=<user_id>.
     - Optional calendar window: ?from_date=YYYY-MM-DD&to_date=YYYY-MM-DD returns
@@ -596,7 +601,16 @@ class EmployeeTimeOffViewSet(AccountScopedQuerysetMixin, viewsets.ModelViewSet):
         Query (choose one):
         - date=YYYY-MM-DD — single day (not off on that day)
         - start_date=YYYY-MM-DD & end_date=YYYY-MM-DD — any inclusive range
+
+        Optional time window (half-day / custom aware):
+        - period=am|pm — only treat AM or PM as the slot to check
+        - from_time=HH:MM & to_time=HH:MM — custom slot (overrides period)
         """
+        from .time_off_utils import (
+            employee_ids_off_in_window,
+            parse_period_param,
+            parse_time_param,
+        )
         account = getattr(request, 'account', None)
         if not account:
             return Response(
@@ -645,13 +659,52 @@ class EmployeeTimeOffViewSet(AccountScopedQuerysetMixin, viewsets.ModelViewSet):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        # Overlap: time_off.start_date <= range_end AND time_off.end_date >= range_start
-        
-        off_employee_ids = EmployeeTimeOff.objects.filter(
-            employee__account=account,
-            start_date__lte=end_d,
-            end_date__gte=start_d,
-        ).values_list('employee_id', flat=True).distinct()
+        check_start = None
+        check_end = None
+        from_time_s = (request.query_params.get('from_time') or '').strip()
+        to_time_s = (request.query_params.get('to_time') or '').strip()
+        period_s = (request.query_params.get('period') or '').strip()
+
+        if from_time_s or to_time_s:
+            if not from_time_s or not to_time_s:
+                return Response(
+                    {
+                        'error': (
+                            'Provide both from_time and to_time (HH:MM), or use period=am|pm.'
+                        ),
+                    },
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            try:
+                check_start = parse_time_param(from_time_s, 'from_time')
+                check_end = parse_time_param(to_time_s, 'to_time')
+            except ValueError as exc:
+                return Response(
+                    {'error': str(exc)},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            if check_end <= check_start:
+                return Response(
+                    {'error': 'to_time must be after from_time.'},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+        elif period_s:
+            try:
+                check_start, check_end = parse_period_param(period_s)
+            except ValueError as exc:
+                return Response(
+                    {'error': str(exc)},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
+        time_off_qs = EmployeeTimeOff.objects.filter(employee__account=account)
+        off_employee_ids = employee_ids_off_in_window(
+            time_off_qs,
+            start_d,
+            end_d,
+            check_start=check_start,
+            check_end=check_end,
+        )
 
         queryset = (
             User.objects.filter(account=account, is_superuser=False)
@@ -661,14 +714,18 @@ class EmployeeTimeOffViewSet(AccountScopedQuerysetMixin, viewsets.ModelViewSet):
 
         employees = list(queryset)
         serializer = AvailableEmployeeSerializer(employees, many=True)
-        return Response(
-            {
-                'start_date': start_d.isoformat(),
-                'end_date': end_d.isoformat(),
-                'employees': serializer.data,
-                'count': len(employees),
-            }
-        )
+        payload = {
+            'start_date': start_d.isoformat(),
+            'end_date': end_d.isoformat(),
+            'employees': serializer.data,
+            'count': len(employees),
+        }
+        if check_start is not None:
+            payload['from_time'] = check_start.isoformat()
+            payload['to_time'] = check_end.isoformat()
+        elif period_s:
+            payload['period'] = period_s.lower()
+        return Response(payload)
 
 
 class PayoutViewSet(AccountScopedQuerysetMixin, viewsets.ModelViewSet):

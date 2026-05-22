@@ -99,7 +99,7 @@ class AdminContactJobSerializer(serializers.ModelSerializer):
             'id', 'submission_id', 'title', 'description', 'status', 'priority',
             'job_type', 'scheduled_at', 'total_price', 'total_surcharge',
             'discount_type', 'discount_value', 'customer_name', 'customer_phone',
-            'customer_email', 'invoice_url', 'quoted_by', 'assignments', 'items_count',
+            'customer_email', 'invoice_id', 'invoice_status', 'invoice_url', 'quoted_by', 'assignments', 'items_count',
             'created_at', 'updated_at',
         ]
 

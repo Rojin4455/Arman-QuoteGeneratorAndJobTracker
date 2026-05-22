@@ -12,6 +12,7 @@ from .models import (
     EmployeeTimeOff,
 )
 from .utils import get_user_timezone, convert_utc_to_user_timezone
+from .time_off_utils import validate_time_off_entry, equivalent_days
 
 
 class CollaborationRateSerializer(serializers.ModelSerializer):
@@ -199,6 +200,8 @@ class AvailableEmployeeSerializer(serializers.ModelSerializer):
 class EmployeeTimeOffSerializer(serializers.ModelSerializer):
     employee_name = serializers.CharField(source='employee.get_full_name', read_only=True)
     employee_email = serializers.EmailField(source='employee.email', read_only=True)
+    equivalent_days = serializers.SerializerMethodField(read_only=True)
+    is_single_day = serializers.SerializerMethodField(read_only=True)
 
     class Meta:
         model = EmployeeTimeOff
@@ -210,6 +213,15 @@ class EmployeeTimeOffSerializer(serializers.ModelSerializer):
             'start_date',
             'end_date',
             'kind',
+            'coverage',
+            'start_day_coverage',
+            'end_day_coverage',
+            'start_time',
+            'end_time',
+            'end_start_time',
+            'end_end_time',
+            'equivalent_days',
+            'is_single_day',
             'notes',
             'created_at',
             'updated_at',
@@ -224,6 +236,47 @@ class EmployeeTimeOffSerializer(serializers.ModelSerializer):
         ):
             self.fields['employee'].read_only = True
 
+    def get_equivalent_days(self, obj):
+        return str(equivalent_days(obj))
+
+    def get_is_single_day(self, obj):
+        return obj.is_single_day
+
+    def _build_validation_instance(self, data):
+        """Merge payload with instance for cross-field validation."""
+        class _Holder:
+            pass
+
+        h = _Holder()
+        inst = self.instance
+        for field in (
+            'start_date', 'end_date', 'coverage', 'start_day_coverage',
+            'end_day_coverage', 'start_time', 'end_time', 'end_start_time',
+            'end_end_time',
+        ):
+            if field in data:
+                setattr(h, field, data[field])
+            elif inst is not None:
+                setattr(h, field, getattr(inst, field))
+            else:
+                setattr(h, field, None)
+
+        if h.start_date is None or h.end_date is None:
+            h.is_single_day = False
+        else:
+            h.is_single_day = h.start_date == h.end_date
+
+        defaults = {
+            'coverage': 'full_day',
+            'start_day_coverage': 'full_day',
+            'end_day_coverage': 'full_day',
+        }
+        for key, default in defaults.items():
+            if getattr(h, key) in (None, ''):
+                setattr(h, key, default)
+
+        return h
+
     def validate(self, data):
         start = data.get('start_date')
         end = data.get('end_date')
@@ -236,6 +289,11 @@ class EmployeeTimeOffSerializer(serializers.ModelSerializer):
             raise serializers.ValidationError({
                 'end_date': 'End date must be on or after start date.',
             })
+
+        holder = self._build_validation_instance(data)
+        errors = validate_time_off_entry(holder)
+        if errors:
+            raise serializers.ValidationError(errors)
         return data
 
 

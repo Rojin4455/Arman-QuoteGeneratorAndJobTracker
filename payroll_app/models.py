@@ -80,7 +80,8 @@ class EmployeeProfile(models.Model):
 class EmployeeTimeOff(models.Model):
     """
     Calendar time off for an employee: single day (start_date == end_date)
-    or inclusive date range. Scoped via employee.account like TimeEntry.
+    or inclusive date range. Supports full day, half day (AM/PM), and custom
+    hours on one day or on the first/last day of a multi-day range.
     """
     KIND_CHOICES = [
         ('day_off', 'Day off'),
@@ -88,6 +89,12 @@ class EmployeeTimeOff(models.Model):
         ('sick', 'Sick'),
         ('personal', 'Personal'),
         ('other', 'Other'),
+    ]
+    COVERAGE_CHOICES = [
+        ('full_day', 'Full day'),
+        ('half_day_am', 'Half day (morning)'),
+        ('half_day_pm', 'Half day (afternoon)'),
+        ('custom', 'Custom hours'),
     ]
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
@@ -105,6 +112,30 @@ class EmployeeTimeOff(models.Model):
         choices=KIND_CHOICES,
         default='day_off',
     )
+    # Single-day (start_date == end_date): how much of that day is off.
+    coverage = models.CharField(
+        max_length=20,
+        choices=COVERAGE_CHOICES,
+        default='full_day',
+        help_text='Used when start_date equals end_date.',
+    )
+    # Multi-day range: coverage for the first and last calendar days.
+    start_day_coverage = models.CharField(
+        max_length=20,
+        choices=COVERAGE_CHOICES,
+        default='full_day',
+    )
+    end_day_coverage = models.CharField(
+        max_length=20,
+        choices=COVERAGE_CHOICES,
+        default='full_day',
+    )
+    # Custom window on start_date (single-day coverage or start_day_coverage).
+    start_time = models.TimeField(null=True, blank=True)
+    end_time = models.TimeField(null=True, blank=True)
+    # Custom window on end_date when it differs from start_date.
+    end_start_time = models.TimeField(null=True, blank=True)
+    end_end_time = models.TimeField(null=True, blank=True)
     notes = models.TextField(blank=True, null=True)
 
     created_at = models.DateTimeField(auto_now_add=True)
@@ -123,11 +154,20 @@ class EmployeeTimeOff(models.Model):
             f"{self.start_date}–{self.end_date} ({self.kind})"
         )
 
+    @property
+    def is_single_day(self):
+        return self.start_date == self.end_date
+
     def clean(self):
+        from .time_off_utils import validate_time_off_entry
+
         if self.end_date and self.start_date and self.end_date < self.start_date:
             raise ValidationError({
                 'end_date': 'End date must be on or after start date.',
             })
+        errors = validate_time_off_entry(self)
+        if errors:
+            raise ValidationError(errors)
 
 
 class CollaborationRate(models.Model):

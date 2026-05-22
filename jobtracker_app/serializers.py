@@ -414,10 +414,12 @@ class JobSerializer(serializers.ModelSerializer):
             'job_type', 'repeat_every', 'repeat_unit', 'occurrences', 'day_of_week',
             'status', 'notes', 'payment_method', 'items', 'assignments',
             'occurrence_count', 'occurrence_events', 'series_id', 'series_sequence',
-            'invoice_url', 'slot_reserved_info', 'account_timezone', 'images', 'created_at', 'updated_at'
+            'invoice_id', 'invoice_status', 'invoice_url', 'slot_reserved_info', 'account_timezone', 'images', 'created_at', 'updated_at'
         ]
         read_only_fields = [
-            'id', 'contact', 'address', 'revised_total', 'account_timezone', 'created_at', 'updated_at',
+            'id', 'contact', 'address', 'revised_total', 'account_timezone',
+            'invoice_id', 'invoice_status', 'invoice_url',
+            'created_at', 'updated_at',
         ]
 
     def get_contact_details(self, obj):

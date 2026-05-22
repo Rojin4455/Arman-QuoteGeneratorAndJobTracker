@@ -685,3 +685,28 @@ def link_jobs_to_contacts_by_ghl_id():
     linked = len(to_update)
     skipped = total_jobs - linked
     return linked, skipped
+
+
+INVOICE_STATUS_DRAFT = "draft"
+INVOICE_STATUS_SENT = "sent"
+
+
+def save_job_invoice_info(job_id, invoice_id, *, invoice_sent=False, invoice_url=None):
+    """Store GHL invoice id, URL, and initial status on a job after invoice creation."""
+    if not job_id or not invoice_id:
+        return
+    status = INVOICE_STATUS_SENT if invoice_sent else INVOICE_STATUS_DRAFT
+    if not invoice_url:
+        invoice_url = f"https://workorder.theservicepilot.com/invoice/{invoice_id}/"
+    Job.objects.filter(id=job_id).update(
+        invoice_id=invoice_id,
+        invoice_url=invoice_url,
+        invoice_status=status,
+    )
+
+
+def update_job_invoice_status_by_invoice_id(invoice_id, status):
+    """Update invoice_status on any job linked to this GHL invoice id."""
+    if not invoice_id or not status:
+        return 0
+    return Job.objects.filter(invoice_id=invoice_id).update(invoice_status=status)

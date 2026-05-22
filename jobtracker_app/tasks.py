@@ -10,6 +10,7 @@ from .helpers import (
     build_invoice_payload_from_job,
     create_invoice,
     resolve_ghl_credentials_for_invoice,
+    save_job_invoice_info,
     search_ghl_contact,
     send_invoice,
     trip_surcharge_amount_for_job,
@@ -106,29 +107,29 @@ def _process_invoice_payload(data, job_id=None):
     if response and not response.get("error"):
         invoice_id = response.get("_id")
 
-        # Save invoice URL to job if job_id is provided
-        if job_id and invoice_id:
-            try:
-                invoice_url = f"https://workorder.theservicepilot.com/invoice/{invoice_id}/"
-                Job.objects.filter(id=job_id).update(invoice_url=invoice_url)
-                print(f"Invoice URL saved to job {job_id}: {invoice_url}")
-            except Exception as e:
-                print(f"Error saving invoice URL to job {job_id}: {str(e)}")
-
         existing_tags = tags if isinstance(tags, list) else []
         print("Existing tags:", existing_tags)
 
+        invoice_sent = False
         try:
             if "card authorized" not in [t.lower() for t in existing_tags]:
                 print("Card not authorized → sending invoice...")
                 send_resp = send_invoice(invoice_id, credentials=credentials)
                 print("Send invoice response:", send_resp)
+                invoice_sent = bool(send_resp and not (isinstance(send_resp, dict) and send_resp.get("error")))
             else:
                 print("Card authorized → skipping invoice send.")
                 send_resp = "skipped"
         except Exception as e:
             print("Error sending invoice:", e)
             send_resp = None
+
+        if job_id and invoice_id:
+            try:
+                save_job_invoice_info(job_id, invoice_id, invoice_sent=invoice_sent)
+                print(f"Invoice saved to job {job_id}: id={invoice_id}, sent={invoice_sent}")
+            except Exception as e:
+                print(f"Error saving invoice to job {job_id}: {str(e)}")
 
         updated_tags = list(set(existing_tags + ["Invoice Created"]))
         payload = {"tags": updated_tags}
@@ -347,10 +348,9 @@ def send_job_completion_webhook(job_id):
                 )
                 
                 if invoice_id:
+                    save_job_invoice_info(job_id, invoice_id)
                     invoice_url = f"https://workorder.theservicepilot.com/invoice/{invoice_id}/"
-                    # Save invoice URL to job
-                    Job.objects.filter(id=job_id).update(invoice_url=invoice_url)
-                    print(f"✅ Invoice URL saved to job {job_id}: {invoice_url}")
+                    print(f"✅ Invoice saved to job {job_id}: id={invoice_id}")
                 elif response_data.get("invoice_url"):
                     invoice_url = response_data.get("invoice_url")
                     Job.objects.filter(id=job_id).update(invoice_url=invoice_url)
