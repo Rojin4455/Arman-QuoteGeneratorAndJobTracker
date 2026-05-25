@@ -1,5 +1,6 @@
 from datetime import datetime
 from decimal import Decimal
+import uuid
 import requests
 
 from celery import shared_task
@@ -17,6 +18,78 @@ from .helpers import (
     update_contact,
 )
 from .models import Job
+
+
+def _normalize_invoice_identifier(value):
+    if value is None:
+        return ""
+    return str(value).strip()
+
+
+def _is_uuid_like(value):
+    candidate = _normalize_invoice_identifier(value)
+    if not candidate:
+        return False
+    try:
+        uuid.UUID(candidate)
+        return True
+    except (ValueError, TypeError, AttributeError):
+        return False
+
+
+def _pick_best_invoice_identifier(candidates, *, allow_uuid_fallback=True):
+    normalized = [_normalize_invoice_identifier(candidate) for candidate in candidates]
+    normalized = [candidate for candidate in normalized if candidate]
+    if not normalized:
+        return ""
+    for candidate in normalized:
+        if not _is_uuid_like(candidate):
+            return candidate
+    return normalized[0] if allow_uuid_fallback else ""
+
+
+def _extract_invoice_reference_data(response_data):
+    response_data = response_data if isinstance(response_data, dict) else {}
+    invoice_payload = response_data.get("invoice")
+    invoice_payload = invoice_payload if isinstance(invoice_payload, dict) else {}
+
+    # New webhook contract: `ghl_invoice_id` is the canonical GHL `_id`.
+    ghl_invoice_id = _pick_best_invoice_identifier(
+        [
+            response_data.get("ghl_invoice_id"),
+            invoice_payload.get("ghl_invoice_id"),
+            invoice_payload.get("invoice_id"),
+            invoice_payload.get("_id"),
+            response_data.get("invoice_id"),
+            response_data.get("_id"),
+            response_data.get("id"),
+            invoice_payload.get("id"),
+        ],
+        allow_uuid_fallback=False,
+    )
+
+    public_invoice_id = _pick_best_invoice_identifier(
+        [
+            response_data.get("public_invoice_id"),
+            response_data.get("id"),
+            invoice_payload.get("id"),
+        ],
+    )
+
+    invoice_url = (
+        _normalize_invoice_identifier(response_data.get("invoice_url"))
+        or _normalize_invoice_identifier(invoice_payload.get("invoice_url"))
+        or _normalize_invoice_identifier(invoice_payload.get("url"))
+    )
+
+    if not invoice_url and public_invoice_id and _is_uuid_like(public_invoice_id):
+        invoice_url = f"https://workorder.theservicepilot.com/invoice/{public_invoice_id}/"
+
+    return {
+        "ghl_invoice_id": ghl_invoice_id,
+        "public_invoice_id": public_invoice_id,
+        "invoice_url": invoice_url,
+    }
 
 
 @shared_task
@@ -337,22 +410,18 @@ def send_job_completion_webhook(job_id):
             try:
                 response_data = response.json() if response.content else {}
                 print(f"📋 Webhook response data: {response_data}")
-                
-                # Try multiple possible response formats
-                invoice_id = (
-                    response_data.get("invoice_id") or
-                    response_data.get("invoice_token") or
-                    response_data.get("id") or
-                    response_data.get("invoice", {}).get("id") or
-                    response_data.get("invoice", {}).get("invoice_id")
-                )
-                
-                if invoice_id:
-                    save_job_invoice_info(job_id, invoice_id)
-                    invoice_url = f"https://workorder.theservicepilot.com/invoice/{invoice_id}/"
-                    print(f"✅ Invoice saved to job {job_id}: id={invoice_id}")
-                elif response_data.get("invoice_url"):
-                    invoice_url = response_data.get("invoice_url")
+
+                invoice_ref = _extract_invoice_reference_data(response_data)
+                ghl_invoice_id = invoice_ref["ghl_invoice_id"]
+                invoice_url = invoice_ref["invoice_url"] or None
+
+                if ghl_invoice_id:
+                    save_job_invoice_info(job_id, ghl_invoice_id, invoice_url=invoice_url)
+                    print(
+                        f"✅ Invoice saved to job {job_id}: "
+                        f"ghl_invoice_id={ghl_invoice_id}, invoice_url={invoice_url}"
+                    )
+                elif invoice_url:
                     Job.objects.filter(id=job_id).update(invoice_url=invoice_url)
                     print(f"✅ Invoice URL saved to job {job_id}: {invoice_url}")
                 else:

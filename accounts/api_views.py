@@ -1,6 +1,6 @@
 """DRF viewsets for accounts app (JWT + account scope)."""
 
-from urllib.parse import quote, urlparse
+from urllib.parse import urlparse
 
 from django.conf import settings as django_settings
 from django.db import models
@@ -10,6 +10,7 @@ from rest_framework.exceptions import ValidationError
 from rest_framework.response import Response
 
 from accounts.models import Location
+from accounts.oauth import build_ghl_marketplace_auth_url
 from accounts.permissions import AccountScopedPermission, IsSuperuserPermission
 from accounts.serializers import GHLLocationManagementSerializer
 
@@ -63,6 +64,7 @@ class GHLLocationManagementViewSet(viewsets.ModelViewSet):
 
         client_id = getattr(django_settings, "GHL_CLIENT_ID", "") or ""
         scope = getattr(django_settings, "GHL_OAUTH_SCOPE", "") or ""
+        version_id = getattr(django_settings, "GHL_VERSION_ID", "") or ""
         if not client_id or not scope:
             return Response(
                 {
@@ -74,14 +76,11 @@ class GHLLocationManagementViewSet(viewsets.ModelViewSet):
                 status=status.HTTP_503_SERVICE_UNAVAILABLE,
             )
 
-        q_redirect = quote(redirect_uri, safe="")
-        q_scope = quote(scope, safe="")
-        auth_url = (
-            "https://marketplace.gohighlevel.com/oauth/chooselocation?"
-            "response_type=code&"
-            f"redirect_uri={q_redirect}&"
-            f"client_id={quote(client_id, safe='')}&"
-            f"scope={q_scope}"
+        auth_url = build_ghl_marketplace_auth_url(
+            redirect_uri=redirect_uri,
+            client_id=client_id,
+            scope=scope,
+            version_id=version_id,
         )
         return Response({"auth_url": auth_url})
 

@@ -101,7 +101,7 @@ DATABASES = {
     'default': {
         'ENGINE': 'django.db.backends.postgresql',
         'NAME': config("NAME"),
-        'USER': "postgres",
+        'USER': config("USER"),
         'PASSWORD': config("PASSWORD"),
         'HOST': config("HOST"),
         'PORT': '5432',
@@ -213,6 +213,7 @@ GOOGLE_PLACES_API_KEY = config('GOOGLE_PLACES_API_KEY', '')
 # redirect_uri for location connect = frontend Origin (or Referer) + GHL_LOCATION_CONNECT_REDIRECT_PATH.
 GHL_CLIENT_ID = config('GHL_CLIENT_ID', default='')
 GHL_OAUTH_SCOPE = config('SCOPE', default='')
+GHL_VERSION_ID = config('GHL_VERSION_ID', default='')
 GHL_LOCATION_CONNECT_REDIRECT_PATH = config(
     'GHL_LOCATION_CONNECT_REDIRECT_PATH',
     default='/oauth/location-callback',

@@ -1,6 +1,7 @@
 from datetime import datetime, timedelta
 from decimal import Decimal
 
+from django.test import SimpleTestCase
 from django.utils import timezone
 from rest_framework import status
 from rest_framework.authtoken.models import Token
@@ -8,7 +9,66 @@ from rest_framework.test import APITestCase
 
 from accounts.models import GHLAuthCredentials
 from service_app.models import User
+from .tasks import _extract_invoice_reference_data
 from .models import Job, JobAssignment, JobServiceItem
+
+
+class InvoiceReferenceExtractionTests(SimpleTestCase):
+    def test_uses_direct_ghl_invoice_id_from_webhook_response(self):
+        ref = _extract_invoice_reference_data(
+            {
+                "message": "Webhook received",
+                "ghl_invoice_id": "6a149ba70560acdb3d887f62",
+                "invoice_url": "http://localhost:5173/invoice/example",
+                "invoice_token": "public-token",
+            }
+        )
+
+        self.assertEqual(ref["ghl_invoice_id"], "6a149ba70560acdb3d887f62")
+        self.assertEqual(ref["invoice_url"], "http://localhost:5173/invoice/example")
+
+    def test_prefers_nested_ghl_invoice_id_over_public_uuid(self):
+        ref = _extract_invoice_reference_data(
+            {
+                "id": "46779fb8-21b7-46db-bb4a-133596c6a1df",
+                "invoice_url": "https://workorder.theservicepilot.com/invoice/46779fb8-21b7-46db-bb4a-133596c6a1df/",
+                "invoice": {
+                    "id": "46779fb8-21b7-46db-bb4a-133596c6a1df",
+                    "invoice_id": "6a149ba70560acdb3d887f62",
+                },
+            }
+        )
+
+        self.assertEqual(ref["ghl_invoice_id"], "6a149ba70560acdb3d887f62")
+        self.assertEqual(
+            ref["invoice_url"],
+            "https://workorder.theservicepilot.com/invoice/46779fb8-21b7-46db-bb4a-133596c6a1df/",
+        )
+
+    def test_invoice_token_is_not_used_as_ghl_invoice_id(self):
+        ref = _extract_invoice_reference_data(
+            {
+                "message": "Webhook received",
+                "invoice_token": "public-token-only",
+                "invoice_url": "http://localhost:5173/invoice/example",
+            }
+        )
+
+        self.assertEqual(ref["ghl_invoice_id"], "")
+        self.assertEqual(ref["invoice_url"], "http://localhost:5173/invoice/example")
+
+    def test_falls_back_to_public_uuid_only_for_invoice_url(self):
+        ref = _extract_invoice_reference_data(
+            {
+                "id": "46779fb8-21b7-46db-bb4a-133596c6a1df",
+            }
+        )
+
+        self.assertEqual(ref["ghl_invoice_id"], "")
+        self.assertEqual(
+            ref["invoice_url"],
+            "https://workorder.theservicepilot.com/invoice/46779fb8-21b7-46db-bb4a-133596c6a1df/",
+        )
 
 
 class JobConvertToSeriesTests(APITestCase):

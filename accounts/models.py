@@ -6,7 +6,7 @@ from django.contrib.postgres.fields import ArrayField, JSONField
 
 
 class GHLAuthCredentials(models.Model):
-    user_id = models.CharField(max_length=255, unique=True)
+    user_id = models.CharField(max_length=255)
     access_token = models.TextField()
     refresh_token = models.TextField()
     expires_in = models.IntegerField()
