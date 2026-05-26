@@ -3,6 +3,7 @@ from decimal import Decimal
 import pytz
 from django.utils import timezone as django_timezone
 from service_app.models import User
+from .access import payroll_has_admin_access
 from .models import (
     EmployeeProfile,
     CollaborationRate,
@@ -231,8 +232,8 @@ class EmployeeTimeOffSerializer(serializers.ModelSerializer):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         request = self.context.get('request')
-        if request and request.user.is_authenticated and not getattr(
-            request.user, 'is_admin', False
+        if request and request.user.is_authenticated and not payroll_has_admin_access(
+            request.user
         ):
             self.fields['employee'].read_only = True
 

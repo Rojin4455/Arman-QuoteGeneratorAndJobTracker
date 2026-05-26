@@ -12,6 +12,7 @@ from datetime import datetime, timedelta
 from accounts.permissions import AccountScopedPermission
 from accounts.mixins import AccountScopedQuerysetMixin
 from service_app.models import User
+from .access import payroll_can_view_team_data, payroll_has_admin_access
 from .models import (
     EmployeeProfile,
     CollaborationRate,
@@ -38,11 +39,19 @@ MIN_DURATION_HOURS_FOR_TODAY = Decimal('1') / 60  # 60 seconds = 1 minute
 def _payroll_can_view_team_data(user):
     """
     Scope for account-wide payroll reads: payouts list, time-entries/today,
-    time-entries/active-session. Requires admin role (manager/supervisor) plus flag.
+    time-entries/active-session, and reports. Requires payroll admin access plus flag.
     """
-    if not getattr(user, 'is_admin', False):
-        return False
-    return getattr(user, 'payroll_can_view_team_data', True)
+    return payroll_can_view_team_data(user)
+
+
+def _payroll_is_admin(user):
+    """Payroll-only admin access. Managers remain self-only in payroll."""
+    return payroll_has_admin_access(user)
+
+
+def _time_off_can_view_team(user):
+    """Managers can read team time-off data, but not write it."""
+    return _payroll_is_admin(user) or getattr(user, 'role', None) == User.ROLE_MANAGER
 
 
 def _resolve_calculator_user_id(identifier, account):
@@ -88,14 +97,30 @@ class IsAdminOrEmployeePermission(permissions.BasePermission):
         return request.user and request.user.is_authenticated
 
 
-class IsAdminOnlyPermission(permissions.BasePermission):
-    """Permission for admin only"""
+class IsPayrollAdminPermission(permissions.BasePermission):
+    """Permission for payroll admins only."""
     def has_permission(self, request, view):
         return (
             request.user and 
             request.user.is_authenticated and 
-            getattr(request.user, 'is_admin', False)
+            _payroll_is_admin(request.user)
         )
+
+
+class IsManagerReadOnlyInTimeOffPermission(permissions.BasePermission):
+    """Managers can only view time-off records in payroll."""
+
+    message = 'Managers have view-only access to time off.'
+
+    def has_permission(self, request, view):
+        if request.method in permissions.SAFE_METHODS:
+            return True
+        user = getattr(request, 'user', None)
+        if not user or not user.is_authenticated:
+            return False
+        if getattr(user, 'is_superuser', False):
+            return True
+        return getattr(user, 'role', None) != User.ROLE_MANAGER
 
 
 class EmployeeProfileViewSet(AccountScopedQuerysetMixin, viewsets.ModelViewSet):
@@ -106,10 +131,10 @@ class EmployeeProfileViewSet(AccountScopedQuerysetMixin, viewsets.ModelViewSet):
     account_lookup = "account"
     
     def get_permissions(self):
-        # Only admins can create/update/delete profiles
+        # Only payroll admins can create/update/delete profiles
         # Normal users can read their own profile
         if self.request.method in ['POST', 'PUT', 'PATCH', 'DELETE']:
-            return [AccountScopedPermission(), IsAdminOnlyPermission()]
+            return [AccountScopedPermission(), IsPayrollAdminPermission()]
         return super().get_permissions()
     
     def get_queryset(self):
@@ -117,7 +142,7 @@ class EmployeeProfileViewSet(AccountScopedQuerysetMixin, viewsets.ModelViewSet):
         user = self.request.user
         
         # Normal users can only see their own profile (within account scope)
-        if not getattr(user, 'is_admin', False):
+        if not _payroll_is_admin(user):
             queryset = queryset.filter(user=user)
         else:
             # Exclude super admin (superuser) from employee list for admins
@@ -164,7 +189,7 @@ class EmployeeProfileViewSet(AccountScopedQuerysetMixin, viewsets.ModelViewSet):
         user = self.request.user
         
         # Admins can access any profile
-        if getattr(user, 'is_admin', False):
+        if _payroll_is_admin(user):
             return obj
         
         # Normal users can only access their own profile
@@ -207,8 +232,8 @@ class EmployeeProfileViewSet(AccountScopedQuerysetMixin, viewsets.ModelViewSet):
 class TimeEntryViewSet(AccountScopedQuerysetMixin, viewsets.ModelViewSet):
     """
     Time clock entries. Account-scoped: list/detail only for current account.
-    - is_admin: see all time entries in that account (optionally filter by employee).
-    - Non-admin: see only their own time entries in that account.
+    - Payroll admin: see all time entries in that account (optionally filter by employee).
+    - Everyone else: see only their own time entries in that account.
     """
     queryset = TimeEntry.objects.all().select_related('employee')
     serializer_class = TimeEntrySerializer
@@ -219,7 +244,7 @@ class TimeEntryViewSet(AccountScopedQuerysetMixin, viewsets.ModelViewSet):
         queryset = super().get_queryset()  # already filtered by employee__account
         user = self.request.user
         # Non-admin: only their own entries within the account
-        if not getattr(user, 'is_admin', False):
+        if not _payroll_is_admin(user):
             queryset = queryset.filter(employee=user)
         else:
             # Exclude super admin (superuser) from time entry list for admins
@@ -238,7 +263,7 @@ class TimeEntryViewSet(AccountScopedQuerysetMixin, viewsets.ModelViewSet):
         
         # Filter by employee (admin only)
         employee_id = self.request.query_params.get('employee', None)
-        if employee_id and getattr(user, 'is_admin', False):
+        if employee_id and _payroll_is_admin(user):
             queryset = queryset.filter(employee_id=employee_id)
         
         return queryset.order_by('-check_in_time')
@@ -263,7 +288,7 @@ class TimeEntryViewSet(AccountScopedQuerysetMixin, viewsets.ModelViewSet):
         }
         """
         user = request.user
-        is_admin = getattr(user, 'is_admin', False)
+        is_admin = _payroll_is_admin(user)
         
         # Determine which employee to check in
         account = getattr(request, 'account', None)
@@ -314,7 +339,7 @@ class TimeEntryViewSet(AccountScopedQuerysetMixin, viewsets.ModelViewSet):
         
         Query params (limited scope): None
         
-        Query params (manager/supervisor with payroll_can_view_team_data=True):
+        Query params (supervisor with payroll_can_view_team_data=True):
         - employee_id: Optional - Get specific employee's active session
         - all: Optional - Set to 'true' to get all active sessions
         
@@ -423,7 +448,7 @@ class TimeEntryViewSet(AccountScopedQuerysetMixin, viewsets.ModelViewSet):
         
         # Verify ownership (unless admin)
         user = request.user
-        if not getattr(user, 'is_admin', False) and entry.employee != user:
+        if not _payroll_is_admin(user) and entry.employee != user:
             return Response({
                 'error': 'You can only check out your own time entries.'
             }, status=status.HTTP_403_FORBIDDEN)
@@ -469,7 +494,7 @@ class TimeEntryViewSet(AccountScopedQuerysetMixin, viewsets.ModelViewSet):
         
         Query params (limited scope): None
         
-        Query params (manager/supervisor with payroll_can_view_team_data=True):
+        Query params (supervisor with payroll_can_view_team_data=True):
         - employee_id: Optional - Filter by specific employee ID
         - all: Optional - Set to 'true' to get all employees' entries (default when team scope)
         
@@ -529,8 +554,9 @@ class EmployeeTimeOffViewSet(AccountScopedQuerysetMixin, viewsets.ModelViewSet):
     ``end_day_coverage`` on first/last day; middle days are full off):
     ``full_day``, ``half_day_am``, ``half_day_pm``, ``custom`` (requires times).
 
-    - Non-admin: create/list/retrieve/update/delete only their own entries.
-    - Admin: all employees in account; optional ?employee=<user_id>.
+    - Worker: create/list/retrieve/update/delete only their own entries.
+    - Manager: view only, but can read the whole team's entries.
+    - Payroll admin: all employees in account; optional ?employee=<user_id>.
     - Optional calendar window: ?from_date=YYYY-MM-DD&to_date=YYYY-MM-DD returns
       entries that overlap that range.
     """
@@ -539,10 +565,19 @@ class EmployeeTimeOffViewSet(AccountScopedQuerysetMixin, viewsets.ModelViewSet):
     permission_classes = [AccountScopedPermission, IsAdminOrEmployeePermission]
     account_lookup = 'employee__account'
 
+    def get_permissions(self):
+        if self.request.method not in permissions.SAFE_METHODS:
+            return [
+                AccountScopedPermission(),
+                IsAdminOrEmployeePermission(),
+                IsManagerReadOnlyInTimeOffPermission(),
+            ]
+        return super().get_permissions()
+
     def get_queryset(self):
         queryset = super().get_queryset()
         user = self.request.user
-        if not getattr(user, 'is_admin', False):
+        if not _time_off_can_view_team(user):
             queryset = queryset.filter(employee=user)
         else:
             queryset = queryset.exclude(employee__is_superuser=True)
@@ -576,7 +611,7 @@ class EmployeeTimeOffViewSet(AccountScopedQuerysetMixin, viewsets.ModelViewSet):
 
     def perform_create(self, serializer):
         user = self.request.user
-        if not getattr(user, 'is_admin', False):
+        if not _payroll_is_admin(user):
             serializer.save(employee=user)
         else:
             serializer.save()
@@ -584,7 +619,7 @@ class EmployeeTimeOffViewSet(AccountScopedQuerysetMixin, viewsets.ModelViewSet):
     def get_object(self):
         obj = super().get_object()
         user = self.request.user
-        if not getattr(user, 'is_admin', False) and obj.employee != user:
+        if not _time_off_can_view_team(user) and obj.employee != user:
             raise PermissionDenied('You can only access your own time off entries.')
         return obj
 
@@ -711,6 +746,8 @@ class EmployeeTimeOffViewSet(AccountScopedQuerysetMixin, viewsets.ModelViewSet):
             .exclude(pk__in=list(off_employee_ids))
             .order_by('first_name', 'last_name', 'id')
         )
+        if not _time_off_can_view_team(request.user):
+            queryset = queryset.filter(pk=request.user.pk)
 
         employees = list(queryset)
         serializer = AvailableEmployeeSerializer(employees, many=True)
@@ -731,7 +768,7 @@ class EmployeeTimeOffViewSet(AccountScopedQuerysetMixin, viewsets.ModelViewSet):
 class PayoutViewSet(AccountScopedQuerysetMixin, viewsets.ModelViewSet):
     """
     Payouts. Account-scoped: list/detail only for current account.
-    - Manager/supervisor with payroll_can_view_team_data=True: all payouts (optional ?employee=).
+    - Supervisor with payroll_can_view_team_data=True: all payouts (optional ?employee=).
     - Otherwise: only that user’s payouts (worker scope).
     """
     queryset = Payout.objects.all().select_related('employee', 'job', 'time_entry')
@@ -741,7 +778,7 @@ class PayoutViewSet(AccountScopedQuerysetMixin, viewsets.ModelViewSet):
     
     def get_permissions(self):
         if self.request.method in ['PUT', 'PATCH', 'DELETE']:
-            return [AccountScopedPermission(), IsAdminOnlyPermission()]
+            return [AccountScopedPermission(), IsPayrollAdminPermission()]
         return super().get_permissions()
     
     def get_queryset(self):
@@ -915,7 +952,7 @@ class CalculatorView(APIView):
     - start_time: HH:MM or HH:MM:SS (required)
     - end_time: HH:MM or HH:MM:SS (required)
     """
-    permission_classes = [AccountScopedPermission, IsAdminOrEmployeePermission]
+    permission_classes = [AccountScopedPermission, IsPayrollAdminPermission]
     
     def post(self, request):
         """Create manual payouts using the same logic as automatic payroll"""
@@ -1239,7 +1276,7 @@ class ReportsView(APIView):
         account = getattr(request, 'account', None)
         if not account:
             return Response({'error': 'Account context is required.'}, status=status.HTTP_403_FORBIDDEN)
-        is_admin = getattr(user, 'is_admin', False)
+        can_view_team = _payroll_can_view_team_data(user)
         
         employee_id = request.query_params.get('employee', None)
         payout_type = request.query_params.get('type', None)
@@ -1248,9 +1285,9 @@ class ReportsView(APIView):
         project_title = request.query_params.get('project_title', None)
         
         base_users = User.objects.filter(account=account).exclude(is_superuser=True)
-        if is_admin and employee_id:
+        if can_view_team and employee_id:
             employee_filter = base_users.filter(pk=employee_id)
-        elif not is_admin:
+        elif not can_view_team:
             employee_filter = base_users.filter(pk=user.id)
         else:
             employee_filter = base_users
@@ -1320,7 +1357,7 @@ class PayrollSettingsViewSet(viewsets.ModelViewSet):
     """ViewSet for payroll settings (admin only, one per account)."""
     queryset = PayrollSettings.objects.all()
     serializer_class = PayrollSettingsSerializer
-    permission_classes = [AccountScopedPermission, IsAdminOnlyPermission]
+    permission_classes = [AccountScopedPermission, IsPayrollAdminPermission]
     
     def get_object(self):
         """Return the settings instance for the current account."""
