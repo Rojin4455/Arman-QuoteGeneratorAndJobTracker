@@ -65,6 +65,10 @@ def _parse_ghl_error_message(response: requests.Response) -> str:
     """User-facing message from a failed GHL API response body."""
     try:
         data = response.json()
+        if isinstance(data, list) and data:
+            first = data[0]
+            if isinstance(first, str):
+                return first
         if isinstance(data, dict):
             return (
                 data.get('message')
@@ -75,6 +79,43 @@ def _parse_ghl_error_message(response: requests.Response) -> str:
     except ValueError:
         pass
     return (response.text or '').strip() or 'GoHighLevel request failed'
+
+
+def _is_stale_ghl_event_error(err: Optional[str]) -> bool:
+    """True when GHL no longer has the calendar event referenced by ghl_appointment_id."""
+    if not err:
+        return False
+    lower = err.lower()
+    return 'event id is invalid' in lower or 'event not found' in lower
+
+
+def _apply_appointment_field_changes(appt: Appointment, changed_fields: Dict[str, Any]) -> None:
+    for field, value in changed_fields.items():
+        setattr(appt, field, value)
+
+
+def _recreate_appointment_in_ghl(
+    appt: Appointment, changed_fields: Optional[Dict[str, Any]] = None
+) -> Tuple[bool, Optional[str]]:
+    """
+    Create a new GHL calendar event when the stored ghl_appointment_id is stale.
+    Applies pending field changes before posting.
+    """
+    if changed_fields:
+        _apply_appointment_field_changes(appt, changed_fields)
+
+    stale_id = appt.ghl_appointment_id
+    appt.ghl_appointment_id = f"local_{appt.id or stale_id}"
+    new_id = create_appointment_in_ghl(appt)
+    if not new_id:
+        appt.ghl_appointment_id = stale_id
+        return False, 'Could not recreate calendar appointment in GoHighLevel.'
+    appt.ghl_appointment_id = new_id
+    print(
+        f"♻️ [SYNC JOB APPOINTMENT] Recreated stale GHL event {stale_id} -> {new_id} "
+        f"for appointment {appt.id}"
+    )
+    return True, None
 
 
 def compute_job_appointment_utc_window(job) -> Optional[Tuple[Any, Any, GHLAuthCredentials, str]]:
@@ -677,6 +718,8 @@ def sync_linked_appointment_from_job(job) -> Tuple[bool, Optional[str]]:
     for appt, changed_fields in updates:
         if appt.ghl_appointment_id and not str(appt.ghl_appointment_id).startswith("local_"):
             ok, err = update_appointment_in_ghl(appt, changed_fields=changed_fields)
+            if not ok and _is_stale_ghl_event_error(err):
+                ok, err = _recreate_appointment_in_ghl(appt, changed_fields=changed_fields)
             if not ok:
                 return False, err
 
