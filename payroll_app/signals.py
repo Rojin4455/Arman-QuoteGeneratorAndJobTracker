@@ -50,7 +50,7 @@ def create_project_payouts_on_completion(sender, instance, **kwargs):
 def _create_project_payouts(job):
     """
     Create payouts for all assigned employees and quoted_by person.
-    
+
     Logic:
     1. For each assigned employee (project-based only):
        - Get their collaboration rate for the team size
@@ -71,45 +71,51 @@ def _create_project_payouts(job):
         assignments = list(assignments)
 
     if not assignments:
+        print(f"⚠️ [PAYROLL] Job {job.id}: no assignments in account {job_account_id}, skipping project payouts.")
         return  # No employees assigned (or none in job's account), skip payout creation
-    
+
     # Get project value
     project_value = job.total_price or Decimal('0.00')
-    
+
     if project_value <= 0:
+        print(f"⚠️ [PAYROLL] Job {job.id}: total_price={project_value}, skipping project payouts.")
         return  # No value, skip payout creation
-    
+
     # Get payroll settings for the job's account (so bonus % etc. are account-specific)
     settings = PayrollSettings.get_settings(account=getattr(job, 'account', None))
-    
+
     # Determine if quoted-by gets first-time bonus % (one_time, or first completed in series)
     is_first_time = is_first_time_bonus_eligible(job)
-    
+
     # Get number of assigned employees (in job's account)
     employee_count = len(assignments)
-    
+    print(f"ℹ️ [PAYROLL] Job {job.id}: processing {employee_count} assignee(s), project_value={project_value}")
+
     # Step 1: Create payouts for each assigned employee (based on their collaboration rates)
     for assignment in assignments:
         employee = assignment.user
-        
+
         # Check if employee has profile and is project-based
         try:
             profile = employee.employee_profile
             if profile.pay_scale_type != 'project':
+                print(f"⚠️ [PAYROLL] Job {job.id}: skipping {employee.get_full_name()} (id={employee.id}) — pay_scale_type='{profile.pay_scale_type}', not 'project'.")
                 continue  # Skip hourly employees (they don't get project payouts)
         except EmployeeProfile.DoesNotExist:
+            print(f"⚠️ [PAYROLL] Job {job.id}: skipping {employee.get_full_name()} (id={employee.id}) — no EmployeeProfile found.")
             continue  # Skip employees without profile
-        
+
         # Check if payout already exists (duplicate prevention)
         existing_payout = Payout.objects.filter(
             job=job,
             employee=employee,
             payout_type='project'
         ).first()
-        
+
         if existing_payout:
+            print(f"⚠️ [PAYROLL] Job {job.id}: skipping {employee.get_full_name()} (id={employee.id}) — project payout already exists (id={existing_payout.id}).")
             continue  # Payout already exists, skip
-        
+
         # Get collaboration rate for this team size
         try:
             collaboration_rate = CollaborationRate.objects.get(
@@ -118,14 +124,14 @@ def _create_project_payouts(job):
             )
             rate_percentage = collaboration_rate.percentage
         except CollaborationRate.DoesNotExist:
-            # If no rate found for this team size, skip this employee
+            print(f"⚠️ [PAYROLL] Job {job.id}: skipping {employee.get_full_name()} (id={employee.id}) — no CollaborationRate for member_count={employee_count}.")
             continue
-        
+
         # Calculate payout amount based on employee's individual rate
         # Each employee gets their own percentage of the project value
         amount = (project_value * rate_percentage) / Decimal('100')
         amount = amount.quantize(Decimal('0.01'))
-        
+
         # Create project payout for this assignee
         Payout.objects.create(
             employee=employee,
@@ -136,7 +142,8 @@ def _create_project_payouts(job):
             rate_percentage=rate_percentage,
             notes=f"Automated project payout for assignee: {job.title or job.id} (Rate: {rate_percentage}% for {employee_count} members)"
         )
-    
+        print(f"✅ [PAYROLL] Job {job.id}: created project payout for {employee.get_full_name()} (id={employee.id}) — ${amount} ({rate_percentage}% of ${project_value})")
+
     # Step 2: Create bonus payout for quoted_by person (separate from assignee payouts)
     # When job has account, only create if quoted_by is in the same account
     if job.quoted_by:
