@@ -359,6 +359,34 @@ def send_job_completion_webhook(job_id):
         if not ghl_contact_id and job.submission and job.submission.contact:
             ghl_contact_id = (job.submission.contact.contact_id or "").strip()
 
+        # If we have a ghl_contact_id but no local Contact matches it, the contact was
+        # deleted and likely recreated in GHL with a new ID. Search by email to refresh.
+        if ghl_contact_id:
+            from accounts.models import Contact as _Contact
+            local_contact = _Contact.objects.filter(contact_id=ghl_contact_id).first()
+            if not local_contact and job.customer_email:
+                fresh_contact = (
+                    _Contact.objects.filter(email=job.customer_email)
+                    .exclude(contact_id__isnull=True)
+                    .exclude(contact_id="")
+                    .first()
+                )
+                if fresh_contact:
+                    print(
+                        f"🔄 Stale ghl_contact_id {ghl_contact_id} — refreshing to "
+                        f"{fresh_contact.contact_id} (found by customer_email)"
+                    )
+                    ghl_contact_id = fresh_contact.contact_id
+                    Job.objects.filter(id=job_id).update(
+                        ghl_contact_id=ghl_contact_id,
+                        contact=fresh_contact,
+                    )
+                else:
+                    print(
+                        f"⚠️ Stale ghl_contact_id {ghl_contact_id} and no replacement "
+                        f"contact found by email — will send stale ID"
+                    )
+
         if ghl_contact_id:
             print(f"👤 GHL contact ID resolved: {ghl_contact_id}")
         else:

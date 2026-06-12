@@ -1041,6 +1041,30 @@ def delete_contact(data):
     contact_id = data.get("id")
     try:
         contact = Contact.objects.get(contact_id=contact_id)
+
+        # Before deleting: clear stale ghl_contact_id on jobs that reference this contact.
+        # If a replacement contact exists (same email, different contact_id), point jobs there.
+        # This prevents jobs from carrying a dead GHL contact ID after the contact is recreated.
+        try:
+            from jobtracker_app.models import Job
+            jobs_with_stale_id = Job.objects.filter(ghl_contact_id=contact_id)
+            if jobs_with_stale_id.exists():
+                replacement = None
+                if contact.email:
+                    replacement = (
+                        Contact.objects.filter(email=contact.email)
+                        .exclude(contact_id=contact_id)
+                        .first()
+                    )
+                if replacement:
+                    jobs_with_stale_id.update(ghl_contact_id=replacement.contact_id, contact=replacement)
+                    print(f"Updated {jobs_with_stale_id.count()} jobs: ghl_contact_id {contact_id} → {replacement.contact_id}")
+                else:
+                    jobs_with_stale_id.update(ghl_contact_id='')
+                    print(f"Cleared ghl_contact_id on {jobs_with_stale_id.count()} jobs (no replacement contact found)")
+        except Exception as e:
+            print(f"Warning: could not update jobs for deleted contact {contact_id}: {e}")
+
         # Delete all addresses related to this contact
         Address.objects.filter(contact=contact).delete()
         contact.delete()
