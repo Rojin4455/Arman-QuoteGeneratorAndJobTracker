@@ -393,10 +393,39 @@ def send_job_completion_webhook(job_id):
             print("⚠️ No GHL contact ID found on job, linked contact, or submission")
 
         # --------------------------------------------------
+        # Resolve customer email (job field may be empty while Contact has email)
+        # --------------------------------------------------
+        customer_email = (job.customer_email or "").strip()
+        customer_name = job.customer_name
+
+        if not customer_email and ghl_contact_id:
+            from accounts.models import Contact as _Contact
+            contact_by_ghl_id = _Contact.objects.filter(contact_id=ghl_contact_id).first()
+            if contact_by_ghl_id and contact_by_ghl_id.email:
+                customer_email = contact_by_ghl_id.email.strip()
+                print(f"📧 customer_email resolved from GHL contact: {customer_email}")
+
+        if not customer_email and job.contact and job.contact.email:
+            customer_email = job.contact.email.strip()
+            print(f"📧 customer_email resolved from job.contact: {customer_email}")
+
+        if not customer_email and job.submission and job.submission.contact and job.submission.contact.email:
+            customer_email = job.submission.contact.email.strip()
+            print(f"📧 customer_email resolved from submission.contact: {customer_email}")
+
+        if customer_email and not job.customer_email:
+            Job.objects.filter(id=job_id).update(customer_email=customer_email)
+
+        if not customer_name and job.contact:
+            customer_name = " ".join(
+                filter(None, [job.contact.first_name, job.contact.last_name])
+            ).strip() or None
+
+        # --------------------------------------------------
         # Build webhook payload
         # --------------------------------------------------
         payload = {
-            "customer_email": job.customer_email or "",
+            "customer_email": customer_email,
             "selected_services": selected_services,
             "location_id": location_id,
             "job_id": job_id
@@ -411,7 +440,9 @@ def send_job_completion_webhook(job_id):
                 "type": job.discount_type
             }
 
-        if job.customer_name:
+        if customer_name:
+            payload["customer_name"] = customer_name
+        elif job.customer_name:
             payload["customer_name"] = job.customer_name
 
         if job.customer_address:

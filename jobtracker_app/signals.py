@@ -202,17 +202,6 @@ def _trigger_invoice_on_completion(sender, instance, created, **kwargs):
             )
             handle_completed_job_invoice.delay(str(instance.id))
 
-        # --------------------------------------------------
-        # Mark completion as processed
-        # --------------------------------------------------
-        print(
-            f"🧷 Marking job as completion_processed=True | "
-            f"job_id={instance.id}"
-        )
-
-        instance.completion_processed = True
-        Job.objects.filter(id=instance.id).update(completion_processed=True)
-
     else:
         print(
             f"No action taken | "
