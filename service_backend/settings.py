@@ -195,6 +195,9 @@ CORS_ALLOWED_ORIGINS = config(
 
 CORS_ALLOWED_ORIGIN_REGEXES = [
     r"^https://.*\.ngrok-free\.app$",
+    r"^https://app\.gohighlevel\.com$",
+    r"^https://.*\.gohighlevel\.com$",
+    r"^https://.*\.leadconnectorhq\.com$",
 ]
 
 CORS_ALLOW_CREDENTIALS = True
@@ -205,6 +208,7 @@ CORS_ALLOWED_HEADERS = [
     'content-type',
     'x-csrftoken',
     'x-requested-with',
+    'x-location-id',
 ]
 
 GOOGLE_PLACES_API_KEY = config('GOOGLE_PLACES_API_KEY', '')
