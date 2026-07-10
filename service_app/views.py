@@ -53,58 +53,62 @@ class IsAdminPermission(permissions.BasePermission):
     
     def has_permission(self, request, view):
         return request.user and request.user.is_authenticated and request.user.is_admin
-    
+
+
+def _location_id_from_request_data(request):
+    location_id = request.data.get('location_id') if hasattr(request, 'data') else None
+    if location_id:
+        return str(location_id).strip()
+    return (request.query_params.get('location_id') or '').strip() or None
+
+
+def _build_jwt_login_response(user, request):
+    """Shared JWT login payload; honors iframe location_id when provided."""
+    refresh = RefreshToken.for_user(user)
+    access_token = refresh.access_token
+    user_data = UserSerializer(user).data
+
+    employee_profile = None
+    try:
+        from payroll_app.models import EmployeeProfile
+        from payroll_app.serializers import EmployeeProfileSerializer
+        profile = user.employee_profile
+        employee_profile = EmployeeProfileSerializer(profile).data
+    except (AttributeError, ImportError):
+        pass
+    except Exception:
+        pass
+
+    from service_app.auth_account import resolve_login_ghl_account
+    location_id = _location_id_from_request_data(request)
+    ghl_account = resolve_login_ghl_account(user, location_id=location_id)
+
+    response_data = {
+        'access': str(access_token),
+        'refresh': str(refresh),
+        'user': user_data,
+    }
+    if employee_profile:
+        response_data['employee_profile'] = employee_profile
+    if ghl_account:
+        response_data['account'] = ghl_account
+    return Response(response_data, status=status.HTTP_200_OK)
 
 
 class AdminTokenObtainPairView(TokenObtainPairView):
     permission_classes = [AllowAny]
     
     def post(self, request, *args, **kwargs):
-        serializer = self.get_serializer(data=request.data)
-        try:
-            serializer.is_valid(raise_exception=True)
-        except Exception as e:
-            return Response({'detail': str(e)}, status=status.HTTP_400_BAD_REQUEST)
-        
-        # Get the user from validated data
-        user = serializer.user
-        
-        # Get tokens
-        refresh = RefreshToken.for_user(user)
-        access_token = refresh.access_token
-        
-        # Serialize user data
-        user_data = UserSerializer(user).data
-        
-        # Check if user has employee profile
-        employee_profile = None
-        try:
-            from payroll_app.models import EmployeeProfile
-            from payroll_app.serializers import EmployeeProfileSerializer
-            profile = user.employee_profile
-            employee_profile = EmployeeProfileSerializer(profile).data
-        except (AttributeError, ImportError):
-            pass
-        except Exception:
-            # Handle DoesNotExist or other exceptions
-            pass
-        
-        # Build response with tokens and user data
-        response_data = {
-            'access': str(access_token),
-            'refresh': str(refresh),
-            'user': user_data
-        }
-        
-        if employee_profile:
-            response_data['employee_profile'] = employee_profile
+        from service_app.auth_login import resolve_login_user
 
-        from service_app.auth_account import serialize_user_ghl_account
-        ghl_account = serialize_user_ghl_account(user)
-        if ghl_account:
-            response_data['account'] = ghl_account
-        
-        return Response(response_data, status=status.HTTP_200_OK)
+        username = request.data.get('username') or request.data.get('email')
+        password = request.data.get('password')
+        location_id = _location_id_from_request_data(request)
+
+        user = resolve_login_user(username, password, location_id=location_id)
+        if user is None:
+            return Response({'detail': 'Invalid credentials.'}, status=status.HTTP_401_UNAUTHORIZED)
+        return _build_jwt_login_response(user, request)
 
 class AdminTokenRefreshView(TokenRefreshView):
     permission_classes = [AllowAny]
@@ -114,54 +118,106 @@ class UserTokenObtainPairView(TokenObtainPairView):
     permission_classes = [AllowAny]
     
     def post(self, request, *args, **kwargs):
-        serializer = self.get_serializer(data=request.data)
-        try:
-            serializer.is_valid(raise_exception=True)
-        except Exception as e:
-            return Response({'detail': str(e)}, status=status.HTTP_400_BAD_REQUEST)
-        
-        # Get the user from validated data
-        user = serializer.user
-        
-        # Get tokens
-        refresh = RefreshToken.for_user(user)
-        access_token = refresh.access_token
-        
-        # Serialize user data
-        user_data = UserSerializer(user).data
-        
-        # Check if user has employee profile
-        employee_profile = None
-        try:
-            from payroll_app.models import EmployeeProfile
-            from payroll_app.serializers import EmployeeProfileSerializer
-            profile = user.employee_profile
-            employee_profile = EmployeeProfileSerializer(profile).data
-        except (AttributeError, ImportError):
-            pass
-        except Exception:
-            # Handle DoesNotExist or other exceptions
-            pass
-        
-        # Build response with tokens and user data
-        response_data = {
-            'access': str(access_token),
-            'refresh': str(refresh),
-            'user': user_data
-        }
-        
-        if employee_profile:
-            response_data['employee_profile'] = employee_profile
+        from service_app.auth_login import resolve_login_user
 
-        from service_app.auth_account import serialize_user_ghl_account
-        ghl_account = serialize_user_ghl_account(user)
-        if ghl_account:
-            response_data['account'] = ghl_account
-        
-        return Response(response_data, status=status.HTTP_200_OK)
+        username = request.data.get('username') or request.data.get('email')
+        password = request.data.get('password')
+        location_id = _location_id_from_request_data(request)
+
+        user = resolve_login_user(username, password, location_id=location_id)
+        if user is None:
+            return Response({'detail': 'Invalid credentials.'}, status=status.HTTP_401_UNAUTHORIZED)
+        return _build_jwt_login_response(user, request)
 
 class UserTokenRefreshView(TokenRefreshView):
     permission_classes = [AllowAny]
+
+
+class SSOLoginInitView(APIView):
+    """
+    Issue a one-time SSO token for iframe autologin.
+
+    POST { "email": "...", "location_id": "..." }
+    → { "token": "...", "expires_in": 120 }
+    """
+    permission_classes = [AllowAny]
+
+    def post(self, request):
+        from service_app.auth_login import resolve_user_for_sso_login
+        from service_app.sso_tokens import SSO_TOKEN_TTL_SECONDS, create_sso_login_token
+
+        email = (request.data.get('email') or request.data.get('username') or '').strip()
+        location_id = _location_id_from_request_data(request)
+
+        if not email or not location_id:
+            return Response(
+                {'detail': 'email and location_id are required.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        user = resolve_user_for_sso_login(email, location_id=location_id)
+        if user is None:
+            return Response(
+                {'detail': 'No user found for this email and location.'},
+                status=status.HTTP_401_UNAUTHORIZED,
+            )
+
+        token = create_sso_login_token(
+            user_id=user.pk,
+            location_id=location_id,
+            email=email,
+        )
+        return Response(
+            {'token': token, 'expires_in': SSO_TOKEN_TTL_SECONDS},
+            status=status.HTTP_200_OK,
+        )
+
+
+class SSOLoginExchangeView(APIView):
+    """
+    Exchange a one-time SSO token for JWT access + refresh tokens.
+
+    POST { "token": "...", "location_id": "..." }
+    → same payload as /auth/login/
+    """
+    permission_classes = [AllowAny]
+
+    def post(self, request):
+        from accounts.user_access import user_can_access_location
+        from service_app.sso_tokens import consume_sso_login_token
+
+        token = (request.data.get('token') or '').strip()
+        location_id = _location_id_from_request_data(request)
+
+        if not token or not location_id:
+            return Response(
+                {'detail': 'token and location_id are required.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        payload = consume_sso_login_token(token, location_id=location_id)
+        if payload is None:
+            return Response(
+                {'detail': 'Invalid or expired login token.'},
+                status=status.HTTP_401_UNAUTHORIZED,
+            )
+
+        try:
+            user = User.objects.get(pk=payload['user_id'], is_active=True)
+        except User.DoesNotExist:
+            return Response(
+                {'detail': 'Invalid or expired login token.'},
+                status=status.HTTP_401_UNAUTHORIZED,
+            )
+
+        if not user_can_access_location(user, location_id):
+            return Response(
+                {'detail': 'User cannot access this location.'},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+
+        return _build_jwt_login_response(user, request)
+
 
 class AdminLogoutView(APIView):
     permission_classes = [AllowAny]

@@ -8,6 +8,8 @@ urlpatterns = [
     # AUTHENTICATION ENDPOINTS
     # ============================================================================
     path('auth/login/', views.AdminTokenObtainPairView.as_view(), name='admin-login'),
+    path('auth/sso/init/', views.SSOLoginInitView.as_view(), name='sso-login-init'),
+    path('auth/sso/exchange/', views.SSOLoginExchangeView.as_view(), name='sso-login-exchange'),
     path('auth/logout/', views.AdminLogoutView.as_view(), name='admin-logout'),
     path('auth/refresh/', views.AdminTokenRefreshView.as_view(), name='token_refresh'),
     # User (non-admin) auth

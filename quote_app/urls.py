@@ -23,7 +23,7 @@ urlpatterns = [
 
     path('contacts/search/', views.ContactSearchView.as_view(), name='contact-search'),
 
-    path('address/by-contact/<int:contact_id>/', views.AddressByContactView.as_view(), name='address-by-contact'),
+    path('address/by-contact/<str:contact_id>/', views.AddressByContactView.as_view(), name='address-by-contact'),
 
 
     path('services/', views.ServiceAndCustomServiceListView.as_view(), name='service-list'),

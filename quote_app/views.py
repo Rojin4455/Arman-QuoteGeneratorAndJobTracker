@@ -107,18 +107,49 @@ class ContactSearchView(AccountScopedQuerysetMixin, ListAPIView):
 class AddressByContactView(APIView):
     permission_classes = [AccountScopedPermission, AllowAny]
 
+    def _resolve_contact(self, account, contact_id):
+        if contact_id is None:
+            return None
+        contact_id_str = str(contact_id).strip()
+        if contact_id_str.isdigit():
+            return get_object_or_404(Contact, pk=int(contact_id_str), account=account)
+        return get_object_or_404(Contact, contact_id=contact_id_str, account=account)
+
     def get(self, request, contact_id):
         if contact_id is None:
             return Response({'error': 'contact_id is required'}, status=status.HTTP_400_BAD_REQUEST)
         account = getattr(request, 'account', None)
-        # URL uses <int:contact_id> so contact_id is Django pk; support both pk and GHL contact_id (string)
-        if isinstance(contact_id, int):
-            contact = get_object_or_404(Contact, pk=contact_id, account=account)
-        else:
-            contact = get_object_or_404(Contact, contact_id=contact_id, account=account)
-        addresses = Address.objects.filter(contact=contact)
+        contact = self._resolve_contact(account, contact_id)
+        addresses = Address.objects.filter(contact=contact).order_by('order', 'id')
         serializer = AddressSerializer(addresses, many=True)
         return Response(serializer.data, status=status.HTTP_200_OK)
+
+    def post(self, request, contact_id):
+        from django.db.models import Max
+        from accounts.contact_profile_serializers import ContactAddressWriteSerializer
+
+        if contact_id is None:
+            return Response({'error': 'contact_id is required'}, status=status.HTTP_400_BAD_REQUEST)
+        account = getattr(request, 'account', None)
+        contact = self._resolve_contact(account, contact_id)
+
+        serializer = ContactAddressWriteSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+
+        next_order = (
+            Address.objects.filter(contact=contact).aggregate(max_order=Max('order'))['max_order']
+            or 0
+        ) + 1
+        address_fields = dict(serializer.validated_data)
+        address_fields['name'] = (address_fields.get('name') or '').strip() or f'Property {next_order}'
+
+        address = Address.objects.create(
+            contact=contact,
+            address_id=f'app_{uuid.uuid4().hex[:16]}',
+            order=next_order,
+            **address_fields,
+        )
+        return Response(AddressSerializer(address).data, status=status.HTTP_201_CREATED)
 
 
 class AccountInfoView(APIView):

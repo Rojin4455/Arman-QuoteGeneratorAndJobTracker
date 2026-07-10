@@ -2,6 +2,7 @@ from django.urls import path
 from rest_framework.routers import DefaultRouter
 
 from accounts import api_views
+from accounts.contact_profile_views import ContactAddressDetailView, ContactAddressListCreateView
 from accounts.views import (
     auth_connect,
     tokens,
@@ -25,4 +26,14 @@ urlpatterns = [
     path("sync_contacts/", sync_all_contacts_and_address, name="sync_contacts"),
     path("sync_users/", sync_all_users, name="sync_users"),
     path("webhook/", webhook_handler, name="webhook"),
+    path(
+        "contacts/<str:ghl_contact_id>/addresses/",
+        ContactAddressListCreateView.as_view(),
+        name="contact-address-list-create",
+    ),
+    path(
+        "contacts/<str:ghl_contact_id>/addresses/<int:pk>/",
+        ContactAddressDetailView.as_view(),
+        name="contact-address-detail",
+    ),
 ] + router.urls
