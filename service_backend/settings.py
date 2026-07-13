@@ -229,7 +229,16 @@ GHL_LOCATION_CONNECT_REDIRECT_PATH = config(
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 
 
+# Shared cache for SSO one-time tokens (required with gunicorn --workers > 1).
+# Uses Redis DB 1; Celery uses DB 0.
+CACHE_REDIS_URL = config('CACHE_REDIS_URL', default='redis://127.0.0.1:6379/1')
 
+CACHES = {
+    'default': {
+        'BACKEND': 'django.core.cache.backends.redis.RedisCache',
+        'LOCATION': CACHE_REDIS_URL,
+    }
+}
 
 
 CELERY_BROKER_URL = 'redis://localhost:6379/0'

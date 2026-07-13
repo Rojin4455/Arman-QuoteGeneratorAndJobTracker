@@ -4,8 +4,8 @@ from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-from django.db.models import Q, Sum, Count
-from django.db.models.functions import TruncDate, TruncWeek, TruncMonth
+from django.db.models import Q, Sum, Count, F, Value, DecimalField
+from django.db.models.functions import TruncDate, TruncWeek, TruncMonth, Coalesce
 from django.utils import timezone
 from django.utils.dateparse import parse_datetime
 from datetime import datetime, timedelta, time, date
@@ -25,6 +25,14 @@ from quote_app.models import CustomerSubmission
 from .models import Invoice, InvoiceItem
 from .serializers import InvoiceSerializer, InvoiceDetailSerializer, InvoiceItemSerializer
 from .services.invoice_sync import sync_invoices
+
+
+def _job_revenue_sum_expression():
+    """Match calendar jobGrandTotalAmount: total_price + total_surcharge."""
+    return (
+        Coalesce(F('total_price'), Value(0), output_field=DecimalField(max_digits=14, decimal_places=2))
+        + Coalesce(F('total_surcharge'), Value(0), output_field=DecimalField(max_digits=14, decimal_places=2))
+    )
 
 
 class InvoiceFilter(filters.FilterSet):
@@ -274,6 +282,24 @@ class InvoiceViewSet(AccountScopedQuerysetMixin, viewsets.ModelViewSet):
         paid_total = queryset.filter(status__in=["paid"]).aggregate(Sum("total"))["total__sum"] or 0
         unpaid_total = queryset.exclude(status__in=["paid", "payment_processing"]).aggregate(Sum("total"))["total__sum"] or 0
 
+        # Breakdown of unpaid bucket by GHL invoice status (excludes paid + payment_processing)
+        unpaid_breakdown = []
+        for value, label in Invoice.STATUS_CHOICES:
+            if value in ("paid", "payment_processing"):
+                continue
+            status_qs = queryset.filter(status=value)
+            count = status_qs.count()
+            if count == 0:
+                continue
+            amount = status_qs.aggregate(Sum("total"))["total__sum"] or 0
+            unpaid_breakdown.append({
+                "status": value,
+                "label": label,
+                "count": count,
+                "total": float(amount),
+            })
+        unpaid_breakdown.sort(key=lambda row: (-row["count"], row["label"]))
+
         # === Status Distribution ===
         status_distribution = {}
         now = timezone.now().astimezone(central_tz)
@@ -390,6 +416,7 @@ class InvoiceViewSet(AccountScopedQuerysetMixin, viewsets.ModelViewSet):
                 "paid": {"count": paid_count, "total": float(paid_total)},
                 "payment_processing": {"count": payment_processing_count, "total": float(payment_processing_total)},
                 "unpaid": {"count": unpaid_count, "total": float(unpaid_total)},
+                "unpaid_breakdown": unpaid_breakdown,
             },
             "status_distribution": status_distribution,
             "trends": trends_data,
@@ -681,10 +708,9 @@ class InvoiceViewSet(AccountScopedQuerysetMixin, viewsets.ModelViewSet):
         account = getattr(request, 'account', None)
         if not account:
             return Response({'error': 'Account context is required.'}, status=status.HTTP_403_FORBIDDEN)
-        location_id = request.query_params.get('location_id')
-        location_filter = {}
-        if location_id:
-            location_filter['location_id'] = location_id
+
+        # The frontend axios interceptor auto-appends location_id (GHL iframe). Ignore it here —
+        # filtering contact__location_id drops jobs without a Contact FK and breaks calendar parity.
 
         # Optional assignee filter (same as calendar occurrences); exclude superusers
         User = get_user_model()
@@ -696,16 +722,17 @@ class InvoiceViewSet(AccountScopedQuerysetMixin, viewsets.ModelViewSet):
                 if uid is not None:
                     assignee_user_ids.append(uid)
         if assignee_user_ids:
-            valid_ids = set(User.objects.filter(account=account).exclude(is_superuser=True).values_list('id', flat=True))
+            valid_ids = set(
+                User.objects.filter(account=account).exclude(is_superuser=True).values_list('id', flat=True)
+            )
             assignee_user_ids = [uid for uid in assignee_user_ids if uid in valid_ids]
 
         now = timezone.now()
         current_year, current_month = now.year, now.month
+        revenue_sum = _job_revenue_sum_expression()
 
         def jobs_base():
             qs = Job.objects.filter(account=account)
-            if location_filter:
-                qs = qs.filter(contact__location_id=location_filter['location_id'])
             if assignee_user_ids:
                 qs = qs.filter(assignments__user_id__in=assignee_user_ids).distinct()
             return qs
@@ -735,7 +762,7 @@ class InvoiceViewSet(AccountScopedQuerysetMixin, viewsets.ModelViewSet):
                 agg = (
                     jobs_base()
                     .filter(status='completed', scheduled_at__isnull=False, scheduled_at__gte=start, scheduled_at__lte=end)
-                    .aggregate(s=Sum('total_price'))
+                    .aggregate(s=Sum(revenue_sum))
                 )
                 val = agg['s']
                 totals.append(float(val) if val is not None else 0.0)
@@ -756,7 +783,7 @@ class InvoiceViewSet(AccountScopedQuerysetMixin, viewsets.ModelViewSet):
             )
             if created_before is not None:
                 qs = qs.filter(created_at__lt=created_before)
-            agg = qs.aggregate(s=Sum('total_price'), c=Count('id'))
+            agg = qs.aggregate(s=Sum(revenue_sum), c=Count('id'))
             return float(agg['s'] or 0), int(agg['c'] or 0)
 
         # Actual revenue for (year, month): completed jobs whose scheduled_at falls in that month (same as calendar)
@@ -766,7 +793,7 @@ class InvoiceViewSet(AccountScopedQuerysetMixin, viewsets.ModelViewSet):
             agg = (
                 jobs_base()
                 .filter(status='completed', scheduled_at__isnull=False, scheduled_at__gte=start, scheduled_at__lte=end)
-                .aggregate(s=Sum('total_price'), c=Count('id'))
+                .aggregate(s=Sum(revenue_sum), c=Count('id'))
             )
             return float(agg['s'] or 0), int(agg['c'] or 0)
 
@@ -849,11 +876,12 @@ class InvoiceViewSet(AccountScopedQuerysetMixin, viewsets.ModelViewSet):
 
         return Response({
             'forecast_generated_at': now.isoformat(),
-            'data_source': 'Job table only',
+            'data_source': 'Job table (total_price + total_surcharge, same as calendar Total Booked)',
             'forecast_formula': (
+                'Revenue per job = total_price + total_surcharge (matches calendar Total Booked). '
                 'Locked forecast (month has started) = historical_average + baseline_scheduled_revenue. '
                 'historical_average = mean completed revenue for that calendar month over the 5 years before '
-                'the target year. baseline_scheduled_revenue = sum of total_price for jobs with scheduled_at in '
+                'the target year. baseline_scheduled_revenue = sum of job revenue for jobs with scheduled_at in '
                 'that month, status in pending/confirmed/on_the_way/completed/in_progress/service_due, and '
                 'created_at strictly before the first instant of that month (schedule as of month open). '
                 'Jobs created on or after month start add to scheduled_revenue_total and actual when completed, '

@@ -208,6 +208,88 @@ class IsAuthenticatedOrReadOnly(permissions.BasePermission):
         return request.user and request.user.is_authenticated
 
 
+def jobs_in_recurring_series_queryset(job, account):
+    """Return all jobs that belong to the same recurring series as the given job."""
+    if job.job_type != 'recurring':
+        return Job.objects.none()
+
+    if job.series_id:
+        return Job.objects.filter(account=account, series_id=job.series_id)
+
+    # Legacy/imported recurring jobs may not have series_id — match sibling occurrences.
+    qs = Job.objects.filter(
+        account=account,
+        job_type='recurring',
+        title=job.title,
+        repeat_every=job.repeat_every,
+        repeat_unit=job.repeat_unit,
+    )
+    if job.contact_id:
+        return qs.filter(contact_id=job.contact_id)
+    if job.ghl_contact_id:
+        return qs.filter(ghl_contact_id=job.ghl_contact_id)
+    if job.submission_id:
+        return qs.filter(submission_id=job.submission_id)
+    if job.customer_email:
+        return qs.filter(customer_email=job.customer_email)
+    return Job.objects.filter(account=account, pk=job.pk)
+
+
+def user_can_delete_job_series(user, jobs_in_series):
+    if getattr(user, 'is_admin', False):
+        return True
+    return jobs_in_series.filter(assignments__user=user).exists()
+
+
+def delete_jobs_in_series(jobs_in_series, series_label):
+    """Delete all jobs in a series plus linked appointments. Returns result dict."""
+    job_count = jobs_in_series.count()
+    if job_count == 0:
+        return None
+
+    job_ids = list(jobs_in_series.values_list('id', flat=True))
+
+    appointments_to_delete = Appointment.objects.filter(job_id__in=job_ids)
+    appointment_count = appointments_to_delete.count()
+    appointments_deleted_from_ghl = 0
+    appointments_deleted_from_db = 0
+
+    if appointment_count > 0:
+        print(f"Found {appointment_count} appointment(s) linked to jobs in series {series_label}")
+
+        for appointment in appointments_to_delete:
+            try:
+                appointment._skip_ghl_sync = True
+                if delete_appointment_from_ghl(appointment):
+                    appointments_deleted_from_ghl += 1
+                    print(f"✅ Deleted appointment {appointment.ghl_appointment_id} from GHL")
+                else:
+                    print(f"⚠️ Failed to delete appointment {appointment.ghl_appointment_id} from GHL, but will still delete from database")
+            except Exception as e:
+                print(f"❌ Error deleting appointment {appointment.ghl_appointment_id} from GHL: {str(e)}")
+
+            try:
+                appointment.delete()
+                appointments_deleted_from_db += 1
+            except Exception as e:
+                print(f"❌ Error deleting appointment {appointment.id} from database: {str(e)}")
+
+        print(f"Deleted {appointments_deleted_from_db} appointment(s) from database (attempted to delete {appointments_deleted_from_ghl} from GHL)")
+
+    JobServiceItem.objects.filter(job_id__in=job_ids).delete()
+    JobAssignment.objects.filter(job_id__in=job_ids).delete()
+    JobOccurrence.objects.filter(job_id__in=job_ids).delete()
+    jobs_in_series.delete()
+
+    return {
+        'detail': f'Successfully deleted {job_count} job(s) from series {series_label}.',
+        'series_id': str(series_label),
+        'deleted_count': job_count,
+        'appointments_deleted_from_ghl': appointments_deleted_from_ghl,
+        'appointments_deleted_from_db': appointments_deleted_from_db,
+    }
+
+
 class JobViewSet(AccountScopedQuerysetMixin, viewsets.ModelViewSet):
     """Jobs scoped to current account. Admins see all in account; normal users see only jobs assigned to them."""
     queryset = Job.objects.all().select_related(
@@ -341,6 +423,31 @@ class JobViewSet(AccountScopedQuerysetMixin, viewsets.ModelViewSet):
         serializer.is_valid(raise_exception=True)
         result = serializer.save(job=job)
         return Response(result, status=201)
+
+    @action(detail=True, methods=['delete'], url_path='recurring-series')
+    def delete_recurring_series(self, request, pk=None):
+        """Delete all jobs in the recurring series for this job (works even when series_id is missing)."""
+        job = self.get_object()
+        account = getattr(request, 'account', None)
+        if not account:
+            return Response({'detail': 'Account context is required.'}, status=403)
+
+        jobs_in_series = jobs_in_recurring_series_queryset(job, account)
+        job_count = jobs_in_series.count()
+        if job_count == 0:
+            return Response({
+                'detail': 'No jobs found in recurring series.',
+                'deleted_count': 0,
+            }, status=404)
+
+        if not user_can_delete_job_series(request.user, jobs_in_series):
+            return Response({
+                'detail': 'You do not have permission to delete this job series. You must be assigned to at least one job in the series or be an admin.'
+            }, status=403)
+
+        series_label = job.series_id or job.id
+        result = delete_jobs_in_series(jobs_in_series, series_label)
+        return Response(result, status=200)
 
     @action(detail=True, methods=['patch'], url_path='update-payment-method')
     def update_payment_method(self, request, pk=None):
@@ -1119,67 +1226,13 @@ class JobBySeriesView(APIView):
             }, status=404)
         
         # Check permissions: user must be admin OR assigned to at least one job in the series
-        is_admin = getattr(user, 'is_admin', False)
-        if not is_admin:
-            # Check if user is assigned to any job in this series
-            user_assigned_jobs = jobs_in_series.filter(assignments__user=user).distinct()
-            if not user_assigned_jobs.exists():
-                return Response({
-                    'detail': 'You do not have permission to delete this job series. You must be assigned to at least one job in the series or be an admin.'
-                }, status=403)
+        if not user_can_delete_job_series(user, jobs_in_series):
+            return Response({
+                'detail': 'You do not have permission to delete this job series. You must be assigned to at least one job in the series or be an admin.'
+            }, status=403)
         
-        # Get job IDs for related record cleanup
-        job_ids = list(jobs_in_series.values_list('id', flat=True))
-        
-        # Handle appointments linked to these jobs - delete from GHL and our database
-        appointments_to_delete = Appointment.objects.filter(job_id__in=job_ids)
-        appointment_count = appointments_to_delete.count()
-        appointments_deleted_from_ghl = 0
-        appointments_deleted_from_db = 0
-        
-        if appointment_count > 0:
-            print(f"Found {appointment_count} appointment(s) linked to jobs in series {series_id}")
-            
-            # Delete appointments from GHL first, then from our database
-            for appointment in appointments_to_delete:
-                try:
-                    # Delete from GHL (skip sync flag to prevent signal from interfering)
-                    appointment._skip_ghl_sync = True
-                    if delete_appointment_from_ghl(appointment):
-                        appointments_deleted_from_ghl += 1
-                        print(f"✅ Deleted appointment {appointment.ghl_appointment_id} from GHL")
-                    else:
-                        print(f"⚠️ Failed to delete appointment {appointment.ghl_appointment_id} from GHL, but will still delete from database")
-                except Exception as e:
-                    print(f"❌ Error deleting appointment {appointment.ghl_appointment_id} from GHL: {str(e)}")
-                    # Continue with deletion from database even if GHL deletion fails
-                
-                # Delete from our database
-                try:
-                    appointment.delete()
-                    appointments_deleted_from_db += 1
-                except Exception as e:
-                    print(f"❌ Error deleting appointment {appointment.id} from database: {str(e)}")
-            
-            print(f"Deleted {appointments_deleted_from_db} appointment(s) from database (attempted to delete {appointments_deleted_from_ghl} from GHL)")
-        
-        # Delete related records first (though CASCADE should handle this, being explicit is safer)
-        # Note: JobServiceItem, JobAssignment, and JobOccurrence have CASCADE delete,
-        # but we'll delete them explicitly for clarity and to handle any edge cases
-        JobServiceItem.objects.filter(job_id__in=job_ids).delete()
-        JobAssignment.objects.filter(job_id__in=job_ids).delete()
-        JobOccurrence.objects.filter(job_id__in=job_ids).delete()
-        
-        # Delete all jobs in the series
-        jobs_in_series.delete()
-        
-        return Response({
-            'detail': f'Successfully deleted {job_count} job(s) from series {series_id}.',
-            'series_id': str(series_id),
-            'deleted_count': job_count,
-            'appointments_deleted_from_ghl': appointments_deleted_from_ghl,
-            'appointments_deleted_from_db': appointments_deleted_from_db
-        }, status=200)
+        result = delete_jobs_in_series(jobs_in_series, series_id)
+        return Response(result, status=200)
 
 
 
