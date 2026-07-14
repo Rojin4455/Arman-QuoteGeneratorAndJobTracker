@@ -9,6 +9,7 @@ from django.db.models import Count, Sum, Min, Q, Prefetch
 from django.db.models.functions import Coalesce
 from django.http import JsonResponse
 from django.shortcuts import get_object_or_404
+from django.utils import timezone
 from django.utils.dateparse import parse_datetime
 from django.views.decorators.csrf import csrf_exempt
 from rest_framework import permissions, viewsets
@@ -241,11 +242,35 @@ def user_can_delete_job_series(user, jobs_in_series):
     return jobs_in_series.filter(assignments__user=user).exists()
 
 
-def delete_jobs_in_series(jobs_in_series, series_label):
-    """Delete all jobs in a series plus linked appointments. Returns result dict."""
+def filter_jobs_by_delete_scope(jobs_qs, scope='all', cutoff_dt=None):
+    """
+    Filter series jobs by delete scope.
+    - all: every job in the series
+    - future: jobs with scheduled_at >= cutoff (keeps past history)
+    """
+    scope = (scope or 'all').strip().lower()
+    if scope not in ('all', 'future'):
+        raise ValidationError({'scope': 'scope must be "all" or "future".'})
+
+    if scope == 'all':
+        return jobs_qs, scope
+
+    cutoff = cutoff_dt or timezone.now()
+    return jobs_qs.filter(scheduled_at__gte=cutoff), scope
+
+
+def delete_jobs_in_series(jobs_in_series, series_label, scope='all'):
+    """Delete jobs in a series plus linked appointments. Returns result dict."""
     job_count = jobs_in_series.count()
     if job_count == 0:
-        return None
+        return {
+            'detail': f'No jobs to delete for series {series_label} (scope={scope}).',
+            'series_id': str(series_label),
+            'deleted_count': 0,
+            'scope': scope,
+            'appointments_deleted_from_ghl': 0,
+            'appointments_deleted_from_db': 0,
+        }
 
     job_ids = list(jobs_in_series.values_list('id', flat=True))
 
@@ -281,10 +306,12 @@ def delete_jobs_in_series(jobs_in_series, series_label):
     JobOccurrence.objects.filter(job_id__in=job_ids).delete()
     jobs_in_series.delete()
 
+    scope_label = 'future' if scope == 'future' else 'all'
     return {
-        'detail': f'Successfully deleted {job_count} job(s) from series {series_label}.',
+        'detail': f'Successfully deleted {job_count} job(s) from series {series_label} (scope={scope_label}).',
         'series_id': str(series_label),
         'deleted_count': job_count,
+        'scope': scope_label,
         'appointments_deleted_from_ghl': appointments_deleted_from_ghl,
         'appointments_deleted_from_db': appointments_deleted_from_db,
     }
@@ -426,15 +453,20 @@ class JobViewSet(AccountScopedQuerysetMixin, viewsets.ModelViewSet):
 
     @action(detail=True, methods=['delete'], url_path='recurring-series')
     def delete_recurring_series(self, request, pk=None):
-        """Delete all jobs in the recurring series for this job (works even when series_id is missing)."""
+        """
+        Delete jobs in the recurring series for this job (works even when series_id is missing).
+
+        Query params:
+        - scope=all|future (default: all)
+          future = delete only jobs with scheduled_at >= now (keeps past history)
+        """
         job = self.get_object()
         account = getattr(request, 'account', None)
         if not account:
             return Response({'detail': 'Account context is required.'}, status=403)
 
         jobs_in_series = jobs_in_recurring_series_queryset(job, account)
-        job_count = jobs_in_series.count()
-        if job_count == 0:
+        if not jobs_in_series.exists():
             return Response({
                 'detail': 'No jobs found in recurring series.',
                 'deleted_count': 0,
@@ -445,8 +477,18 @@ class JobViewSet(AccountScopedQuerysetMixin, viewsets.ModelViewSet):
                 'detail': 'You do not have permission to delete this job series. You must be assigned to at least one job in the series or be an admin.'
             }, status=403)
 
+        scope = request.query_params.get('scope', 'all')
+        try:
+            jobs_to_delete, scope = filter_jobs_by_delete_scope(
+                jobs_in_series,
+                scope=scope,
+                cutoff_dt=timezone.now(),
+            )
+        except ValidationError as exc:
+            return Response(exc.detail, status=400)
+
         series_label = job.series_id or job.id
-        result = delete_jobs_in_series(jobs_in_series, series_label)
+        result = delete_jobs_in_series(jobs_to_delete, series_label, scope=scope)
         return Response(result, status=200)
 
     @action(detail=True, methods=['patch'], url_path='update-payment-method')
@@ -1204,8 +1246,12 @@ class JobBySeriesView(APIView):
 
     def delete(self, request, series_id):
         """
-        Delete all jobs in a series (scoped to current account).
+        Delete jobs in a series (scoped to current account).
         Users can delete if they are assigned to any job in the series, or if they are admins.
+
+        Query params:
+        - scope=all|future (default: all)
+          future = delete only jobs with scheduled_at >= now (keeps past history)
         """
         user = request.user
         if not user.is_authenticated:
@@ -1216,9 +1262,8 @@ class JobBySeriesView(APIView):
         
         # Get all jobs in the series (current account only)
         jobs_in_series = Job.objects.filter(account=account, series_id=series_id)
-        job_count = jobs_in_series.count()
         
-        if job_count == 0:
+        if not jobs_in_series.exists():
             return Response({
                 'detail': f'No jobs found for series {series_id}.',
                 'series_id': str(series_id),
@@ -1230,8 +1275,18 @@ class JobBySeriesView(APIView):
             return Response({
                 'detail': 'You do not have permission to delete this job series. You must be assigned to at least one job in the series or be an admin.'
             }, status=403)
+
+        scope = request.query_params.get('scope', 'all')
+        try:
+            jobs_to_delete, scope = filter_jobs_by_delete_scope(
+                jobs_in_series,
+                scope=scope,
+                cutoff_dt=timezone.now(),
+            )
+        except ValidationError as exc:
+            return Response(exc.detail, status=400)
         
-        result = delete_jobs_in_series(jobs_in_series, series_id)
+        result = delete_jobs_in_series(jobs_to_delete, series_id, scope=scope)
         return Response(result, status=200)
 
 
