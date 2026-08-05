@@ -19,7 +19,12 @@ from accounts.utils import (
     sync_all_users_to_db,
     sync_custom_fields_to_db,
 )
-from dashboard_app.tasks import sync_single_invoice_task, delete_invoice_task
+from dashboard_app.tasks import (
+    sync_single_invoice_task,
+    delete_invoice_task,
+    notify_workorder_invoice_paid,
+    WORKORDER_INVOICE_PAID_LOCATION_ID,
+)
 from dashboard_app.models import Invoice
 from jobtracker_app.helpers import update_job_invoice_status_by_invoice_id
 
@@ -36,6 +41,19 @@ INVOICE_EVENT_STATUS_MAP = {
     "InvoiceSent": "sent",
     "InvoiceVoid": "void",
 }
+
+
+def _forward_invoice_paid_to_workorder(event_type, location_id, invoice_id):
+    """For TruShine InvoicePaid, notify workorder so it can mark its invoice paid."""
+    if event_type != "InvoicePaid":
+        return
+    if not invoice_id or location_id != WORKORDER_INVOICE_PAID_LOCATION_ID:
+        return
+    notify_workorder_invoice_paid.delay(invoice_id, status="paid")
+    print(
+        f"🌐 Triggered workorder invoice-paid webhook | "
+        f"ghl_invoice_id={invoice_id} location_id={location_id}"
+    )
 
 
 GHL_CLIENT_ID = config("GHL_CLIENT_ID")
@@ -580,6 +598,7 @@ def webhook_handler(request):
                     # Sync invoice for create, update, paid, partially paid, sent, void
                     sync_single_invoice_task.delay(location_id, invoice_id)
                     print(f"✅ Triggered invoice sync for {event_type}: invoice_id={invoice_id}, location_id={location_id}")
+                    _forward_invoice_paid_to_workorder(event_type, location_id, invoice_id)
             else:
                 missing = []
                 if not location_id:
@@ -616,6 +635,7 @@ def webhook_handler(request):
                                     print(f"⚠️ Could not update invoice status for {event_type}: {e}")
                             sync_single_invoice_task.delay(location_id, invoice_id)
                             print(f"✅ Triggered invoice sync with fallback location_id")
+                            _forward_invoice_paid_to_workorder(event_type, location_id, invoice_id)
 
         return JsonResponse({"message": "Webhook received"}, status=200)
 

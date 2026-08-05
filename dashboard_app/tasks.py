@@ -1,9 +1,58 @@
+import requests
 from celery import shared_task
 from django.utils import timezone
 
 from dashboard_app.services import invoice_sync
 from dashboard_app.models import Invoice
 from accounts.models import GHLAuthCredentials
+
+# TruShine location: forward GHL InvoicePaid to workorder invoice service
+WORKORDER_INVOICE_PAID_LOCATION_ID = "b8qvo7VooP3JD3dIZU42"
+WORKORDER_INVOICE_PAID_URL = "https://workorder.theservicepilot.com/api/webhook/invoice-paid/"
+
+
+@shared_task
+def notify_workorder_invoice_paid(ghl_invoice_id, status="paid"):
+    """
+    Notify workorder.theservicepilot.com that a GHL invoice was paid.
+    Only used for TruShine (location b8qvo7VooP3JD3dIZU42).
+    """
+    if not ghl_invoice_id:
+        return {"success": False, "error": "ghl_invoice_id is required"}
+
+    payload = {
+        "ghl_invoice_id": str(ghl_invoice_id),
+        "status": status or "paid",
+    }
+    headers = {"Content-Type": "application/json"}
+
+    try:
+        print(
+            f"🌐 [INVOICE PAID] POST {WORKORDER_INVOICE_PAID_URL} "
+            f"payload={payload}"
+        )
+        response = requests.post(
+            WORKORDER_INVOICE_PAID_URL,
+            json=payload,
+            headers=headers,
+            timeout=30,
+        )
+        print(
+            f"📨 [INVOICE PAID] status={response.status_code} body={response.text[:500]}"
+        )
+        return {
+            "success": response.status_code in (200, 201),
+            "status_code": response.status_code,
+            "response": response.text[:500],
+            "ghl_invoice_id": ghl_invoice_id,
+        }
+    except requests.exceptions.RequestException as e:
+        print(f"🚨 [INVOICE PAID] Request error for ghl_invoice_id={ghl_invoice_id}: {e}")
+        return {"success": False, "error": str(e), "ghl_invoice_id": ghl_invoice_id}
+    except Exception as e:
+        print(f"🔥 [INVOICE PAID] Unexpected error for ghl_invoice_id={ghl_invoice_id}: {e}")
+        return {"success": False, "error": str(e), "ghl_invoice_id": ghl_invoice_id}
+
 
 @shared_task
 def sync_single_invoice_task(location_id, invoice_id):
