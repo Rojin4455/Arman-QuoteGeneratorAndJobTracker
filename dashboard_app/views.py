@@ -5,7 +5,7 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from django.db.models import Q, Sum, Count, F, Value, DecimalField
-from django.db.models.functions import TruncDate, TruncWeek, TruncMonth, Coalesce
+from django.db.models.functions import TruncDate, TruncWeek, TruncMonth, TruncYear, Coalesce
 from django.utils import timezone
 from django.utils.dateparse import parse_datetime
 from datetime import datetime, timedelta, time, date
@@ -371,6 +371,8 @@ class InvoiceViewSet(AccountScopedQuerysetMixin, viewsets.ModelViewSet):
             date_trunc = TruncWeek("created_at")
         elif granularity == "monthly":
             date_trunc = TruncMonth("created_at")
+        elif granularity == "yearly":
+            date_trunc = TruncYear("created_at")
         else:
             date_trunc = TruncDate("created_at")
 
@@ -390,13 +392,56 @@ class InvoiceViewSet(AccountScopedQuerysetMixin, viewsets.ModelViewSet):
             )
             .order_by("period")
         )
+
+        from calendar import monthrange
+
+        filter_start = start_dt.date() if start_dt else None
+        filter_end = end_dt.date() if end_dt else None
+
+        def _to_date(value):
+            if value is None:
+                return None
+            if hasattr(value, "date") and callable(value.date):
+                try:
+                    return value.date()
+                except Exception:
+                    pass
+            if isinstance(value, date):
+                return value
+            try:
+                return date.fromisoformat(str(value)[:10])
+            except (TypeError, ValueError):
+                return None
+
+        def _period_bounds(period_value):
+            start = _to_date(period_value)
+            if not start:
+                return None, None
+            if granularity == "weekly":
+                end = start + timedelta(days=6)
+            elif granularity == "monthly":
+                end = start.replace(day=monthrange(start.year, start.month)[1])
+            elif granularity == "yearly":
+                end = date(start.year, 12, 31)
+            else:
+                end = start
+            if filter_start and start < filter_start:
+                start = filter_start
+            if filter_end and end > filter_end:
+                end = filter_end
+            return start, end
+
         # Serialize trends for JSON: period as ISO string, decimals as float
         trends_data = []
         for row in trends:
             period = row["period"]
             period_str = period.isoformat() if hasattr(period, "isoformat") else str(period)
+            period_start, period_end = _period_bounds(period)
             trends_data.append({
                 "period": period_str,
+                "period_start": period_start.isoformat() if period_start else None,
+                "period_end": period_end.isoformat() if period_end else None,
+                "granularity": granularity,
                 "total_invoices": row["total_invoices"],
                 "total_amount": float(row["total_amount"] or 0),
                 "total_paid": float(row["total_paid"] or 0),
