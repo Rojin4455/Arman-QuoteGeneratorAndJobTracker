@@ -58,6 +58,20 @@ class CustomerSubmission(models.Model):
     # User who created/quoted this submission
     quoted_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True, related_name='quoted_submissions')
 
+    QUOTE_ORIGIN_TECHNICIAN = 'technician'
+    QUOTE_ORIGIN_PUBLIC = 'public'
+    QUOTE_ORIGIN_CHOICES = [
+        (QUOTE_ORIGIN_TECHNICIAN, 'Technician'),
+        (QUOTE_ORIGIN_PUBLIC, 'Public / Customer'),
+    ]
+    quote_origin = models.CharField(
+        max_length=20,
+        choices=QUOTE_ORIGIN_CHOICES,
+        default=QUOTE_ORIGIN_TECHNICIAN,
+        db_index=True,
+        help_text='Whether this quote was started by a technician or via the public customer form.',
+    )
+
     # Persisted snapshot of the original proposal (technician save before client edits)
     is_persisted_snapshot = models.BooleanField(
         default=False,

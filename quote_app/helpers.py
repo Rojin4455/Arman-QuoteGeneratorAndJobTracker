@@ -1,5 +1,6 @@
 from decimal import Decimal
 from urllib.parse import urlencode
+import uuid
 
 from accounts.models import GHLAuthCredentials, GHLCustomField
 import requests
@@ -324,3 +325,195 @@ def create_or_update_ghl_contact(submission, is_submit=False):
 
     except Exception as e:
         print(f"🔥 Error syncing contact: {e}")
+
+
+def _ghl_headers(access_token):
+    return {
+        "Accept": "application/json",
+        "Authorization": f"Bearer {access_token}",
+        "Version": "2021-07-28",
+        "Content-Type": "application/json",
+    }
+
+
+def _normalize_email(email):
+    return (email or "").strip().lower()
+
+
+def _normalize_phone(phone):
+    if not phone:
+        return ""
+    digits = "".join(ch for ch in str(phone) if ch.isdigit())
+    return digits
+
+
+def search_ghl_contacts_by_query(credentials, location_id, query):
+    """Return list of GHL contact dicts matching query within a location."""
+    if not query:
+        return []
+    headers = _ghl_headers(credentials.access_token)
+    response = requests.get(
+        "https://services.leadconnectorhq.com/contacts/",
+        headers=headers,
+        params={"locationId": location_id, "query": query},
+        timeout=30,
+    )
+    if response.status_code != 200:
+        print(f"❌ [PUBLIC CONTACT] GHL search failed [{response.status_code}]: {response.text}")
+        return []
+    data = response.json() or {}
+    contacts = data.get("contacts")
+    if isinstance(contacts, list):
+        return contacts
+    if isinstance(data.get("contact"), dict):
+        return [data["contact"]]
+    return []
+
+
+def create_or_update_ghl_contact_for_public(credentials, location_id, *, first_name, last_name, email, phone, address=None):
+    """
+    Create or update a GHL contact for the public quote flow.
+
+    Prefers exact email match within the location; falls back to create.
+    Returns the GHL contact id string, or None on failure.
+    """
+    headers = _ghl_headers(credentials.access_token)
+    email_norm = _normalize_email(email)
+    phone_norm = (phone or "").strip()
+
+    existing = None
+    if email_norm:
+        for candidate in search_ghl_contacts_by_query(credentials, location_id, email_norm):
+            cand_email = _normalize_email(candidate.get("email"))
+            if cand_email and cand_email == email_norm:
+                existing = candidate
+                break
+
+    if existing is None and phone_norm:
+        for candidate in search_ghl_contacts_by_query(credentials, location_id, phone_norm):
+            cand_phone = _normalize_phone(candidate.get("phone"))
+            if cand_phone and cand_phone == _normalize_phone(phone_norm):
+                existing = candidate
+                break
+
+    payload = {
+        "firstName": (first_name or "").strip(),
+        "lastName": (last_name or "").strip(),
+        "email": email_norm or None,
+        "phone": phone_norm or None,
+        "locationId": location_id,
+        "tags": ["public quote"],
+    }
+    if address:
+        if address.get("street_address"):
+            payload["address1"] = address["street_address"]
+        if address.get("city"):
+            payload["city"] = address["city"]
+        if address.get("state"):
+            payload["state"] = address["state"]
+        if address.get("postal_code"):
+            payload["postalCode"] = address["postal_code"]
+
+    # Drop empty optional fields so GHL does not clear with nulls on update oddly
+    payload = {k: v for k, v in payload.items() if v not in (None, "")}
+
+    if existing:
+        ghl_id = existing.get("id") or existing.get("_id")
+        tags = list(existing.get("tags") or [])
+        if "public quote" not in [t.lower() for t in tags if isinstance(t, str)]:
+            tags.append("public quote")
+        update_payload = {k: v for k, v in payload.items() if k != "locationId"}
+        update_payload["tags"] = tags
+        response = requests.put(
+            f"https://services.leadconnectorhq.com/contacts/{ghl_id}",
+            headers=headers,
+            json=update_payload,
+            timeout=30,
+        )
+        print(f"⬅️ [PUBLIC CONTACT] Update [{response.status_code}]: {response.text}")
+        if response.status_code not in (200, 201):
+            return None
+        return ghl_id
+
+    response = requests.post(
+        "https://services.leadconnectorhq.com/contacts/",
+        headers=headers,
+        json=payload,
+        timeout=30,
+    )
+    print(f"⬅️ [PUBLIC CONTACT] Create [{response.status_code}]: {response.text}")
+    if response.status_code not in (200, 201):
+        return None
+    body = response.json() or {}
+    return (body.get("contact") or {}).get("id") or body.get("id")
+
+
+def upsert_local_contact_from_public(*, account, location_id, ghl_contact_id, first_name, last_name, email, phone):
+    """Create or update the local Contact row for a public quote customer."""
+    from django.utils import timezone
+    from accounts.models import Contact
+
+    email_norm = _normalize_email(email) or None
+    defaults = {
+        "account": account,
+        "first_name": (first_name or "").strip() or None,
+        "last_name": (last_name or "").strip() or None,
+        "email": email_norm,
+        "phone": (phone or "").strip() or None,
+        "location_id": location_id,
+        "date_added": timezone.now(),
+        "dnd": False,
+    }
+
+    contact = None
+    if ghl_contact_id:
+        contact = Contact.objects.filter(contact_id=ghl_contact_id).first()
+
+    if contact is None and email_norm:
+        contact = (
+            Contact.objects.filter(account=account, email__iexact=email_norm)
+            .order_by("-date_added", "-id")
+            .first()
+        )
+
+    if contact is None:
+        # contact_id is required+unique; use GHL id, or a stable local placeholder until sync
+        contact_id = ghl_contact_id or f"public_{uuid.uuid4().hex}"
+        contact = Contact.objects.create(contact_id=contact_id, **defaults)
+        return contact, True
+
+    for key, value in defaults.items():
+        setattr(contact, key, value)
+    if ghl_contact_id and contact.contact_id != ghl_contact_id:
+        # Prefer real GHL id when we have one and it is not already taken
+        if not Contact.objects.filter(contact_id=ghl_contact_id).exclude(pk=contact.pk).exists():
+            contact.contact_id = ghl_contact_id
+    contact.save()
+    return contact, False
+
+
+def create_local_address_for_contact(contact, address_data):
+    """Create a local Address row for the contact (public quote property)."""
+    from django.db.models import Max
+    from accounts.models import Address
+
+    next_order = (
+        Address.objects.filter(contact=contact).aggregate(max_order=Max("order"))["max_order"] or 0
+    ) + 1
+    fields = {
+        "name": (address_data.get("name") or "").strip() or f"Property {next_order}",
+        "street_address": (address_data.get("street_address") or "").strip() or None,
+        "city": (address_data.get("city") or "").strip() or None,
+        "state": (address_data.get("state") or "").strip() or None,
+        "postal_code": (address_data.get("postal_code") or "").strip() or None,
+        "gate_code": (address_data.get("gate_code") or "").strip() or None,
+        "number_of_floors": address_data.get("number_of_floors"),
+        "property_sqft": address_data.get("property_sqft"),
+        "property_type": address_data.get("property_type") or None,
+    }
+    return Address.objects.create(
+        contact=contact,
+        address_id=f"app_{uuid.uuid4().hex[:16]}",
+        order=next_order,
+        **fields,
+    )

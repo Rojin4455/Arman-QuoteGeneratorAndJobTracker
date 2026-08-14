@@ -30,6 +30,9 @@ urlpatterns = [
 
     # Step 2: Create customer submission
     path('create-submission/', views.CustomerSubmissionCreateView.as_view(), name='create-submission'),
+
+    # Public/customer-facing quote start (no contact search)
+    path('public/start-submission/', views.PublicStartSubmissionView.as_view(), name='public-start-submission'),
     
     # Step 3: Add services to submission
     path('<uuid:submission_id>/add-services/', views.AddServicesToSubmissionView.as_view(), name='add-services'),

@@ -1,6 +1,7 @@
 # user_serializers.py - Serializers for user-side functionality
 from rest_framework import serializers
 from decimal import Decimal
+from django.db.models import Q
 from service_app.models import (
     Service, Package, Feature, PackageFeature, Location, 
     Question, QuestionOption, SubQuestion, GlobalSizePackage,
@@ -111,6 +112,11 @@ class CustomerSubmissionCreateSerializer(serializers.ModelSerializer):
     address = serializers.PrimaryKeyRelatedField(queryset=Address.objects.all(), required=False, allow_null=True)
     quoted_by = serializers.PrimaryKeyRelatedField(queryset=User.objects.all(), write_only=True, required=False, allow_null=True)
     first_time = serializers.BooleanField(write_only=True)
+    quote_origin = serializers.ChoiceField(
+        choices=CustomerSubmission.QUOTE_ORIGIN_CHOICES,
+        required=False,
+        default=CustomerSubmission.QUOTE_ORIGIN_TECHNICIAN,
+    )
     location = serializers.PrimaryKeyRelatedField(
         queryset=Location.objects.filter(is_active=True),
         required=False,
@@ -121,13 +127,16 @@ class CustomerSubmissionCreateSerializer(serializers.ModelSerializer):
     class Meta:
         model = CustomerSubmission
         fields = [
-            'contact', 'address', 'house_sqft', 'quoted_by', 'first_time', 'location'
+            'contact', 'address', 'house_sqft', 'quoted_by', 'first_time', 'location', 'quote_origin',
         ]
+
+    def _get_account(self):
+        request = self.context.get('request')
+        return getattr(request, 'account', None) if request else None
 
     def _get_location_queryset(self):
         """Scope location queryset to request account when available."""
-        request = self.context.get('request')
-        account = getattr(request, 'account', None) if request else None
+        account = self._get_account()
         if account:
             return Location.objects.filter(is_active=True, account=account)
         return Location.objects.filter(is_active=True)
@@ -135,6 +144,61 @@ class CustomerSubmissionCreateSerializer(serializers.ModelSerializer):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.fields['location'].queryset = self._get_location_queryset()
+        account = self._get_account()
+        if account:
+            contact_qs = Contact.objects.filter(
+                Q(account=account)
+                | Q(account__isnull=True, location_id=account.location_id)
+            )
+            self.fields['contact'].queryset = contact_qs
+            self.fields['address'].queryset = Address.objects.filter(contact__in=contact_qs)
+            self.fields['quoted_by'].queryset = User.objects.filter(account=account, is_active=True)
+
+    def validate_contact(self, contact):
+        account = self._get_account()
+        if not account:
+            return contact
+        if contact.account_id and contact.account_id != account.id:
+            raise serializers.ValidationError('Contact does not belong to this account.')
+        if (
+            not contact.account_id
+            and (contact.location_id or '') != (account.location_id or '')
+        ):
+            raise serializers.ValidationError('Contact does not belong to this account.')
+        return contact
+
+    def validate_address(self, address):
+        if address is None:
+            return address
+        account = self._get_account()
+        if not account:
+            return address
+        contact_account_id = getattr(address.contact, 'account_id', None)
+        if contact_account_id and contact_account_id != account.id:
+            raise serializers.ValidationError('Address does not belong to this account.')
+        if (
+            not contact_account_id
+            and (getattr(address.contact, 'location_id', None) or '') != (account.location_id or '')
+        ):
+            raise serializers.ValidationError('Address does not belong to this account.')
+        return address
+
+    def validate(self, attrs):
+        contact = attrs.get('contact')
+        address = attrs.get('address')
+        if contact is not None and address is not None and address.contact_id != contact.id:
+            raise serializers.ValidationError({
+                'address': 'Address does not belong to the selected contact.'
+            })
+        return attrs
+
+    def validate_quote_origin(self, value):
+        # Public origin must be set only via the dedicated public start endpoint.
+        if value == CustomerSubmission.QUOTE_ORIGIN_PUBLIC:
+            raise serializers.ValidationError(
+                'Public quotes must be started via the public quote endpoint.'
+            )
+        return value or CustomerSubmission.QUOTE_ORIGIN_TECHNICIAN
 
     def create(self, validated_data):
         from django.utils import timezone
@@ -143,11 +207,13 @@ class CustomerSubmissionCreateSerializer(serializers.ModelSerializer):
         quoted_by_user = validated_data.pop('quoted_by', None)
         first_time = validated_data.pop('first_time')
         location = validated_data.pop('location', None)
+        quote_origin = validated_data.pop(
+            'quote_origin', CustomerSubmission.QUOTE_ORIGIN_TECHNICIAN
+        )
         # Avoid duplicate 'account' (can be in validated_data when passed via serializer.save(account=...))
         account = validated_data.pop('account', None)
         if account is None:
-            request = self.context.get('request')
-            account = getattr(request, 'account', None) if request else None
+            account = self._get_account()
 
         # Create submission with quoted_by user and account
         submission = CustomerSubmission.objects.create(
@@ -155,6 +221,7 @@ class CustomerSubmissionCreateSerializer(serializers.ModelSerializer):
             quoted_by=quoted_by_user,
             account=account,
             location=location,
+            quote_origin=quote_origin or CustomerSubmission.QUOTE_ORIGIN_TECHNICIAN,
         )
         submission.expires_at = timezone.now() + timedelta(days=30)
 
@@ -176,7 +243,50 @@ class CustomerSubmissionCreateSerializer(serializers.ModelSerializer):
             first_time=first_time
         )
 
+        # Mirror origin into additional_data for older consumers
+        extra = dict(submission.additional_data or {})
+        extra['quote_origin'] = submission.quote_origin
+        submission.additional_data = extra
+        submission.save(update_fields=['additional_data', 'updated_at'])
+
         return submission
+
+
+class PublicStartSubmissionSerializer(serializers.Serializer):
+    """Payload for public/customer-facing quote start (contact form + submission)."""
+    first_name = serializers.CharField(max_length=100)
+    last_name = serializers.CharField(max_length=100, required=False, allow_blank=True, default='')
+    email = serializers.EmailField()
+    phone = serializers.CharField(max_length=30)
+    street_address = serializers.CharField(max_length=255)
+    city = serializers.CharField(max_length=100)
+    state = serializers.CharField(max_length=100)
+    postal_code = serializers.CharField(max_length=20)
+    gate_code = serializers.CharField(max_length=20, required=False, allow_blank=True, default='')
+    number_of_floors = serializers.IntegerField(required=False, allow_null=True, min_value=0)
+    property_type = serializers.ChoiceField(
+        choices=['residential', 'commercial'],
+        required=False,
+        allow_blank=True,
+        default='residential',
+    )
+    house_sqft = serializers.IntegerField(min_value=1)
+    location = serializers.PrimaryKeyRelatedField(
+        queryset=Location.objects.filter(is_active=True),
+        required=False,
+        allow_null=True,
+    )
+    first_time = serializers.BooleanField(required=False, default=True)
+    address_name = serializers.CharField(max_length=100, required=False, allow_blank=True, default='')
+    customer_notes = serializers.CharField(max_length=2000, required=False, allow_blank=True, default='')
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        request = self.context.get('request')
+        account = getattr(request, 'account', None) if request else None
+        if account:
+            self.fields['location'].queryset = Location.objects.filter(is_active=True, account=account)
+
 
 class CustomerServiceSelectionSerializer(serializers.ModelSerializer):
     """Serializer for service selections"""
@@ -322,6 +432,13 @@ class CustomerSubmissionDetailSerializer(serializers.ModelSerializer):
             'expires_at', 'service_selections','additional_data','contact','address','custom_products','custom_service_total','quote_schedule',
             'quoted_by', 'quoted_by_details', 'images',
             'is_persisted_snapshot', 'source_submission_id', 'persisted_snapshot_id',
+            'quote_origin',
+        ]
+        read_only_fields = [
+            'quote_origin',
+            'is_persisted_snapshot',
+            'source_submission_id',
+            'persisted_snapshot_id',
         ]
     
     def get_service_selections(self, obj):
@@ -530,6 +647,9 @@ class CustomServiceSerializer(serializers.ModelSerializer):
 
 
 class QuoteScheduleUpdateSerializer(serializers.ModelSerializer):
+    # Public quotes have no technician; allow blank quoted_by on schedule confirm.
+    quoted_by = serializers.CharField(required=False, allow_blank=True, default='')
+
     class Meta:
         model = QuoteSchedule
         fields = ['first_time', 'quoted_by', 'scheduled_date', 'notes', 'is_submitted']

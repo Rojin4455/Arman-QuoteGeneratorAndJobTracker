@@ -169,6 +169,7 @@ def clone_submission_as_persisted_snapshot(source: CustomerSubmission) -> tuple[
                 "location": source.location,
                 "status": source.status,
                 "quoted_by": source.quoted_by,
+                "quote_origin": getattr(source, "quote_origin", None) or CustomerSubmission.QUOTE_ORIGIN_TECHNICIAN,
                 "total_base_price": source.total_base_price,
                 "total_adjustments": source.total_adjustments,
                 "total_surcharges": source.total_surcharges,

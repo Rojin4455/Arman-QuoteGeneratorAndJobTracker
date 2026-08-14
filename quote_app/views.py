@@ -86,6 +86,54 @@ class ContactSearchView(AccountScopedQuerysetMixin, ListAPIView):
     permission_classes = [AccountScopedPermission, AllowAny]
     account_lookup = "account"
 
+    def _caller_may_search_contacts(self, request):
+        """
+        Contact search is technician/admin only.
+
+        - Authenticated users (admin Jobs, logged-in staff): allowed (account-scoped).
+        - Unauthenticated iframe technicians: must pass `email` matching an active
+          project employee (or account user) for the resolved location.
+        """
+        user = getattr(request, 'user', None)
+        if user is not None and getattr(user, 'is_authenticated', False):
+            return True
+
+        email = (request.query_params.get('email') or '').strip()
+        if not email:
+            return False
+
+        account = getattr(request, 'account', None)
+        if account is None:
+            return False
+
+        if EmployeeProfile.objects.filter(
+            account=account,
+            status='active',
+            user__isnull=False,
+            user__is_active=True,
+            user__email__iexact=email,
+        ).exists():
+            return True
+
+        return User.objects.filter(
+            account=account,
+            is_active=True,
+            email__iexact=email,
+        ).exists()
+
+    def list(self, request, *args, **kwargs):
+        if not self._caller_may_search_contacts(request):
+            return Response(
+                {
+                    'detail': (
+                        'Contact search requires an authenticated staff session '
+                        'or a valid technician email for this location.'
+                    )
+                },
+                status=status.HTTP_403_FORBIDDEN,
+            )
+        return super().list(request, *args, **kwargs)
+
     def get_queryset(self):
         query = self.request.query_params.get('search', '').strip()
         qs = super().get_queryset()
@@ -199,12 +247,15 @@ class InitialDataView(APIView):
         ).select_related('user').order_by('user__first_name', 'user__last_name', 'user__username')
 
         project_users = [emp.user for emp in project_employees]
+
+        # Public quote UI must not receive technician/employee directory.
+        is_public = str(request.query_params.get('public') or '').lower() in ('1', 'true', 'yes')
         
         return Response({
             'locations': LocationPublicSerializer(locations, many=True).data,
             'services': ServicePublicSerializer(services, many=True).data,
             'size_ranges': GlobalSizePackagePublicSerializer(size_ranges, many=True).data,
-            'project_employees': UserSerializer(project_users, many=True).data
+            'project_employees': [] if is_public else UserSerializer(project_users, many=True).data,
         })
 
 # Step 2: Create customer submission
@@ -236,6 +287,150 @@ class CustomerSubmissionCreateView(generics.CreateAPIView):
 
     def perform_create(self, serializer):
         serializer.save(account=getattr(self.request, 'account', None))
+
+
+class PublicStartSubmissionView(APIView):
+    """
+    Public/customer-facing quote entry.
+
+    Creates or updates a GHL contact for the resolved location, creates a local
+    Contact + Address, then starts a CustomerSubmission with quote_origin=public.
+
+    Never exposes contact search or other customers' data.
+    """
+    permission_classes = [AccountScopedPermission, AllowAny]
+
+    def post(self, request):
+        from quote_app.helpers import (
+            create_or_update_ghl_contact_for_public,
+            upsert_local_contact_from_public,
+            create_local_address_for_contact,
+        )
+        from quote_app.serializers import PublicStartSubmissionSerializer
+
+        account = getattr(request, 'account', None)
+        if not account and DEFAULT_LOCATION_ID:
+            account = GHLAuthCredentials.objects.filter(location_id=DEFAULT_LOCATION_ID).first()
+            if account:
+                request.account = account
+        if not account:
+            return Response(
+                {
+                    'error': (
+                        'Account could not be determined. Provide a valid location_id '
+                        'in query, body, or X-Location-Id header.'
+                    )
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        location_id = (getattr(account, 'location_id', None) or '').strip()
+        if not location_id:
+            return Response(
+                {'error': 'Account is missing a GHL location_id.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        serializer = PublicStartSubmissionSerializer(data=request.data, context={'request': request})
+        serializer.is_valid(raise_exception=True)
+        data = serializer.validated_data
+
+        address_payload = {
+            'name': data.get('address_name') or '',
+            'street_address': data.get('street_address'),
+            'city': data.get('city'),
+            'state': data.get('state'),
+            'postal_code': data.get('postal_code'),
+            'gate_code': data.get('gate_code') or '',
+            'number_of_floors': data.get('number_of_floors'),
+            'property_sqft': data.get('house_sqft'),
+            'property_type': data.get('property_type') or 'residential',
+        }
+
+        try:
+            with transaction.atomic():
+                ghl_contact_id = create_or_update_ghl_contact_for_public(
+                    account,
+                    location_id,
+                    first_name=data.get('first_name'),
+                    last_name=data.get('last_name'),
+                    email=data.get('email'),
+                    phone=data.get('phone'),
+                    address=address_payload,
+                )
+                if not ghl_contact_id:
+                    return Response(
+                        {'error': 'Unable to create or update contact in CRM. Please try again.'},
+                        status=status.HTTP_502_BAD_GATEWAY,
+                    )
+
+                contact, _created = upsert_local_contact_from_public(
+                    account=account,
+                    location_id=location_id,
+                    ghl_contact_id=ghl_contact_id,
+                    first_name=data.get('first_name'),
+                    last_name=data.get('last_name'),
+                    email=data.get('email'),
+                    phone=data.get('phone'),
+                )
+                address = create_local_address_for_contact(contact, address_payload)
+
+                service_location = data.get('location')
+                customer_notes = (data.get('customer_notes') or '').strip()
+                additional_data = {
+                    'quote_origin': CustomerSubmission.QUOTE_ORIGIN_PUBLIC,
+                }
+                if customer_notes:
+                    additional_data['additional_notes'] = customer_notes
+                    additional_data['customer_notes'] = customer_notes
+
+                submission = CustomerSubmission.objects.create(
+                    account=account,
+                    contact=contact,
+                    address=address,
+                    house_sqft=data['house_sqft'],
+                    location=service_location,
+                    quoted_by=None,
+                    quote_origin=CustomerSubmission.QUOTE_ORIGIN_PUBLIC,
+                    additional_data=additional_data,
+                    expires_at=timezone.now() + timedelta(days=30),
+                )
+                if (
+                    service_location
+                    and service_location.trip_surcharge
+                    and service_location.trip_surcharge > Decimal('0.00')
+                ):
+                    submission.total_surcharges = service_location.trip_surcharge
+                    submission.quote_surcharge_applicable = True
+                    submission.save(update_fields=[
+                        'total_surcharges',
+                        'quote_surcharge_applicable',
+                        'updated_at',
+                    ])
+
+                QuoteSchedule.objects.create(
+                    submission=submission,
+                    quoted_by='',
+                    first_time=bool(data.get('first_time', True)),
+                )
+        except Exception as exc:
+            print(f'🔥 [PUBLIC START] Failed: {exc}')
+            return Response(
+                {'error': 'Could not start public quote. Please try again.'},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
+
+        return Response(
+            {
+                'submission_id': submission.id,
+                'contact_id': contact.id,
+                'address_id': address.id,
+                'quote_origin': submission.quote_origin,
+                'message': 'Public quote started successfully',
+            },
+            status=status.HTTP_201_CREATED,
+        )
+
 
 # Step 3: Add services to submission
 class AddServicesToSubmissionView(APIView):
