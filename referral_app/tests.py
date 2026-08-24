@@ -540,6 +540,69 @@ class ReferralWalletApplicationTests(TestCase):
         )
 
 
+class TruShineCompletionWebhookCreditTests(TestCase):
+    """This location invoices via workorder webhook, not create_invoice()."""
+
+    def setUp(self):
+        self.location_id = "b8qvo7VooP3JD3dIZU42"
+        self.account = make_account(location_id=self.location_id)
+        self.customer = Contact.objects.create(
+            account=self.account,
+            contact_id="ghl_c2",
+            first_name="Customer",
+            last_name="2",
+            email="customer2@test.com",
+            location_id=self.location_id,
+        )
+        services.get_or_create_program(self.account)
+        services.issue_credit(
+            account=self.account,
+            contact=self.customer,
+            amount_cents=2500,
+            entry_type=CustomerCreditLedger.TYPE_REFERRER_REWARD,
+            idempotency_key="seed-c2-credit",
+            description="referrer reward",
+        )
+
+    @patch("jobtracker_app.tasks.requests.post")
+    def test_webhook_payload_includes_wallet_credit(self, mock_post):
+        from jobtracker_app.models import Job, JobServiceItem
+        from jobtracker_app.tasks import send_job_completion_webhook
+        from quote_app.models import CustomerSubmission
+
+        mock_post.return_value.status_code = 201
+        mock_post.return_value.content = b'{"invoiceId": "inv_c2"}'
+        mock_post.return_value.json.return_value = {"invoiceId": "inv_c2"}
+        mock_post.return_value.text = '{"invoiceId": "inv_c2"}'
+
+        submission = CustomerSubmission.objects.create(
+            account=self.account,
+            contact=self.customer,
+            house_sqft=1200,
+        )
+        job = Job.objects.create(
+            account=self.account,
+            contact=self.customer,
+            submission=submission,
+            title="Test customer 2",
+            customer_email="customer2@test.com",
+            customer_name="Customer 2",
+            total_price=Decimal("170.00"),
+            status="completed",
+        )
+        JobServiceItem.objects.create(job=job, custom_name="Exterior", price=Decimal("130.00"))
+        JobServiceItem.objects.create(job=job, custom_name="Interior", price=Decimal("40.00"))
+
+        result = send_job_completion_webhook(str(job.id))
+        self.assertTrue(result.get("success"), result)
+        payload = mock_post.call_args.kwargs["json"]
+        self.assertEqual(payload["discount"]["type"], "fixed")
+        self.assertEqual(payload["discount"]["value"], 25.0)
+        job.refresh_from_db()
+        self.assertEqual(job.referral_credit_amount, Decimal("25.00"))
+        self.assertEqual(services.available_credit_cents(self.account, self.customer), 0)
+
+
 class JobContactLinkRegressionTests(TestCase):
     """Regression tests for the edit bug that unlinked jobs from contacts."""
 

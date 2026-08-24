@@ -227,6 +227,28 @@ def _mark_job_completion_processed(job_id):
         print(f"Error marking job {job_id} as processed: {str(e)}")
 
 
+def _apply_referral_credit_for_invoice(job):
+    """Debit wallet credit onto the job so invoice/webhook payloads include it."""
+    try:
+        from referral_app.hooks import apply_credit_before_invoice_create
+        apply_credit_before_invoice_create(job)
+        job.refresh_from_db()
+    except Exception as referral_exc:
+        print(f"⚠️ Referral credit apply failed: {referral_exc}")
+    return job
+
+
+def _finalize_referral_credit_for_invoice(job, invoice_id):
+    if not invoice_id:
+        return
+    try:
+        from referral_app.hooks import finalize_credit_application_for_job
+        job.refresh_from_db()
+        finalize_credit_application_for_job(job, invoice_id)
+    except Exception as referral_exc:
+        print(f"⚠️ Referral credit finalize failed: {referral_exc}")
+
+
 @shared_task
 def handle_webhook_event(data):
     try:
@@ -253,12 +275,7 @@ def handle_completed_job_invoice(job_id):
         if not job:
             return {"error": f"Job {job_id} not found"}
 
-        try:
-            from referral_app.hooks import apply_credit_before_invoice_create
-            apply_credit_before_invoice_create(job)
-            job.refresh_from_db()
-        except Exception as referral_exc:
-            print(f"⚠️ Referral credit apply failed: {referral_exc}")
+        job = _apply_referral_credit_for_invoice(job)
 
         payload = build_invoice_payload_from_job(job)
         result = _process_invoice_payload(payload, job_id=str(job_id))
@@ -266,16 +283,10 @@ def handle_completed_job_invoice(job_id):
         # Mark job as processed only if invoice was successfully created
         if result and not result.get("error"):
             _mark_job_completion_processed(job_id)
-            try:
-                invoice_id = None
-                if isinstance(result.get("invoice"), dict):
-                    invoice_id = result["invoice"].get("_id")
-                if invoice_id:
-                    from referral_app.hooks import finalize_credit_application_for_job
-                    job.refresh_from_db()
-                    finalize_credit_application_for_job(job, invoice_id)
-            except Exception as referral_exc:
-                print(f"⚠️ Referral credit finalize failed: {referral_exc}")
+            invoice_id = None
+            if isinstance(result.get("invoice"), dict):
+                invoice_id = result["invoice"].get("_id")
+            _finalize_referral_credit_for_invoice(job, invoice_id)
         
         return result
     except Exception as e:
@@ -294,7 +305,12 @@ def send_job_completion_webhook(job_id):
         print("🔍 Fetching job with related submission, contact, items, and services")
 
         job = (
-            Job.objects.select_related("submission__contact", "submission__location", "contact")
+            Job.objects.select_related(
+                "account",
+                "submission__contact",
+                "submission__location",
+                "contact",
+            )
             .prefetch_related("items__service")
             .filter(id=job_id)
             .first()
@@ -338,6 +354,10 @@ def send_job_completion_webhook(job_id):
             return {
                 "error": f"Location ID {location_id} does not match required location"
             }
+
+        # This location creates GHL invoices via workorder webhook, not handle_completed_job_invoice.
+        # Apply wallet credit here so the payload includes a $25 (etc) fixed discount.
+        job = _apply_referral_credit_for_invoice(job)
 
         # --------------------------------------------------
         # Build selected services
@@ -521,6 +541,7 @@ def send_job_completion_webhook(job_id):
                         invoice_sent=True,
                         invoice_url=invoice_url,
                     )
+                    _finalize_referral_credit_for_invoice(job, ghl_invoice_id)
                     print(
                         f"✅ Invoice saved to job {job_id}: "
                         f"ghl_invoice_id={ghl_invoice_id}, invoice_url={invoice_url}"
