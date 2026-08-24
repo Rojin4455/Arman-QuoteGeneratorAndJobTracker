@@ -421,6 +421,7 @@ class CustomerSubmissionDetailSerializer(serializers.ModelSerializer):
     images = CustomerSubmissionImageSerializer(many=True, read_only=True)
     source_submission_id = serializers.SerializerMethodField()
     persisted_snapshot_id = serializers.SerializerMethodField()
+    referral_discount = serializers.SerializerMethodField()
 
     class Meta:
         model = CustomerSubmission
@@ -432,7 +433,7 @@ class CustomerSubmissionDetailSerializer(serializers.ModelSerializer):
             'expires_at', 'service_selections','additional_data','contact','address','custom_products','custom_service_total','quote_schedule',
             'quoted_by', 'quoted_by_details', 'images',
             'is_persisted_snapshot', 'source_submission_id', 'persisted_snapshot_id',
-            'quote_origin',
+            'quote_origin', 'referral_discount',
         ]
         read_only_fields = [
             'quote_origin',
@@ -448,6 +449,30 @@ class CustomerSubmissionDetailSerializer(serializers.ModelSerializer):
             'question_responses__sub_question_responses'
         )
         return CustomerServiceSelectionDetailSerializer(selections, many=True).data
+
+    def get_referral_discount(self, obj):
+        """Pending referral discount preview for the quote's contact (referred customer)."""
+        try:
+            contact = obj.contact
+            account = getattr(obj, 'account', None) or (getattr(contact, 'account', None) if contact else None)
+            if not contact or not account:
+                return None
+            from referral_app import services as referral_services
+
+            program = referral_services.get_or_create_program(account)
+            if not program.enabled:
+                return None
+            pending = referral_services.pending_attribution_for_contact(account, contact)
+            if not pending or pending.discount_disabled or pending.friend_discount_cents <= 0:
+                return None
+            return {
+                'referral_id': str(pending.id),
+                'referrer_name': referral_services.contact_display_name(pending.referrer_contact),
+                'discount_cents': pending.friend_discount_cents,
+                'discount_dollars': float(pending.friend_discount_cents) / 100.0,
+            }
+        except Exception:
+            return None
     
     def get_quoted_by_details(self, obj):
         """Return quoted_by user details"""

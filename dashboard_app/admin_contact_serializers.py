@@ -173,6 +173,7 @@ class AdminContactDetailSerializer(serializers.ModelSerializer):
     invoices = serializers.SerializerMethodField()
     appointments = AdminContactAppointmentSerializer(many=True, read_only=True)
     summary = serializers.SerializerMethodField()
+    referral = serializers.SerializerMethodField()
 
     class Meta:
         model = Contact
@@ -181,7 +182,7 @@ class AdminContactDetailSerializer(serializers.ModelSerializer):
             'company_name', 'country', 'location_id', 'date_added', 'dnd', 'tags',
             'custom_fields', 'timestamp',
             'addresses', 'submissions', 'jobs', 'reschedule_pending_jobs', 'invoices',
-            'appointments', 'summary',
+            'appointments', 'summary', 'referral',
         ]
 
     def _get_jobs_list(self, obj):
@@ -190,6 +191,51 @@ class AdminContactDetailSerializer(serializers.ModelSerializer):
             jobs = list(jobs_queryset_for_contact(obj))
             obj._admin_contact_jobs_evaluated = jobs
         return jobs
+
+    def get_referral(self, obj):
+        """Existing personal referral link + credit (any contact is eligible; link may not exist yet)."""
+        if not obj.account_id:
+            return {
+                "eligible": False,
+                "has_link": False,
+                "referral_code": None,
+                "share_url": None,
+                "hub_url": None,
+                "available_credit_cents": 0,
+                "lifetime_credit_cents": 0,
+                "program_enabled": False,
+            }
+        try:
+            from referral_app import services
+            from referral_app.models import ReferralLink
+
+            program = services.get_or_create_program(obj.account)
+            link = ReferralLink.objects.filter(account_id=obj.account_id, contact_id=obj.pk).first()
+            return {
+                "eligible": True,
+                "has_link": bool(link),
+                "referral_code": link.code if link else None,
+                "share_url": services.build_share_url(link.code) if link else None,
+                "hub_url": (
+                    services.build_customer_hub_url(link.code, obj.account.location_id)
+                    if link
+                    else None
+                ),
+                "available_credit_cents": services.available_credit_cents(obj.account, obj),
+                "lifetime_credit_cents": services.lifetime_credit_cents(obj.account, obj),
+                "program_enabled": bool(program.enabled),
+            }
+        except Exception:
+            return {
+                "eligible": True,
+                "has_link": False,
+                "referral_code": None,
+                "share_url": None,
+                "hub_url": None,
+                "available_credit_cents": 0,
+                "lifetime_credit_cents": 0,
+                "program_enabled": False,
+            }
 
     def get_jobs(self, obj):
         jobs_list = [

@@ -395,6 +395,11 @@ class PublicStartSubmissionView(APIView):
                     additional_data=additional_data,
                     expires_at=timezone.now() + timedelta(days=30),
                 )
+                try:
+                    from referral_app.services import attach_pending_referral_to_quote
+                    attach_pending_referral_to_quote(account, contact, submission.id)
+                except Exception as referral_exc:
+                    print(f"⚠️ [PUBLIC START] Referral quote attach skipped: {referral_exc}")
                 if (
                     service_location
                     and service_location.trip_surcharge

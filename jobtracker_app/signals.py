@@ -138,6 +138,12 @@ def _trigger_invoice_on_completion(sender, instance, created, **kwargs):
             )
             return
 
+        try:
+            from referral_app.hooks import on_job_completed
+            on_job_completed(instance)
+        except Exception as referral_exc:
+            print(f"⚠️ Referral job.completed hook failed: {referral_exc}")
+
         # --------------------------------------------------
         # Resolve location_id from job: account, contact, submission.contact, or lookup by customer_email
         # --------------------------------------------------

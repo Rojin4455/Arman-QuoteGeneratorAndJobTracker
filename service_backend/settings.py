@@ -57,7 +57,8 @@ INSTALLED_APPS = [
     'jobtracker_app',
     'payroll_app',
     'dashboard_app',
-    'onestepgps_app'
+    'onestepgps_app',
+    'referral_app',
 ]
 
 MIDDLEWARE = [
@@ -222,6 +223,9 @@ GHL_LOCATION_CONNECT_REDIRECT_PATH = config(
     'GHL_LOCATION_CONNECT_REDIRECT_PATH',
     default='/oauth/location-callback',
 )
+
+# Public referral share/hub URLs. Falls back to this project's frontend origin.
+FRONTEND_URL = config('FRONTEND_URL', default=config('BASE_FRONTEND_URI', default='http://localhost:8080'))
 
 # Default primary key field type
 # https://docs.djangoproject.com/en/5.2/ref/settings/#default-auto-field

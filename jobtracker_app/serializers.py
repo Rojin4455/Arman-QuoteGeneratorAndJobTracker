@@ -390,6 +390,7 @@ class JobSerializer(serializers.ModelSerializer):
     contact_details = serializers.SerializerMethodField()
     address_details = serializers.SerializerMethodField()
     persisted_snapshot_id = serializers.SerializerMethodField()
+    referral_info = serializers.SerializerMethodField()
 
     # Write-only fields for linking to Contact and Address models
     contact_id = serializers.IntegerField(
@@ -418,12 +419,34 @@ class JobSerializer(serializers.ModelSerializer):
             'occurrence_count', 'occurrence_events', 'series_id', 'series_sequence',
             'invoice_id', 'invoice_status', 'invoice_url', 'slot_reserved_info', 'account_timezone', 'images', 'created_at', 'updated_at',
             'persisted_snapshot_id',
+            'apply_referral_discount', 'referral_discount_amount', 'referral_credit_amount', 'referral_info',
         ]
         read_only_fields = [
             'id', 'contact', 'address', 'revised_total', 'account_timezone',
             'invoice_id', 'invoice_status', 'invoice_url',
             'created_at', 'updated_at',
+            'referral_discount_amount', 'referral_credit_amount', 'referral_info',
         ]
+
+    def get_referral_info(self, obj):
+        """Referral lifecycle context for admin job screens."""
+        attribution = getattr(obj, 'referral_attribution', None)
+        if not attribution:
+            return None
+        referrer = attribution.referrer_contact
+        referrer_name = f"{referrer.first_name or ''} {referrer.last_name or ''}".strip() or (referrer.email or '')
+        return {
+            'referral_id': str(attribution.id),
+            'referral_code': attribution.referral_code,
+            'status': attribution.status,
+            'referrer_name': referrer_name,
+            'referrer_contact_id': attribution.referrer_contact_id,
+            'friend_discount_cents': attribution.friend_discount_cents,
+            'discount_disabled': attribution.discount_disabled,
+            'discount_disabled_by': attribution.discount_disabled_by,
+            'reward_credited_cents': attribution.reward_credited_cents,
+            'reward_credited_at': attribution.reward_credited_at.isoformat() if attribution.reward_credited_at else None,
+        }
 
     def get_contact_details(self, obj):
         """Return contact details if contact is linked"""
@@ -573,8 +596,32 @@ class JobSerializer(serializers.ModelSerializer):
     def update(self, instance, validated_data):
         items_data = validated_data.pop('items', None)
         assignments_data = validated_data.pop('assignments', None)
-        
-        # Handle contact_id and address_id (write-only fields) from initial_data
+
+        # Admin override: enable/disable the referral discount on this job (tracked).
+        apply_referral_flag = validated_data.pop('apply_referral_discount', None)
+        if apply_referral_flag is not None and instance.referral_attribution_id:
+            try:
+                from referral_app.services import set_job_referral_discount
+
+                request = self.context.get('request')
+                changed_by = ''
+                if request and getattr(request, 'user', None) and request.user.is_authenticated:
+                    changed_by = request.user.username or request.user.email or ''
+                set_job_referral_discount(
+                    instance,
+                    enabled=bool(apply_referral_flag),
+                    changed_by=changed_by,
+                )
+                instance.refresh_from_db()
+            except Exception:
+                pass
+
+        # Handle contact_id and address_id (write-only helper fields).
+        # IMPORTANT: pop them from validated_data so the generic setattr loop below
+        # can never write contact_id=None / address_id=None onto the model, which
+        # would silently unlink the Contact/Address FKs on every edit.
+        validated_data.pop('contact_id', None)
+        validated_data.pop('address_id', None)
         contact_id = self.initial_data.get('contact_id')
         address_id = self.initial_data.get('address_id')
         
@@ -1194,7 +1241,9 @@ class JobConvertToSeriesSerializer(serializers.Serializer):
             if field in self.validated_data:
                 setattr(source_job, field, self.validated_data[field])
 
-        if 'contact_id' in self.validated_data:
+        # Only relink when a contact was actually resolved; a null contact_id in
+        # the payload must never unlink the job's existing contact.
+        if contact is not None:
             source_job.contact = contact
             if contact:
                 name_parts = [contact.first_name, contact.last_name]
@@ -1207,9 +1256,9 @@ class JobConvertToSeriesSerializer(serializers.Serializer):
                 if 'ghl_contact_id' not in self.validated_data:
                     source_job.ghl_contact_id = contact.contact_id
 
-        if 'address_id' in self.validated_data:
+        if address is not None:
             source_job.address = address
-            if address and 'customer_address' not in self.validated_data:
+            if 'customer_address' not in self.validated_data:
                 source_job.customer_address = address.get_full_address()
 
     def _resolve_user_id_or_error(self, ref):

@@ -7,10 +7,10 @@ from rest_framework import status
 from rest_framework.authtoken.models import Token
 from rest_framework.test import APITestCase
 
-from accounts.models import GHLAuthCredentials
+from accounts.models import GHLAuthCredentials, Contact
 from service_app.models import User
 from .tasks import _extract_invoice_reference_data
-from .helpers import save_job_invoice_info
+from .helpers import save_job_invoice_info, build_invoice_payload_from_job
 from .models import Job, JobAssignment, JobServiceItem
 
 
@@ -70,6 +70,55 @@ class InvoiceReferenceExtractionTests(SimpleTestCase):
             ref["invoice_url"],
             "https://workorder.theservicepilot.com/invoice/46779fb8-21b7-46db-bb4a-133596c6a1df/",
         )
+
+
+class BuildInvoicePayloadItemizationTests(TestCase):
+    """Referral/manual reductions must not collapse job services into one line."""
+
+    def setUp(self):
+        self.account = GHLAuthCredentials.objects.create(
+            user_id="invoice-item-account",
+            access_token="access-token",
+            refresh_token="refresh-token",
+            expires_in=3600,
+            location_id="loc-invoice-items",
+            company_id="co-invoice-items",
+            is_active=True,
+        )
+        self.contact = Contact.objects.create(
+            account=self.account,
+            contact_id="ghl-invoice-items",
+            first_name="Item",
+            last_name="Test",
+            email="itemtest@example.com",
+            location_id="loc-invoice-items",
+        )
+
+    def test_keeps_each_service_and_sends_fixed_discount(self):
+        job = Job.objects.create(
+            account=self.account,
+            contact=self.contact,
+            title="Multi service job",
+            customer_email="itemtest@example.com",
+            total_price=Decimal("458.00"),
+            referral_credit_amount=Decimal("50.00"),
+            discount_type=Job.DISCOUNT_TYPE_AMOUNT,
+            discount_value=Decimal("10.00"),
+        )
+        JobServiceItem.objects.create(job=job, custom_name="Service A", price=Decimal("300.00"))
+        JobServiceItem.objects.create(job=job, custom_name="Service B", price=Decimal("123.00"))
+        JobServiceItem.objects.create(job=job, custom_name="Service C", price=Decimal("35.00"))
+
+        payload = build_invoice_payload_from_job(job)
+        names = [s["name"] for s in payload["selected_services"]]
+        self.assertEqual(names, ["Service A", "Service B", "Service C"])
+        self.assertEqual(
+            [s["price"] for s in payload["selected_services"]],
+            [300.0, 123.0, 35.0],
+        )
+        # Manual $10 + referral credit $50
+        self.assertEqual(payload["discount"]["type"], "fixed")
+        self.assertEqual(payload["discount"]["value"], 60.0)
 
 
 class JobInvoiceStatusTests(TestCase):

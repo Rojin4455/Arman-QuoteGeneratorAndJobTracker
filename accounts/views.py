@@ -574,6 +574,17 @@ def webhook_handler(request):
             
             if location_id and invoice_id:
                 if event_type == "InvoiceDelete":
+                    # Reverse any referral credit applications/rewards tied to this
+                    # invoice BEFORE deleting the local row.
+                    try:
+                        from referral_app.hooks import on_invoice_void_or_refund
+                        on_invoice_void_or_refund(
+                            location_id=location_id,
+                            invoice_id=invoice_id,
+                            reason="deleted",
+                        )
+                    except Exception as referral_exc:
+                        print(f"⚠️ Referral invoice delete hook failed: {referral_exc}")
                     # Delete invoice for delete event
                     delete_invoice_task.delay(invoice_id)
                     print(f"✅ Triggered invoice deletion for {event_type}: invoice_id={invoice_id}")
@@ -593,6 +604,18 @@ def webhook_handler(request):
                             job_count = update_job_invoice_status_by_invoice_id(invoice_id, new_status)
                             if job_count:
                                 print(f"✅ Updated invoice_status on {job_count} job(s) for {event_type}: invoice_id={invoice_id}")
+                            try:
+                                from referral_app.hooks import on_invoice_paid, on_invoice_void_or_refund
+                                if event_type == "InvoicePaid":
+                                    on_invoice_paid(location_id=location_id, invoice_id=invoice_id)
+                                elif event_type == "InvoiceVoid":
+                                    on_invoice_void_or_refund(
+                                        location_id=location_id,
+                                        invoice_id=invoice_id,
+                                        reason="voided",
+                                    )
+                            except Exception as referral_exc:
+                                print(f"⚠️ Referral invoice hook failed: {referral_exc}")
                         except Exception as e:
                             print(f"⚠️ Could not update invoice status for {event_type}: {e}")
                     # Sync invoice for create, update, paid, partially paid, sent, void
@@ -614,6 +637,15 @@ def webhook_handler(request):
                         location_id = credentials.location_id
                         print(f"⚠️ Using location_id from credentials: {location_id}")
                         if event_type == "InvoiceDelete":
+                            try:
+                                from referral_app.hooks import on_invoice_void_or_refund
+                                on_invoice_void_or_refund(
+                                    location_id=location_id,
+                                    invoice_id=invoice_id,
+                                    reason="deleted",
+                                )
+                            except Exception as referral_exc:
+                                print(f"⚠️ Referral invoice delete hook failed: {referral_exc}")
                             delete_invoice_task.delay(invoice_id)
                             print(f"✅ Triggered invoice deletion")
                         else:
@@ -631,6 +663,18 @@ def webhook_handler(request):
                                     job_count = update_job_invoice_status_by_invoice_id(invoice_id, new_status)
                                     if job_count:
                                         print(f"✅ Updated invoice_status on {job_count} job(s) for {event_type}: invoice_id={invoice_id}")
+                                    try:
+                                        from referral_app.hooks import on_invoice_paid, on_invoice_void_or_refund
+                                        if event_type == "InvoicePaid":
+                                            on_invoice_paid(location_id=location_id, invoice_id=invoice_id)
+                                        elif event_type == "InvoiceVoid":
+                                            on_invoice_void_or_refund(
+                                                location_id=location_id,
+                                                invoice_id=invoice_id,
+                                                reason="voided",
+                                            )
+                                    except Exception as referral_exc:
+                                        print(f"⚠️ Referral invoice hook failed: {referral_exc}")
                                 except Exception as e:
                                     print(f"⚠️ Could not update invoice status for {event_type}: {e}")
                             sync_single_invoice_task.delay(location_id, invoice_id)

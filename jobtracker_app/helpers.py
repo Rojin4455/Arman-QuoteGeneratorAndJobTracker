@@ -207,10 +207,12 @@ def trip_surcharge_amount_for_job(job):
 def build_invoice_payload_from_job(job):
     """
     Construct the payload expected by the invoice flow based on a Job instance.
-    Uses job.revised_total (total after discount) so the invoice reflects the
-    amount the customer actually pays.
+
+    Always itemizes each job service (and trip surcharge when present). Any
+    reductions (manual discount, referral discount, referral wallet credit) are
+    sent as a single GHL fixed discount so line items stay readable and the
+    amount due still matches job.revised_total.
     """
-    revised_total = float(job.revised_total) if hasattr(job, 'revised_total') else float(job.total_price or 0)
     items = job.items.all()
     services = []
 
@@ -232,40 +234,36 @@ def build_invoice_payload_from_job(job):
         })
 
     trip_amt = trip_surcharge_amount_for_job(job)
-    consolidated_invoice_line = False
-
-    if not services:
-        consolidated_invoice_line = True
-        services.append({
-            "name": job.title or "Service",
-            "description": job.description or "",
-            "quantity": 1,
-            "price": revised_total,
-        })
-    else:
-        # When job has a discount, invoice must show revised total. Use a single line.
-        has_discount = (
-            getattr(job, 'discount_type', None)
-            and (float(job.discount_value or 0) > 0)
-        )
-        if has_discount:
-            consolidated_invoice_line = True
-            services = [{
-                "name": job.title or "Service",
-                "description": job.description or "",
-                "quantity": 1,
-                "price": revised_total,
-            }]
-
-    # Itemized lines only: trip/surcharge is stored separately from line items but is part of job.total_price.
-    # A single consolidated line uses revised_total, which already includes surcharge — do not add twice.
-    if not consolidated_invoice_line and trip_amt > Decimal("0.00"):
+    if trip_amt > Decimal("0.00"):
         services.append({
             "name": "Trip Surcharge",
             "description": "Trip / distance surcharge",
             "quantity": 1,
             "price": float(trip_amt),
         })
+
+    # Fallback when the job has no line items at all.
+    if not services:
+        services.append({
+            "name": job.title or "Service",
+            "description": (job.description or "").strip(),
+            "quantity": 1,
+            "price": float(job.total_price or 0),
+        })
+
+    manual_discount = Decimal(getattr(job, "manual_discount_amount", 0) or 0)
+    referral_discount = Decimal(getattr(job, "effective_referral_discount", 0) or 0)
+    referral_credit = Decimal(getattr(job, "referral_credit_amount", 0) or 0)
+    total_reduction = manual_discount + referral_discount + referral_credit
+
+    # Label the discount so the invoice breakdown is clear when GHL shows it.
+    discount_label_parts = []
+    if manual_discount > 0:
+        discount_label_parts.append(f"Discount ${float(manual_discount):.2f}")
+    if referral_discount > 0:
+        discount_label_parts.append(f"Referral Discount ${float(referral_discount):.2f}")
+    if referral_credit > 0:
+        discount_label_parts.append(f"Referral Credit ${float(referral_credit):.2f}")
 
     contact_email = job.customer_email
     contact_name = job.customer_name
@@ -287,6 +285,13 @@ def build_invoice_payload_from_job(job):
         "phone": contact_phone,
         "company_name": company_name,
     }
+
+    if total_reduction > Decimal("0.00"):
+        payload["discount"] = {
+            "value": float(total_reduction),
+            "type": "fixed",
+            "label": " + ".join(discount_label_parts) if discount_label_parts else "Discount",
+        }
 
     location_id = resolve_invoice_location_id_from_job(job)
     if location_id:
@@ -332,7 +337,7 @@ def search_ghl_contact(access_token, email, locationId):
 
 
 
-def create_invoice(name, contact_id, services, credentials, customer_address, address, companyName, phoneNo, contactName):
+def create_invoice(name, contact_id, services, credentials, customer_address, address, companyName, phoneNo, contactName, discount=None):
     """
     Create an invoice in GHL for the given contact.
 
@@ -341,6 +346,7 @@ def create_invoice(name, contact_id, services, credentials, customer_address, ad
         location_id (str): GHL location ID
         services (list): List of services (product objects)
         credentials: GHLAuthCredentials instance
+        discount (dict|None): Optional GHL discount, e.g. {"value": 50, "type": "fixed"}
 
     Returns:
         dict: Response from GHL API
@@ -404,10 +410,17 @@ def create_invoice(name, contact_id, services, credentials, customer_address, ad
 
     print("Final line_items payload:", line_items)  # DEBUG
 
-    discount= {
-        "value":0,
-        "type":'fixed' #percentage, fixed
-    }
+    discount_payload = {"value": 0, "type": "fixed"}
+    if isinstance(discount, dict) and float(discount.get("value") or 0) > 0:
+        discount_type = discount.get("type") or "fixed"
+        if discount_type in ("percentage", "percent"):
+            discount_type = "percentage"
+        else:
+            discount_type = "fixed"
+        discount_payload = {
+            "value": float(discount.get("value") or 0),
+            "type": discount_type,
+        }
 
     contactDetails = {
         "id":contact_id,
@@ -445,7 +458,7 @@ def create_invoice(name, contact_id, services, credentials, customer_address, ad
         "businessDetails":businessDetails,
         "currency": currency_code,
         "items": line_items,
-        "discount":discount,
+        "discount": discount_payload,
         "contactDetails":contactDetails,
         "issueDate":issue_date,
         "sentTo": sentTo,

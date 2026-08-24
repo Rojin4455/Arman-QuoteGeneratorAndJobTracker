@@ -53,3 +53,17 @@ class IsSuperuserPermission(permissions.BasePermission):
             and user.is_authenticated
             and getattr(user, "is_superuser", False)
         )
+
+
+class IsManagementUserPermission(permissions.BasePermission):
+    """Allow manager, supervisor, and superusers (matches frontend fullAccessRoles)."""
+
+    message = "Management access is required."
+
+    def has_permission(self, request, view):
+        user = getattr(request, "user", None)
+        if not user or not user.is_authenticated:
+            return False
+        if getattr(user, "is_superuser", False):
+            return True
+        return bool(getattr(user, "is_admin", False))

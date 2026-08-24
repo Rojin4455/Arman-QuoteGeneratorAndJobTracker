@@ -173,6 +173,7 @@ def _process_invoice_payload(data, job_id=None):
         companyName=companyName,
         phoneNo=phoneNo,
         contactName=contactName,
+        discount=data.get("discount"),
     )
 
     print("Invoice response:", response)
@@ -252,12 +253,29 @@ def handle_completed_job_invoice(job_id):
         if not job:
             return {"error": f"Job {job_id} not found"}
 
+        try:
+            from referral_app.hooks import apply_credit_before_invoice_create
+            apply_credit_before_invoice_create(job)
+            job.refresh_from_db()
+        except Exception as referral_exc:
+            print(f"⚠️ Referral credit apply failed: {referral_exc}")
+
         payload = build_invoice_payload_from_job(job)
         result = _process_invoice_payload(payload, job_id=str(job_id))
         
         # Mark job as processed only if invoice was successfully created
         if result and not result.get("error"):
             _mark_job_completion_processed(job_id)
+            try:
+                invoice_id = None
+                if isinstance(result.get("invoice"), dict):
+                    invoice_id = result["invoice"].get("_id")
+                if invoice_id:
+                    from referral_app.hooks import finalize_credit_application_for_job
+                    job.refresh_from_db()
+                    finalize_credit_application_for_job(job, invoice_id)
+            except Exception as referral_exc:
+                print(f"⚠️ Referral credit finalize failed: {referral_exc}")
         
         return result
     except Exception as e:
@@ -434,10 +452,15 @@ def send_job_completion_webhook(job_id):
         if ghl_contact_id:
             payload["ghl_contact_id"] = ghl_contact_id
 
-        if getattr(job, 'discount_type', None) and (float(job.discount_value or 0) > 0):
+        # Total dollar reduction (manual + referral discount + wallet credit).
+        manual_discount = Decimal(getattr(job, "manual_discount_amount", 0) or 0)
+        referral_discount = Decimal(getattr(job, "effective_referral_discount", 0) or 0)
+        referral_credit = Decimal(getattr(job, "referral_credit_amount", 0) or 0)
+        total_reduction = manual_discount + referral_discount + referral_credit
+        if total_reduction > Decimal("0.00"):
             payload["discount"] = {
-                "value": float(job.discount_value),
-                "type": job.discount_type
+                "value": float(total_reduction),
+                "type": "fixed",
             }
 
         if customer_name:

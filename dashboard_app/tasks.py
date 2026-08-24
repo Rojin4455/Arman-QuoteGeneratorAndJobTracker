@@ -62,6 +62,15 @@ def sync_single_invoice_task(location_id, invoice_id):
     try:
         invoice = invoice_sync.sync_invoices(location_id, invoice_id)
         if invoice:
+            # After sync the local amounts are fresh — retry referral qualification
+            # for fully paid invoices. Idempotent (per-invoice processed event), so
+            # calling here in addition to the webhook hook cannot double-credit.
+            try:
+                if invoice.status == "paid" and (invoice.amount_due or 0) <= 0:
+                    from referral_app.hooks import on_invoice_paid
+                    on_invoice_paid(location_id=location_id, invoice_id=invoice.invoice_id)
+            except Exception as referral_exc:
+                print(f"⚠️ Referral post-sync hook failed for {invoice_id}: {referral_exc}")
             # Return a JSON-serializable dictionary instead of the model instance
             return {
                 "success": True,

@@ -157,6 +157,32 @@ class Job(models.Model):
         help_text='Discount amount in dollars, or percentage (e.g. 10 for 10%%)',
     )
 
+    # Customer referral integration (separate from the generic admin discount above)
+    referral_attribution = models.ForeignKey(
+        'referral_app.ReferralAttribution',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='jobs',
+        help_text='Referral attribution when this job belongs to a referred customer.',
+    )
+    apply_referral_discount = models.BooleanField(
+        default=True,
+        help_text='Admin can disable the referral discount for this job.',
+    )
+    referral_discount_amount = models.DecimalField(
+        max_digits=12,
+        decimal_places=2,
+        default=Decimal('0.00'),
+        help_text='Friend referral discount (dollars) applied to this job.',
+    )
+    referral_credit_amount = models.DecimalField(
+        max_digits=12,
+        decimal_places=2,
+        default=Decimal('0.00'),
+        help_text='Referral wallet credit (dollars) applied to this job at invoice time.',
+    )
+
     # Payment method for completed jobs
     payment_method = models.CharField(max_length=20, choices=PAYMENT_METHOD_CHOICES, blank=True, null=True, help_text="Payment method used for this job (only for completed jobs)")
     
@@ -210,21 +236,39 @@ class Job(models.Model):
     #             pass
 
     @property
+    def manual_discount_amount(self):
+        """Generic admin discount in dollars (amount or percentage of total_price)."""
+        total = self.total_price or Decimal('0.00')
+        value = self.discount_value or Decimal('0.00')
+        if not self.discount_type or not value:
+            return Decimal('0.00')
+        if self.discount_type == self.DISCOUNT_TYPE_AMOUNT:
+            return min(total, value)
+        if self.discount_type == self.DISCOUNT_TYPE_PERCENTAGE:
+            return min(total, total * (value / Decimal('100')))
+        return Decimal('0.00')
+
+    @property
+    def effective_referral_discount(self):
+        """Friend referral discount, honoring the admin override toggle."""
+        if not self.apply_referral_discount:
+            return Decimal('0.00')
+        return self.referral_discount_amount or Decimal('0.00')
+
+    @property
     def revised_total(self):
         """
-        Total after discount. If discount_type is 'amount', subtract that amount.
-        If 'percentage', subtract that percentage of total_price. Otherwise return total_price.
+        Total after all reductions: manual discount, referral discount (friend's
+        first-job discount, if enabled) and referral wallet credit.
         """
         total = self.total_price or Decimal('0.00')
-        if not self.discount_type or not (self.discount_value or Decimal('0.00')):
-            return total
-        value = self.discount_value or Decimal('0.00')
-        if self.discount_type == self.DISCOUNT_TYPE_AMOUNT:
-            return max(Decimal('0.00'), total - value)
-        if self.discount_type == self.DISCOUNT_TYPE_PERCENTAGE:
-            discount_amount = total * (value / Decimal('100'))
-            return max(Decimal('0.00'), total - discount_amount)
-        return total
+        reduced = (
+            total
+            - self.manual_discount_amount
+            - self.effective_referral_discount
+            - (self.referral_credit_amount or Decimal('0.00'))
+        )
+        return max(Decimal('0.00'), reduced)
 
     def __str__(self):
         return self.title or f"Job {self.id}"

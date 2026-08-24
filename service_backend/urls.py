@@ -27,4 +27,5 @@ urlpatterns = [
     path('api/payroll/', include("payroll_app.urls")),
     path('api/dashboard/', include("dashboard_app.urls")),
     path('api/onestepgps/', include("onestepgps_app.urls")),
+    path('api/referrals/', include("referral_app.urls")),
 ]

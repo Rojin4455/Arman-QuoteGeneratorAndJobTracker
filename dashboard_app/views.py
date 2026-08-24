@@ -4,8 +4,8 @@ from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-from django.db.models import Q, Sum, Count, F, Value, DecimalField
-from django.db.models.functions import TruncDate, TruncWeek, TruncMonth, TruncYear, Coalesce
+from django.db.models import Q, Sum, Count, F, Value, DecimalField, Case, When, ExpressionWrapper
+from django.db.models.functions import TruncDate, TruncWeek, TruncMonth, TruncYear, Coalesce, Greatest, Least
 from django.utils import timezone
 from django.utils.dateparse import parse_datetime
 from datetime import datetime, timedelta, time, date
@@ -27,12 +27,161 @@ from .serializers import InvoiceSerializer, InvoiceDetailSerializer, InvoiceItem
 from .services.invoice_sync import sync_invoices
 
 
-def _job_revenue_sum_expression():
-    """Match calendar jobGrandTotalAmount: total_price + total_surcharge."""
+_DEC = DecimalField(max_digits=14, decimal_places=2)
+
+
+def _dec_zero():
+    return Value(0, output_field=_DEC)
+
+
+def _job_gross_revenue_expression():
+    """Booked gross: total_price + total_surcharge (calendar parity before reductions)."""
     return (
-        Coalesce(F('total_price'), Value(0), output_field=DecimalField(max_digits=14, decimal_places=2))
-        + Coalesce(F('total_surcharge'), Value(0), output_field=DecimalField(max_digits=14, decimal_places=2))
+        Coalesce(F('total_price'), _dec_zero())
+        + Coalesce(F('total_surcharge'), _dec_zero())
     )
+
+
+def _job_manual_discount_expression():
+    """Mirror Job.manual_discount_amount in SQL (amount or % of total_price)."""
+    price = Coalesce(F('total_price'), _dec_zero())
+    value = Coalesce(F('discount_value'), _dec_zero())
+    pct = ExpressionWrapper(
+        price * value / Value(100),
+        output_field=_DEC,
+    )
+    return Case(
+        When(discount_type=Job.DISCOUNT_TYPE_AMOUNT, then=Least(price, value)),
+        When(discount_type=Job.DISCOUNT_TYPE_PERCENTAGE, then=Least(price, pct)),
+        default=_dec_zero(),
+        output_field=_DEC,
+    )
+
+
+def _job_referral_discount_expression():
+    """Friend referral discount when admin override still allows it."""
+    return Case(
+        When(
+            apply_referral_discount=True,
+            then=Coalesce(F('referral_discount_amount'), _dec_zero()),
+        ),
+        default=_dec_zero(),
+        output_field=_DEC,
+    )
+
+
+def _job_referral_credit_expression():
+    """Wallet credit applied at invoice time."""
+    return Coalesce(F('referral_credit_amount'), _dec_zero())
+
+
+def _job_revenue_sum_expression():
+    """
+    Net job revenue for funnel / forecast: gross booked minus manual discount,
+    referral (friend) discount, and referral wallet credit applied on the job.
+    Floored at zero so over-discounted jobs cannot drag aggregates negative.
+    """
+    net = ExpressionWrapper(
+        _job_gross_revenue_expression()
+        - _job_manual_discount_expression()
+        - _job_referral_discount_expression()
+        - _job_referral_credit_expression(),
+        output_field=_DEC,
+    )
+    return Greatest(net, _dec_zero())
+
+
+def _float_agg(value):
+    return float(value or 0)
+
+
+def _referral_bonus_summary_for_account(account, start_dt, end_dt, jobs_qs=None):
+    """
+    Referral bonus / wallet figures for the dashboard period.
+    jobs_qs: optional pre-filtered Job queryset (account + assignee + scheduled_at range).
+    """
+    from referral_app.models import CustomerCreditLedger, ReferralAttribution
+    from referral_app.services import available_credit_cents
+
+    if jobs_qs is None:
+        jobs_qs = Job.objects.filter(
+            account=account,
+            scheduled_at__isnull=False,
+            scheduled_at__gte=start_dt,
+            scheduled_at__lte=end_dt,
+        )
+
+    closed_qs = jobs_qs.filter(status='completed')
+    closed_gross = closed_qs.aggregate(s=Sum(_job_gross_revenue_expression()))['s']
+    closed_net = closed_qs.aggregate(s=Sum(_job_revenue_sum_expression()))['s']
+    credit_applied = closed_qs.aggregate(s=Sum(_job_referral_credit_expression()))['s']
+    friend_discount = closed_qs.aggregate(s=Sum(_job_referral_discount_expression()))['s']
+    manual_discount = closed_qs.aggregate(s=Sum(_job_manual_discount_expression()))['s']
+
+    # Pending friend discounts still attached to open/pipeline jobs in range
+    pending_friend_on_jobs = (
+        jobs_qs.exclude(status__in=['completed', 'cancelled'])
+        .filter(apply_referral_discount=True, referral_discount_amount__gt=0)
+        .aggregate(s=Sum('referral_discount_amount'))['s']
+    )
+
+    attributions = ReferralAttribution.objects.filter(account=account)
+    pending_attrs = attributions.filter(status=ReferralAttribution.STATUS_PENDING)
+    pending_count = pending_attrs.count()
+    pending_friend_snapshot = (
+        pending_attrs.aggregate(s=Sum('friend_discount_cents')).get('s') or 0
+    )
+
+    ledger_in_period = CustomerCreditLedger.objects.filter(
+        account=account,
+        created_at__gte=start_dt,
+        created_at__lte=end_dt,
+    )
+    credits_issued = (
+        ledger_in_period.filter(
+            entry_type=CustomerCreditLedger.TYPE_REFERRER_REWARD,
+            amount_cents__gt=0,
+        ).aggregate(s=Sum('amount_cents')).get('s')
+        or 0
+    )
+    # Applications are negative cents on the ledger
+    credits_applied_ledger = (
+        ledger_in_period.filter(
+            entry_type=CustomerCreditLedger.TYPE_APPLICATION,
+        ).aggregate(s=Sum('amount_cents')).get('s')
+        or 0
+    )
+
+    # Outstanding wallet balances across customers (current snapshot)
+    pending_wallet_cents = 0
+    contact_ids = (
+        CustomerCreditLedger.objects.filter(account=account)
+        .values_list('contact_id', flat=True)
+        .distinct()
+    )
+    for cid in contact_ids:
+        try:
+            contact = Contact.objects.get(pk=cid)
+        except Contact.DoesNotExist:
+            continue
+        bal = available_credit_cents(account, contact)
+        if bal > 0:
+            pending_wallet_cents += bal
+
+    return {
+        'gross_closed_revenue': _float_agg(closed_gross),
+        'net_closed_revenue': _float_agg(closed_net),
+        'wallet_credit_applied': _float_agg(credit_applied),
+        'friend_discount_applied': _float_agg(friend_discount),
+        'manual_discount_applied': _float_agg(manual_discount),
+        'friend_discount_pending_on_jobs': _float_agg(pending_friend_on_jobs),
+        'pending_referrals_count': pending_count,
+        'pending_friend_discount_cents': int(pending_friend_snapshot),
+        'pending_wallet_balance_cents': int(pending_wallet_cents),
+        'credits_issued_cents': int(credits_issued),
+        'credits_applied_cents': int(abs(credits_applied_ledger)),
+        'label': 'Referral bonus & wallet (period)',
+    }
 
 
 class InvoiceFilter(filters.FilterSet):
@@ -706,6 +855,39 @@ class InvoiceViewSet(AccountScopedQuerysetMixin, viewsets.ModelViewSet):
         closed_jobs_qs = jobs_by_scheduled_status(['completed'])
         closed_job_count = closed_jobs_qs.count()
         closed_job_total_value = closed_jobs_qs.aggregate(s=Sum(revenue_sum))['s'] or 0
+        closed_job_gross_value = closed_jobs_qs.aggregate(s=Sum(_job_gross_revenue_expression()))['s'] or 0
+        closed_referral_credit = closed_jobs_qs.aggregate(s=Sum(_job_referral_credit_expression()))['s'] or 0
+        closed_referral_discount = closed_jobs_qs.aggregate(s=Sum(_job_referral_discount_expression()))['s'] or 0
+
+        # Jobs scheduled in range (same assignee scope) for referral period summary
+        jobs_scheduled_in_range = apply_job_assignee(
+            Job.objects.filter(
+                account=account,
+                scheduled_at__isnull=False,
+                scheduled_at__gte=start_dt,
+                scheduled_at__lte=end_dt,
+            )
+        )
+        try:
+            referral_bonus = _referral_bonus_summary_for_account(
+                account, start_dt, end_dt, jobs_qs=jobs_scheduled_in_range
+            )
+        except Exception as exc:
+            print(f"⚠️ referral_bonus summary failed: {exc}")
+            referral_bonus = {
+                'gross_closed_revenue': float(closed_job_gross_value),
+                'net_closed_revenue': float(closed_job_total_value),
+                'wallet_credit_applied': float(closed_referral_credit),
+                'friend_discount_applied': float(closed_referral_discount),
+                'manual_discount_applied': 0.0,
+                'friend_discount_pending_on_jobs': 0.0,
+                'pending_referrals_count': 0,
+                'pending_friend_discount_cents': 0,
+                'pending_wallet_balance_cents': 0,
+                'credits_issued_cents': 0,
+                'credits_applied_cents': 0,
+                'label': 'Referral bonus & wallet (period)',
+            }
 
         pipeline_value = float(scheduled_job_total_value)
         total_estimates = (
@@ -776,15 +958,22 @@ class InvoiceViewSet(AccountScopedQuerysetMixin, viewsets.ModelViewSet):
                 'closed_jobs': {
                     'count': closed_job_count,
                     'total_value': float(closed_job_total_value),
-                    'label': 'Closed/Completed Jobs'
+                    'gross_value': float(closed_job_gross_value),
+                    'referral_credit_applied': float(closed_referral_credit),
+                    'referral_discount_applied': float(closed_referral_discount),
+                    'label': 'Closed/Completed Jobs',
+                    'value_note': 'Net after referral credit, referral discount, and manual discount',
                 }
             },
+            'referral_bonus': referral_bonus,
             'summary_metrics': {
                 'pipeline_value': pipeline_value,
                 'total_pipeline_items': open_estimate_count + scheduled_job_count,
                 'acceptance_rate_percent': round(acceptance_rate, 2),
                 'rejection_rate_percent': round(rejection_rate, 2),
-                'total_revenue_closed_jobs': float(closed_job_total_value)
+                'total_revenue_closed_jobs': float(closed_job_total_value),
+                'gross_revenue_closed_jobs': float(closed_job_gross_value),
+                'referral_credit_applied_closed': float(closed_referral_credit),
             }
         })
     
