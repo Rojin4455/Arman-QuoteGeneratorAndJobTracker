@@ -867,7 +867,16 @@ def handle_job_completed_invitation(job) -> dict:
         return {"skipped": "duplicate"}
 
     link = ensure_referral_link(account, contact)
-    _append_ghl_tags(contact, account, ["referral invite"])
+    share_url = build_share_url(link.code)
+    from referral_app.ghl_sync import push_referral_link_and_invite_tag
+
+    pushed = push_referral_link_and_invite_tag(contact, account, share_url)
+    if not pushed:
+        logger.warning(
+            "Referral invite: GHL custom field/tag not updated for contact %s job %s",
+            contact.pk,
+            job.id,
+        )
     ReferralProcessedEvent.objects.get_or_create(
         account=account,
         event_id=event_id,
@@ -1128,9 +1137,16 @@ def ensure_link_for_contact_id(account: GHLAuthCredentials, contact_id: int) -> 
     if not contact:
         raise ValueError("Contact not found.")
     link = ensure_referral_link(account, contact)
+    share_url = build_share_url(link.code)
+    try:
+        from referral_app.ghl_sync import push_referral_link_and_invite_tag
+
+        push_referral_link_and_invite_tag(contact, account, share_url)
+    except Exception as exc:
+        logger.warning("GHL referral link push failed for contact %s: %s", contact.pk, exc)
     return {
         "referral_code": link.code,
-        "share_url": build_share_url(link.code),
+        "share_url": share_url,
         "hub_url": build_customer_hub_url(link.code, account.location_id),
         "available_credit_cents": available_credit_cents(account, contact),
     }

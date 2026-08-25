@@ -775,3 +775,82 @@ class ReferralApiTests(TestCase):
         self.assertEqual(resp.status_code, 200)
         self.assertIsNotNone(resp.data["pending_referral"])
         self.assertEqual(resp.data["pending_referral"]["friend_discount_cents"], 2500)
+
+
+class ReferralGhlCustomFieldTests(TestCase):
+    def setUp(self):
+        self.account = make_account(location_id="loc-ghl-ref")
+        self.account.access_token = "ghl-token"
+        self.account.save(update_fields=["access_token"])
+        self.contact = Contact.objects.create(
+            account=self.account,
+            contact_id="ghl_invite_c",
+            first_name="Pat",
+            email="pat@example.com",
+            location_id="loc-ghl-ref",
+            tags=[],
+        )
+
+    @patch("referral_app.ghl_sync.requests.put")
+    @patch("referral_app.ghl_sync.requests.get")
+    @patch("referral_app.ghl_sync.requests.post")
+    @patch("accounts.utils.fetch_location_custom_fields")
+    def test_writes_referral_link_field_before_invite_tag(
+        self, fetch_utils, post_mock, get_mock, put_mock
+    ):
+        from accounts.models import GHLCustomField
+        from referral_app.ghl_sync import push_referral_link_and_invite_tag
+
+        fetch_utils.return_value = {}
+        post_mock.return_value.status_code = 201
+        post_mock.return_value.json.return_value = {"customField": {"id": "cf_ref_link", "name": "Referral Link"}}
+        post_mock.return_value.raise_for_status = lambda: None
+        get_mock.return_value.status_code = 200
+        get_mock.return_value.json.return_value = {"contact": {"tags": []}}
+        put_ok = type("R", (), {"status_code": 200, "text": "{}"})()
+        put_mock.return_value = put_ok
+
+        ok = push_referral_link_and_invite_tag(
+            self.contact, self.account, "https://app.example.com/r/PAT123"
+        )
+        self.assertTrue(ok)
+        self.assertTrue(
+            GHLCustomField.objects.filter(
+                account=self.account, field_name="Referral Link", ghl_field_id="cf_ref_link"
+            ).exists()
+        )
+        self.assertGreaterEqual(put_mock.call_count, 2)
+        first_payload = put_mock.call_args_list[0].kwargs["json"]
+        second_payload = put_mock.call_args_list[1].kwargs["json"]
+        self.assertEqual(
+            first_payload["customFields"][0]["field_value"],
+            "https://app.example.com/r/PAT123",
+        )
+        self.assertIn("referral invite", second_payload["tags"])
+
+    @patch("referral_app.ghl_sync.requests.put")
+    @patch("referral_app.ghl_sync.requests.get")
+    @patch("accounts.utils.fetch_location_custom_fields")
+    def test_does_not_tag_if_custom_field_update_fails(self, fetch_utils, get_mock, put_mock):
+        from accounts.models import GHLCustomField
+        from referral_app.ghl_sync import push_referral_link_and_invite_tag
+
+        GHLCustomField.objects.create(
+            account=self.account,
+            field_name="Referral Link",
+            ghl_field_id="cf_existing",
+            field_type="url",
+            is_active=True,
+        )
+        get_mock.return_value.status_code = 200
+        get_mock.return_value.json.return_value = {"contact": {"tags": []}}
+        put_mock.return_value.status_code = 500
+        put_mock.return_value.text = "boom"
+
+        ok = push_referral_link_and_invite_tag(
+            self.contact, self.account, "https://app.example.com/r/PAT123"
+        )
+        self.assertFalse(ok)
+        self.assertEqual(put_mock.call_count, 1)
+        self.assertIn("customFields", put_mock.call_args.kwargs["json"])
+
