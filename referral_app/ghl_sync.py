@@ -132,28 +132,53 @@ def ensure_referral_link_custom_field_for_all_accounts() -> dict:
     return summary
 
 
+def _add_referral_invite_tag(
+    contact: Contact,
+    *,
+    tags: list,
+    headers: dict,
+    get_url: str,
+    ghl_id: str,
+) -> bool:
+    """Add 'referral invite' on the GHL contact. Does not require a referral link."""
+    lower = {str(t).lower() for t in tags if isinstance(t, str)}
+    if REFERRAL_INVITE_TAG.lower() in lower:
+        return True
+    merged = list(tags) + [REFERRAL_INVITE_TAG]
+    try:
+        tag_resp = requests.put(get_url, headers=headers, json={"tags": merged}, timeout=20)
+        if tag_resp.status_code in (200, 201):
+            contact.tags = merged
+            contact.save(update_fields=["tags"])
+            return True
+        logger.warning(
+            "GHL referral invite tag failed for %s: %s",
+            ghl_id,
+            tag_resp.status_code,
+        )
+        return False
+    except Exception as exc:
+        logger.warning("GHL referral invite tag failed for %s: %s", ghl_id, exc)
+        return False
+
+
 def push_referral_link_and_invite_tag(
     contact: Contact,
     account: GHLAuthCredentials,
-    share_url: str,
+    share_url: str = "",
 ) -> bool:
     """
-    Write the contact's referral URL into GHL 'Referral Link', then add tag
-    'referral invite'. Tag is only added after the custom field update succeeds.
+    Add tag 'referral invite' on job-complete invite.
+
+    Existing customers get the tag even if they never generated a referral
+    link. Writing the share URL into GHL 'Referral Link' is best-effort and
+    must not block the tag.
     """
     ghl_id = (contact.contact_id or "").strip()
     if not ghl_id or ghl_id.startswith("public_"):
         return False
     token = (account.access_token or "").strip()
     if not token:
-        return False
-
-    field = ensure_referral_link_custom_field(account)
-    if not field or not field.ghl_field_id:
-        logger.warning(
-            "Skipping referral invite tag for contact %s: Referral Link field not available",
-            contact.pk,
-        )
         return False
 
     headers = _headers(token)
@@ -167,40 +192,35 @@ def push_referral_link_and_invite_tag(
     except Exception as exc:
         logger.warning("GHL contact GET failed for %s: %s", ghl_id, exc)
 
-    payload = {
-        "customFields": [
-            {"id": str(field.ghl_field_id), "field_value": share_url},
-        ]
-    }
-    try:
-        put_resp = requests.put(get_url, headers=headers, json=payload, timeout=20)
-        if put_resp.status_code not in (200, 201):
+    if share_url:
+        field = ensure_referral_link_custom_field(account)
+        if field and field.ghl_field_id:
+            payload = {
+                "customFields": [
+                    {"id": str(field.ghl_field_id), "field_value": share_url},
+                ]
+            }
+            try:
+                put_resp = requests.put(get_url, headers=headers, json=payload, timeout=20)
+                if put_resp.status_code not in (200, 201):
+                    logger.warning(
+                        "GHL Referral Link field update failed for %s: %s %s",
+                        ghl_id,
+                        put_resp.status_code,
+                        put_resp.text[:300],
+                    )
+            except Exception as exc:
+                logger.warning("GHL Referral Link field update failed for %s: %s", ghl_id, exc)
+        else:
             logger.warning(
-                "GHL Referral Link field update failed for %s: %s %s",
-                ghl_id,
-                put_resp.status_code,
-                put_resp.text[:300],
+                "Referral Link field not available for contact %s; still adding invite tag",
+                contact.pk,
             )
-            return False
-    except Exception as exc:
-        logger.warning("GHL Referral Link field update failed for %s: %s", ghl_id, exc)
-        return False
 
-    lower = {str(t).lower() for t in tags if isinstance(t, str)}
-    if REFERRAL_INVITE_TAG.lower() not in lower:
-        tags = list(tags) + [REFERRAL_INVITE_TAG]
-        try:
-            tag_resp = requests.put(get_url, headers=headers, json={"tags": tags}, timeout=20)
-            if tag_resp.status_code in (200, 201):
-                contact.tags = tags
-                contact.save(update_fields=["tags"])
-            else:
-                logger.warning(
-                    "GHL referral invite tag failed after field update for %s: %s",
-                    ghl_id,
-                    tag_resp.status_code,
-                )
-        except Exception as exc:
-            logger.warning("GHL referral invite tag failed for %s: %s", ghl_id, exc)
-
-    return True
+    return _add_referral_invite_tag(
+        contact,
+        tags=tags,
+        headers=headers,
+        get_url=get_url,
+        ghl_id=ghl_id,
+    )

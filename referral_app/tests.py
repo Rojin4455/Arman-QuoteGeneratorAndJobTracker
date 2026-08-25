@@ -831,7 +831,7 @@ class ReferralGhlCustomFieldTests(TestCase):
     @patch("referral_app.ghl_sync.requests.put")
     @patch("referral_app.ghl_sync.requests.get")
     @patch("accounts.utils.fetch_location_custom_fields")
-    def test_does_not_tag_if_custom_field_update_fails(self, fetch_utils, get_mock, put_mock):
+    def test_still_tags_if_custom_field_update_fails(self, fetch_utils, get_mock, put_mock):
         from accounts.models import GHLCustomField
         from referral_app.ghl_sync import push_referral_link_and_invite_tag
 
@@ -844,13 +844,88 @@ class ReferralGhlCustomFieldTests(TestCase):
         )
         get_mock.return_value.status_code = 200
         get_mock.return_value.json.return_value = {"contact": {"tags": []}}
-        put_mock.return_value.status_code = 500
-        put_mock.return_value.text = "boom"
+
+        def put_side_effect(*args, **kwargs):
+            payload = kwargs.get("json") or {}
+            resp = type("R", (), {})()
+            resp.text = "{}"
+            if "customFields" in payload:
+                resp.status_code = 500
+            else:
+                resp.status_code = 200
+            return resp
+
+        put_mock.side_effect = put_side_effect
 
         ok = push_referral_link_and_invite_tag(
             self.contact, self.account, "https://app.example.com/r/PAT123"
         )
-        self.assertFalse(ok)
-        self.assertEqual(put_mock.call_count, 1)
-        self.assertIn("customFields", put_mock.call_args.kwargs["json"])
+        self.assertTrue(ok)
+        self.assertEqual(put_mock.call_count, 2)
+        self.assertIn("customFields", put_mock.call_args_list[0].kwargs["json"])
+        self.assertIn("referral invite", put_mock.call_args_list[1].kwargs["json"]["tags"])
+
+
+class ReferralJobCompletedInviteTests(TestCase):
+    def setUp(self):
+        self.account = make_account(location_id="loc-invite")
+        self.account.access_token = "ghl-token"
+        self.account.save(update_fields=["access_token"])
+        self.contact = Contact.objects.create(
+            account=self.account,
+            contact_id="ghl_old_customer",
+            first_name="Old",
+            email="old-customer@example.com",
+            location_id="loc-invite",
+            tags=[],
+        )
+        ReferralLink.objects.filter(account=self.account, contact=self.contact).delete()
+        program = services.get_or_create_program(self.account)
+        program.enabled = True
+        program.auto_invite_enabled = True
+        program.invitation_trigger = ReferralProgram.INVITE_COMPLETED_JOB
+        program.save()
+
+    @patch("referral_app.ghl_sync.requests.put")
+    @patch("referral_app.ghl_sync.requests.get")
+    @patch("accounts.utils.fetch_location_custom_fields")
+    def test_job_completed_tags_customer_without_existing_link(
+        self, fetch_utils, get_mock, put_mock
+    ):
+        from accounts.models import GHLCustomField
+        from jobtracker_app.models import Job
+
+        GHLCustomField.objects.create(
+            account=self.account,
+            field_name="Referral Link",
+            ghl_field_id="cf_invite",
+            field_type="url",
+            is_active=True,
+        )
+        get_mock.return_value.status_code = 200
+        get_mock.return_value.json.return_value = {"contact": {"tags": []}}
+        put_mock.return_value.status_code = 200
+        put_mock.return_value.text = "{}"
+
+        self.assertFalse(
+            ReferralLink.objects.filter(account=self.account, contact=self.contact).exists()
+        )
+        job = Job.objects.create(
+            account=self.account,
+            contact=self.contact,
+            title="Existing customer job",
+            total_price=Decimal("100.00"),
+            status="completed",
+        )
+        result = services.handle_job_completed_invitation(job)
+        self.assertTrue(result.get("tagged"))
+        self.assertIsNotNone(result.get("referral_code"))
+        self.assertTrue(
+            ReferralLink.objects.filter(account=self.account, contact=self.contact).exists()
+        )
+        tag_calls = [
+            c for c in put_mock.call_args_list if "tags" in (c.kwargs.get("json") or {})
+        ]
+        self.assertTrue(tag_calls)
+        self.assertIn("referral invite", tag_calls[0].kwargs["json"]["tags"])
 

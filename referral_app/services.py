@@ -837,7 +837,13 @@ def reverse_invoice_credit_application(
 
 
 def handle_job_completed_invitation(job) -> dict:
-    """Ensure referral link exists; invitation messaging is GHL-tag driven for now."""
+    """
+    On job complete: add GHL tag 'referral invite' for that customer.
+
+    Existing customers are included even if they never generated a referral
+    link. We create a link if missing (for the GHL Referral Link field), but
+    the tag is not gated on that.
+    """
     account = getattr(job, "account", None)
     if not account:
         return {"skipped": "no_account"}
@@ -866,14 +872,24 @@ def handle_job_completed_invitation(job) -> dict:
     if ReferralProcessedEvent.objects.filter(account=account, event_id=event_id).exists():
         return {"skipped": "duplicate"}
 
-    link = ensure_referral_link(account, contact)
-    share_url = build_share_url(link.code)
+    share_url = ""
+    link = None
+    try:
+        link = ensure_referral_link(account, contact)
+        share_url = build_share_url(link.code)
+    except Exception:
+        logger.exception(
+            "Referral invite: could not create link for contact %s job %s; tagging anyway",
+            contact.pk,
+            job.id,
+        )
+
     from referral_app.ghl_sync import push_referral_link_and_invite_tag
 
     pushed = push_referral_link_and_invite_tag(contact, account, share_url)
     if not pushed:
         logger.warning(
-            "Referral invite: GHL custom field/tag not updated for contact %s job %s",
+            "Referral invite: GHL tag not added for contact %s job %s",
             contact.pk,
             job.id,
         )
@@ -882,9 +898,12 @@ def handle_job_completed_invitation(job) -> dict:
         event_id=event_id,
         defaults={"event_type": "job.completed"},
     )
+    if not link:
+        return {"tagged": pushed, "referral_code": None}
     return {
+        "tagged": pushed,
         "referral_code": link.code,
-        "share_url": build_share_url(link.code),
+        "share_url": share_url,
         "hub_url": build_customer_hub_url(link.code, account.location_id),
     }
 
