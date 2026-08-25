@@ -5,15 +5,16 @@ from referral_app.ghl_sync import ensure_referral_link_custom_field_for_all_acco
 
 class Command(BaseCommand):
     help = (
-        "Create the GHL contact custom field 'Referral Link' on every active "
-        "onboarded subaccount (skips locations that already have it)."
+        "Create GHL contact custom fields Referral Link, Referral Reward, "
+        "Friend Discount, and Referral Minimum on every active onboarded "
+        "subaccount (skips fields that already exist)."
     )
 
     def handle(self, *args, **options):
         summary = ensure_referral_link_custom_field_for_all_accounts()
         self.stdout.write(
             self.style.SUCCESS(
-                f"Referral Link field: ok={len(summary['ok'])} "
+                f"Referral GHL fields: ok={len(summary['ok'])} "
                 f"failed={len(summary['failed'])} skipped={len(summary['skipped'])}"
             )
         )

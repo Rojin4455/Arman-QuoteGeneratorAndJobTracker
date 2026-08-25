@@ -1148,6 +1148,15 @@ def update_program(account: GHLAuthCredentials, data: dict) -> ReferralProgram:
     if program.invitation_trigger not in dict(ReferralProgram.INVITATION_TRIGGER_CHOICES):
         raise ValueError("Invalid invitation trigger.")
     program.save()
+    try:
+        from referral_app.ghl_sync import ensure_referral_invite_custom_fields
+
+        ensure_referral_invite_custom_fields(account)
+    except Exception:
+        logger.exception(
+            "Referral program save: GHL amount custom fields ensure failed account=%s",
+            account.pk,
+        )
     return program
 
 

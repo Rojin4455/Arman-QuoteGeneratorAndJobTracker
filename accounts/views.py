@@ -230,13 +230,13 @@ def _bootstrap_location(location_id, access_token):
 
     try:
         from accounts.models import GHLAuthCredentials
-        from referral_app.ghl_sync import ensure_referral_link_custom_field
+        from referral_app.ghl_sync import ensure_referral_invite_custom_fields
 
         account = GHLAuthCredentials.objects.filter(location_id=location_id).first()
         if account:
-            ensure_referral_link_custom_field(account)
+            ensure_referral_invite_custom_fields(account)
     except Exception:
-        logger.exception("GHL OAuth tokens(): Referral Link custom field ensure failed location_id=%s", location_id)
+        logger.exception("GHL OAuth tokens(): referral custom fields ensure failed location_id=%s", location_id)
 
     try:
         sync_all_users_to_db(location_id, access_token)
@@ -446,11 +446,11 @@ def tokens(request):
                     credentials, _ = _upsert_ghl_credentials(location_token_data)
                     _sync_location_snapshot(credentials)
                     try:
-                        from referral_app.ghl_sync import ensure_referral_link_custom_field
-                        ensure_referral_link_custom_field(credentials)
+                        from referral_app.ghl_sync import ensure_referral_invite_custom_fields
+                        ensure_referral_invite_custom_fields(credentials)
                     except Exception:
                         logger.exception(
-                            "GHL OAuth tokens(): Referral Link field ensure failed location_id=%s",
+                            "GHL OAuth tokens(): referral custom fields ensure failed location_id=%s",
                             location_id,
                         )
                     connected_location_ids.append(location_id)

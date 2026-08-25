@@ -740,7 +740,8 @@ class ReferralApiTests(TestCase):
         self.assertEqual(len(payload["customers"]), 21)
         self.assertEqual(payload["stats"]["credits_available_cents"], 20000)
 
-    def test_owner_program_patch(self):
+    @patch("referral_app.ghl_sync.ensure_referral_invite_custom_fields")
+    def test_owner_program_patch(self, _ensure_fields):
         self.client.force_authenticate(user=self.user)
         resp = self.client.patch(
             "/api/referrals/owner/program/?location_id=loc-api",
@@ -749,6 +750,7 @@ class ReferralApiTests(TestCase):
         )
         self.assertEqual(resp.status_code, 200)
         self.assertEqual(resp.data["referrer_reward_cents"], 3000)
+        _ensure_fields.assert_called_once()
 
     def test_contact_credit_endpoint_includes_pending_referral(self):
         friend = Contact.objects.create(
@@ -779,6 +781,8 @@ class ReferralApiTests(TestCase):
 
 class ReferralGhlCustomFieldTests(TestCase):
     def setUp(self):
+        from accounts.models import GHLCustomField
+
         self.account = make_account(location_id="loc-ghl-ref")
         self.account.access_token = "ghl-token"
         self.account.save(update_fields=["access_token"])
@@ -790,21 +794,30 @@ class ReferralGhlCustomFieldTests(TestCase):
             location_id="loc-ghl-ref",
             tags=[],
         )
+        program = services.get_or_create_program(self.account)
+        program.referrer_reward_cents = 5000
+        program.friend_reward_cents = 5000
+        program.minimum_invoice_cents = 15000
+        program.save()
+        for name, field_id, field_type in (
+            ("Referral Link", "cf_ref_link", "url"),
+            ("Referral Reward", "cf_reward", "text"),
+            ("Friend Discount", "cf_friend", "text"),
+            ("Referral Minimum", "cf_min", "text"),
+        ):
+            GHLCustomField.objects.create(
+                account=self.account,
+                field_name=name,
+                ghl_field_id=field_id,
+                field_type=field_type,
+                is_active=True,
+            )
 
     @patch("referral_app.ghl_sync.requests.put")
     @patch("referral_app.ghl_sync.requests.get")
-    @patch("referral_app.ghl_sync.requests.post")
-    @patch("accounts.utils.fetch_location_custom_fields")
-    def test_writes_referral_link_field_before_invite_tag(
-        self, fetch_utils, post_mock, get_mock, put_mock
-    ):
-        from accounts.models import GHLCustomField
+    def test_writes_referral_link_and_program_amounts_before_invite_tag(self, get_mock, put_mock):
         from referral_app.ghl_sync import push_referral_link_and_invite_tag
 
-        fetch_utils.return_value = {}
-        post_mock.return_value.status_code = 201
-        post_mock.return_value.json.return_value = {"customField": {"id": "cf_ref_link", "name": "Referral Link"}}
-        post_mock.return_value.raise_for_status = lambda: None
         get_mock.return_value.status_code = 200
         get_mock.return_value.json.return_value = {"contact": {"tags": []}}
         put_ok = type("R", (), {"status_code": 200, "text": "{}"})()
@@ -814,34 +827,21 @@ class ReferralGhlCustomFieldTests(TestCase):
             self.contact, self.account, "https://app.example.com/r/PAT123"
         )
         self.assertTrue(ok)
-        self.assertTrue(
-            GHLCustomField.objects.filter(
-                account=self.account, field_name="Referral Link", ghl_field_id="cf_ref_link"
-            ).exists()
-        )
         self.assertGreaterEqual(put_mock.call_count, 2)
         first_payload = put_mock.call_args_list[0].kwargs["json"]
         second_payload = put_mock.call_args_list[1].kwargs["json"]
-        self.assertEqual(
-            first_payload["customFields"][0]["field_value"],
-            "https://app.example.com/r/PAT123",
-        )
+        by_id = {row["id"]: row["field_value"] for row in first_payload["customFields"]}
+        self.assertEqual(by_id["cf_ref_link"], "https://app.example.com/r/PAT123")
+        self.assertEqual(by_id["cf_reward"], "$50")
+        self.assertEqual(by_id["cf_friend"], "$50")
+        self.assertEqual(by_id["cf_min"], "$150")
         self.assertIn("referral invite", second_payload["tags"])
 
     @patch("referral_app.ghl_sync.requests.put")
     @patch("referral_app.ghl_sync.requests.get")
-    @patch("accounts.utils.fetch_location_custom_fields")
-    def test_still_tags_if_custom_field_update_fails(self, fetch_utils, get_mock, put_mock):
-        from accounts.models import GHLCustomField
+    def test_still_tags_if_custom_field_update_fails(self, get_mock, put_mock):
         from referral_app.ghl_sync import push_referral_link_and_invite_tag
 
-        GHLCustomField.objects.create(
-            account=self.account,
-            field_name="Referral Link",
-            ghl_field_id="cf_existing",
-            field_type="url",
-            is_active=True,
-        )
         get_mock.return_value.status_code = 200
         get_mock.return_value.json.return_value = {"contact": {"tags": []}}
 
@@ -900,6 +900,27 @@ class ReferralJobCompletedInviteTests(TestCase):
             field_name="Referral Link",
             ghl_field_id="cf_invite",
             field_type="url",
+            is_active=True,
+        )
+        GHLCustomField.objects.create(
+            account=self.account,
+            field_name="Referral Reward",
+            ghl_field_id="cf_reward",
+            field_type="text",
+            is_active=True,
+        )
+        GHLCustomField.objects.create(
+            account=self.account,
+            field_name="Friend Discount",
+            ghl_field_id="cf_friend",
+            field_type="text",
+            is_active=True,
+        )
+        GHLCustomField.objects.create(
+            account=self.account,
+            field_name="Referral Minimum",
+            ghl_field_id="cf_min",
+            field_type="text",
             is_active=True,
         )
         get_mock.return_value.status_code = 200
