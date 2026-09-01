@@ -9,10 +9,28 @@ from rest_framework.decorators import action
 from rest_framework.exceptions import ValidationError
 from rest_framework.response import Response
 
+from rest_framework.permissions import IsAuthenticated
+from rest_framework.views import APIView
+
 from accounts.models import Location
 from accounts.oauth import build_ghl_marketplace_auth_url
 from accounts.permissions import AccountScopedPermission, IsSuperuserPermission
 from accounts.serializers import GHLLocationManagementSerializer
+from service_app.auth_account import serialize_subaccount_office
+
+
+class SubaccountOfficeView(APIView):
+    """Return the current subaccount business address from synced GHL location data."""
+
+    permission_classes = [AccountScopedPermission, IsAuthenticated]
+
+    def get(self, request):
+        office = serialize_subaccount_office(request.account) or {}
+        full_address = (office.get('full_address') or '').strip()
+        return Response({
+            'configured': bool(full_address),
+            **office,
+        })
 
 
 class GHLLocationManagementViewSet(viewsets.ModelViewSet):

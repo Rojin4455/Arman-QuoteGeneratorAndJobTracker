@@ -20,6 +20,7 @@ router.register(
 )
 
 urlpatterns = [
+    path("subaccount-office/", api_views.SubaccountOfficeView.as_view(), name="subaccount-office"),
     path("auth/connect/", auth_connect, name="oauth_connect"),
     path("auth/tokens/", tokens, name="oauth_tokens"),
     path("auth/callback/", callback, name="oauth_callback"),
