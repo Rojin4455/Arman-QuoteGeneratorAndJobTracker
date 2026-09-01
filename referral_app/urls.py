@@ -5,6 +5,7 @@ from referral_app import views
 urlpatterns = [
     path("owner/dashboard/", views.OwnerReferralDashboardView.as_view(), name="referral-owner-dashboard"),
     path("owner/program/", views.OwnerReferralProgramView.as_view(), name="referral-owner-program"),
+    path("owner/gift-card/", views.OwnerGiftCardView.as_view(), name="referral-owner-gift-card"),
     path("owner/ensure-link/", views.OwnerEnsureReferralLinkView.as_view(), name="referral-owner-ensure-link"),
     path(
         "owner/contact/<int:contact_id>/credit/",

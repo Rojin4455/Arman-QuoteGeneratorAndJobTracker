@@ -956,6 +956,16 @@ def Decimal0():
     return Decimal("0.00")
 
 
+def serialize_gift_card(account: GHLAuthCredentials) -> dict:
+    program = get_or_create_program(account)
+    url = (program.gift_card_purchase_url or "").strip()
+    return {
+        "configured": bool(url),
+        "purchase_url": url,
+        "location_id": account.location_id or "",
+    }
+
+
 def serialize_program(account: GHLAuthCredentials, program: ReferralProgram | None = None) -> dict:
     program = program or get_or_create_program(account)
     return {
@@ -1134,6 +1144,7 @@ def update_program(account: GHLAuthCredentials, data: dict) -> ReferralProgram:
         "accent_color",
         "service_label",
         "terms_text",
+        "gift_card_purchase_url",
     }
     for key, value in data.items():
         if key not in allowed:

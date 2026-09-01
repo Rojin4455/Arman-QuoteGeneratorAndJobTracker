@@ -11,7 +11,7 @@ from referral_app.models import (
 
 @admin.register(ReferralProgram)
 class ReferralProgramAdmin(admin.ModelAdmin):
-    list_display = ("account", "enabled", "reward_mode", "referrer_reward_cents", "friend_reward_cents", "updated_at")
+    list_display = ("account", "enabled", "reward_mode", "gift_card_purchase_url", "updated_at")
     list_filter = ("enabled", "reward_mode")
 
 

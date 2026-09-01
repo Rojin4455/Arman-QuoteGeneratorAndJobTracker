@@ -83,6 +83,12 @@ class ReferralProgram(models.Model):
     accent_color = models.CharField(max_length=16, default="#0c4fac")
     service_label = models.CharField(max_length=80, default="home service")
     terms_text = models.TextField(default=DEFAULT_TERMS)
+    gift_card_purchase_url = models.URLField(
+        max_length=500,
+        blank=True,
+        default="",
+        help_text="Customer-facing gift card purchase page URL for this subaccount.",
+    )
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 

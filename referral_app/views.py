@@ -35,6 +35,23 @@ class OwnerReferralProgramView(APIView):
         return Response(services.serialize_program(request.account, program))
 
 
+class OwnerGiftCardView(APIView):
+    """Customer gift card purchase URL for the current subaccount."""
+
+    permission_classes = [AccountScopedPermission, IsManagementUserPermission]
+
+    def get(self, request):
+        return Response(services.serialize_gift_card(request.account))
+
+    def patch(self, request):
+        url = (request.data.get("purchase_url") or request.data.get("gift_card_purchase_url") or "").strip()
+        try:
+            services.update_program(request.account, {"gift_card_purchase_url": url})
+        except ValueError as exc:
+            return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+        return Response(services.serialize_gift_card(request.account))
+
+
 class OwnerEnsureReferralLinkView(APIView):
     permission_classes = [AccountScopedPermission, IsManagementUserPermission]
 
