@@ -787,6 +787,8 @@ class OccurrenceListView(APIView):
             if unassigned:
                 qs = qs.filter(assignments__isnull=True)
                 skip_assignee_ids_in_filter = True
+            elif (request.query_params.get('scope') or '').strip().lower() == 'all':
+                skip_assignee_ids_in_filter = True
             # Admin: if assignee_ids provided, filter by those assignees only (within account)
             elif assignee_ids_param:
                 assignee_list = [a.strip() for a in assignee_ids_param.split(',') if a.strip()]

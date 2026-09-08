@@ -2,11 +2,12 @@ from datetime import timedelta
 
 from django.db.models import Sum, Q
 from django.utils import timezone
+from django.utils.dateparse import parse_datetime
 from rest_framework import status
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-from accounts.permissions import AccountScopedPermission, IsAdminPermission, IsManagementUserPermission
+from accounts.permissions import AccountScopedPermission, IsManagementUserPermission
 from service_app.models import User
 
 from .models import (
@@ -29,6 +30,12 @@ class FleetTripsView(APIView):
 
     def get(self, request):
         qs = OneStepGPSTrip.objects.filter(account=request.account)
+        start = parse_datetime(request.query_params.get('start') or '')
+        end = parse_datetime(request.query_params.get('end') or '')
+        if start:
+            qs = qs.filter(started_at__gte=start)
+        if end:
+            qs = qs.filter(started_at__lte=end)
         search = (request.query_params.get('search') or '').strip()
         if search:
             qs = qs.filter(Q(device_name__icontains=search) | Q(device_id__icontains=search) | Q(start_address__icontains=search))
@@ -83,7 +90,7 @@ class FleetGeofenceListCreateView(APIView):
 
 
 class FleetGeofenceDetailView(APIView):
-    permission_classes = [AccountScopedPermission, IsAdminPermission]
+    permission_classes = [AccountScopedPermission, IsManagementUserPermission]
 
     def _get(self, request, pk):
         return OneStepGPSGeofence.objects.filter(account=request.account, pk=pk).first()
