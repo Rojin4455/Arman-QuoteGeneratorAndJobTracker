@@ -159,6 +159,13 @@ class OneStepGPSMaintenance(models.Model):
     dtc_codes = models.JSONField(default=list, blank=True)
     next_service_miles = models.FloatField(null=True, blank=True)
     next_service_at = models.DateTimeField(null=True, blank=True)
+    service_type = models.CharField(max_length=64, blank=True, default='')
+    interval_miles = models.FloatField(null=True, blank=True)
+    interval_days = models.PositiveIntegerField(null=True, blank=True)
+    last_service_at = models.DateTimeField(null=True, blank=True)
+    last_service_miles = models.FloatField(null=True, blank=True)
+    notes = models.TextField(blank=True, default='')
+    schedule_managed = models.BooleanField(default=False)
     raw_payload = models.JSONField(default=dict, blank=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -170,6 +177,31 @@ class OneStepGPSMaintenance(models.Model):
                 name='onestepgps_maint_account_device_uniq',
             ),
         ]
+
+
+class OneStepGPSServiceLog(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    account = models.ForeignKey(
+        'accounts.GHLAuthCredentials',
+        on_delete=models.CASCADE,
+        related_name='onestepgps_service_logs',
+    )
+    maintenance = models.ForeignKey(
+        OneStepGPSMaintenance,
+        on_delete=models.CASCADE,
+        related_name='logs',
+    )
+    device_id = models.CharField(max_length=255)
+    device_name = models.CharField(max_length=255, blank=True, default='')
+    service_type = models.CharField(max_length=64, blank=True, default='service')
+    performed_at = models.DateTimeField()
+    odometer_miles = models.FloatField(null=True, blank=True)
+    notes = models.TextField(blank=True, default='')
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = 'onestepgps_service_log'
+        ordering = ['-performed_at', '-created_at']
 
 
 class OneStepGPSGeofence(models.Model):

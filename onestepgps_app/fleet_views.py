@@ -14,9 +14,12 @@ from .models import (
     OneStepGPSAlert,
     OneStepGPSGeofence,
     OneStepGPSMaintenance,
+    OneStepGPSServiceLog,
     OneStepGPSTrip,
     OneStepGPSVehicleBinding,
 )
+from .fleet_reports import build_fleet_reports
+from .maintenance_utils import due_info, parse_service_datetime, roll_next_service
 from .serializers import (
     OneStepGPSGeofenceSerializer,
     OneStepGPSMaintenanceSerializer,
@@ -58,18 +61,103 @@ class FleetMaintenanceView(APIView):
     permission_classes = [AccountScopedPermission, IsManagementUserPermission]
 
     def get(self, request):
-        rows = list(OneStepGPSMaintenance.objects.filter(account=request.account).order_by('device_name'))
+        rows = list(
+            OneStepGPSMaintenance.objects.filter(account=request.account)
+            .prefetch_related('logs')
+            .order_by('device_name')
+        )
+        for row in rows:
+            row._prefetched_logs = list(row.logs.all()[:8])
         fuels = [r.fuel_level_percent for r in rows if r.fuel_level_percent is not None]
-        need_attention = sum(1 for r in rows if r.check_engine or (r.dtc_codes or []))
+        due = [due_info(r) for r in rows]
+        need_attention = sum(1 for info in due if info['needs_attention'])
         avg_fuel = round(sum(fuels) / len(fuels), 0) if fuels else None
         return Response({
             'results': OneStepGPSMaintenanceSerializer(rows, many=True).data,
             'totals': {
                 'need_attention': need_attention,
+                'due_soon': sum(1 for info in due if info['due_status'] == 'due_soon'),
+                'overdue': sum(1 for info in due if info['due_status'] == 'overdue'),
                 'average_fuel': avg_fuel,
                 'vehicles_monitored': len(rows),
             },
         })
+
+
+class FleetMaintenanceDetailView(APIView):
+    permission_classes = [AccountScopedPermission, IsManagementUserPermission]
+
+    def _get(self, request, pk):
+        return OneStepGPSMaintenance.objects.filter(account=request.account, pk=pk).first()
+
+    def patch(self, request, pk):
+        obj = self._get(request, pk)
+        if not obj:
+            return Response({'detail': 'Not found.'}, status=404)
+        data = request.data.copy() if hasattr(request.data, 'copy') else dict(request.data)
+        if 'next_service_at' in data:
+            data['next_service_at'] = parse_service_datetime(data.get('next_service_at'))
+        for key in ('next_service_miles', 'interval_miles', 'interval_days'):
+            if key in data and data[key] in ('', None):
+                data[key] = None
+        serializer = OneStepGPSMaintenanceSerializer(obj, data=data, partial=True)
+        serializer.is_valid(raise_exception=True)
+        obj = serializer.save(schedule_managed=True)
+        return Response(OneStepGPSMaintenanceSerializer(obj).data)
+
+
+class FleetMaintenanceCompleteView(APIView):
+    permission_classes = [AccountScopedPermission, IsManagementUserPermission]
+
+    def post(self, request, pk):
+        obj = OneStepGPSMaintenance.objects.filter(account=request.account, pk=pk).first()
+        if not obj:
+            return Response({'detail': 'Not found.'}, status=404)
+
+        performed_at = parse_service_datetime(request.data.get('performed_at')) or timezone.now()
+        odometer = request.data.get('odometer_miles')
+        try:
+            odometer = float(odometer) if odometer not in (None, '') else obj.odometer_miles
+        except (TypeError, ValueError):
+            odometer = obj.odometer_miles
+        service_type = (request.data.get('service_type') or obj.service_type or 'service').strip()[:64]
+        notes = str(request.data.get('notes') or '')[:2000]
+
+        log = OneStepGPSServiceLog.objects.create(
+            account=request.account,
+            maintenance=obj,
+            device_id=obj.device_id,
+            device_name=obj.device_name,
+            service_type=service_type,
+            performed_at=performed_at,
+            odometer_miles=odometer,
+            notes=notes,
+        )
+        obj.last_service_at = performed_at
+        obj.last_service_miles = odometer
+        if service_type:
+            obj.service_type = service_type
+        obj.schedule_managed = True
+        roll_next_service(obj, performed_at, odometer)
+        next_miles = request.data.get('next_service_miles')
+        if next_miles not in (None, ''):
+            try:
+                obj.next_service_miles = float(next_miles)
+            except (TypeError, ValueError):
+                pass
+        if 'next_service_at' in request.data:
+            parsed = parse_service_datetime(request.data.get('next_service_at'))
+            if parsed:
+                obj.next_service_at = parsed
+        obj.save()
+        return Response({
+            'maintenance': OneStepGPSMaintenanceSerializer(obj).data,
+            'log': {
+                'id': str(log.id),
+                'service_type': log.service_type,
+                'performed_at': log.performed_at,
+            },
+        }, status=status.HTTP_201_CREATED)
 
 
 class FleetGeofenceListCreateView(APIView):
@@ -162,42 +250,7 @@ class FleetReportsView(APIView):
     permission_classes = [AccountScopedPermission, IsManagementUserPermission]
 
     def get(self, request):
-        since = timezone.now() - timedelta(days=30)
-        trips = OneStepGPSTrip.objects.filter(account=request.account, started_at__gte=since)
-        alerts = OneStepGPSAlert.objects.filter(account=request.account).filter(
-            Q(alert_time__gte=since) | Q(alert_time__isnull=True, created_at__gte=since)
-        )
-        maint = OneStepGPSMaintenance.objects.filter(account=request.account)
-        geofence_alerts = alerts.filter(alert_name__icontains='geofence')
-        safety = alerts.filter(
-            Q(alert_name__icontains='speed')
-            | Q(alert_name__icontains='harsh')
-            | Q(alert_name__icontains='brak')
-        )
-        miles = trips.aggregate(total=Sum('distance_miles')).get('total') or 0
-        return Response({
-            'period_days': 30,
-            'fleet_activity': {
-                'distance_miles': round(float(miles), 1),
-                'trips': trips.filter(kind='drive').count(),
-                'stops': trips.filter(kind='stop').count(),
-                'idle_seconds': int(trips.aggregate(total=Sum('idle_seconds')).get('total') or 0),
-            },
-            'driver_safety': {
-                'events': safety.count(),
-                'speeding': safety.filter(alert_name__icontains='speed').count(),
-                'harsh': safety.filter(Q(alert_name__icontains='harsh') | Q(alert_name__icontains='brak')).count(),
-            },
-            'maintenance_health': {
-                'vehicles': maint.count(),
-                'need_attention': sum(1 for r in maint if r.check_engine or (r.dtc_codes or [])),
-                'dtc_vehicles': maint.exclude(dtc_codes=[]).count(),
-            },
-            'location_activity': {
-                'geofence_events': geofence_alerts.count(),
-                'active_geofences': OneStepGPSGeofence.objects.filter(account=request.account, is_active=True).count(),
-            },
-        })
+        return Response(build_fleet_reports(request.account, days=30))
 
 
 class FleetSummaryView(APIView):
@@ -215,6 +268,6 @@ class FleetSummaryView(APIView):
             'maintenance_attention': sum(
                 1
                 for r in OneStepGPSMaintenance.objects.filter(account=request.account)
-                if r.check_engine or (r.dtc_codes or [])
+                if due_info(r)['needs_attention']
             ),
         })

@@ -92,19 +92,24 @@ def _persist_bundle_trip(account, trip: NormalizedTrip) -> bool:
 
 
 def _persist_bundle_maintenance(account, maint: NormalizedMaintenance) -> bool:
+    existing = OneStepGPSMaintenance.objects.filter(account=account, device_id=maint.device_id).first()
+    defaults = {
+        'device_name': maint.device_name,
+        'odometer_miles': maint.odometer_miles,
+        'engine_hours': maint.engine_hours,
+        'fuel_level_percent': maint.fuel_level_percent,
+        'check_engine': maint.check_engine,
+        'dtc_codes': maint.dtc_codes,
+        'raw_payload': maint.raw_payload,
+    }
+    if not (existing and existing.schedule_managed):
+        if maint.next_service_miles is not None:
+            defaults['next_service_miles'] = maint.next_service_miles
+        if maint.next_service_at is not None:
+            defaults['next_service_at'] = maint.next_service_at
     obj, created = OneStepGPSMaintenance.objects.update_or_create(
         account=account,
         device_id=maint.device_id,
-        defaults={
-            'device_name': maint.device_name,
-            'odometer_miles': maint.odometer_miles,
-            'engine_hours': maint.engine_hours,
-            'fuel_level_percent': maint.fuel_level_percent,
-            'check_engine': maint.check_engine,
-            'dtc_codes': maint.dtc_codes,
-            'next_service_miles': maint.next_service_miles,
-            'next_service_at': maint.next_service_at,
-            'raw_payload': maint.raw_payload,
-        },
+        defaults=defaults,
     )
     return created or bool(maint.odometer_miles or maint.fuel_level_percent or maint.engine_hours or maint.dtc_codes)

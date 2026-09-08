@@ -140,10 +140,16 @@ def persist_maintenance(account, payload: dict) -> bool:
         'fuel_level_percent': _as_float(_first(payload.get('fuel_level_pct'), payload.get('fuel_percent'), payload.get('fuel_level'))),
         'check_engine': bool(payload.get('check_engine') or payload.get('mil_on') or codes),
         'dtc_codes': codes,
-        'next_service_miles': _as_float(_first(payload.get('next_service_mi'), payload.get('service_due_miles'))),
-        'next_service_at': parse_alert_time(_first(payload.get('next_service_at'), payload.get('service_due_at'))),
         'raw_payload': payload,
     }
+    next_mi = _as_float(_first(payload.get('next_service_mi'), payload.get('service_due_miles')))
+    next_at = parse_alert_time(_first(payload.get('next_service_at'), payload.get('service_due_at')))
+    existing = OneStepGPSMaintenance.objects.filter(account=account, device_id=device_id).first()
+    if not (existing and existing.schedule_managed):
+        if next_mi is not None:
+            defaults['next_service_miles'] = next_mi
+        if next_at is not None:
+            defaults['next_service_at'] = next_at
     OneStepGPSMaintenance.objects.update_or_create(
         account=account,
         device_id=device_id,

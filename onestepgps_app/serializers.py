@@ -5,6 +5,7 @@ from .models import (
     OneStepGPSGeofence,
     OneStepGPSIntegration,
     OneStepGPSMaintenance,
+    OneStepGPSServiceLog,
     OneStepGPSTrip,
     OneStepGPSVehicleBinding,
 )
@@ -147,7 +148,28 @@ class OneStepGPSTripSerializer(serializers.ModelSerializer):
         ]
 
 
+class OneStepGPSServiceLogSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = OneStepGPSServiceLog
+        fields = [
+            'id',
+            'device_id',
+            'device_name',
+            'service_type',
+            'performed_at',
+            'odometer_miles',
+            'notes',
+            'created_at',
+        ]
+
+
 class OneStepGPSMaintenanceSerializer(serializers.ModelSerializer):
+    due_status = serializers.SerializerMethodField()
+    miles_remaining = serializers.SerializerMethodField()
+    days_remaining = serializers.SerializerMethodField()
+    needs_attention = serializers.SerializerMethodField()
+    logs = serializers.SerializerMethodField()
+
     class Meta:
         model = OneStepGPSMaintenance
         fields = [
@@ -161,8 +183,64 @@ class OneStepGPSMaintenanceSerializer(serializers.ModelSerializer):
             'dtc_codes',
             'next_service_miles',
             'next_service_at',
+            'service_type',
+            'interval_miles',
+            'interval_days',
+            'last_service_at',
+            'last_service_miles',
+            'notes',
+            'schedule_managed',
+            'due_status',
+            'miles_remaining',
+            'days_remaining',
+            'needs_attention',
+            'logs',
             'updated_at',
         ]
+        read_only_fields = [
+            'id',
+            'device_id',
+            'odometer_miles',
+            'engine_hours',
+            'fuel_level_percent',
+            'check_engine',
+            'dtc_codes',
+            'last_service_at',
+            'last_service_miles',
+            'schedule_managed',
+            'due_status',
+            'miles_remaining',
+            'days_remaining',
+            'needs_attention',
+            'logs',
+            'updated_at',
+        ]
+
+    def _due(self, obj):
+        from .maintenance_utils import due_info
+        cache = getattr(obj, '_due_cache', None)
+        if cache is None:
+            cache = due_info(obj)
+            obj._due_cache = cache
+        return cache
+
+    def get_due_status(self, obj):
+        return self._due(obj)['due_status']
+
+    def get_miles_remaining(self, obj):
+        return self._due(obj)['miles_remaining']
+
+    def get_days_remaining(self, obj):
+        return self._due(obj)['days_remaining']
+
+    def get_needs_attention(self, obj):
+        return self._due(obj)['needs_attention']
+
+    def get_logs(self, obj):
+        logs = getattr(obj, '_prefetched_logs', None)
+        if logs is None:
+            logs = obj.logs.all()[:8]
+        return OneStepGPSServiceLogSerializer(logs, many=True).data
 
 
 class OneStepGPSGeofenceSerializer(serializers.ModelSerializer):
