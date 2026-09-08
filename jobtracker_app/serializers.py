@@ -6,6 +6,23 @@ import calendar
 from service_app.models import User, Service, Appointment
 from accounts.models import Contact, Address
 
+_PLACEHOLDER_NAMES = {'n/a', 'na', 'n.a.', 'n.a', 'none', 'unknown', 'customer'}
+
+
+def _usable_name(value):
+    if value is None:
+        return None
+    text = str(value).strip()
+    if not text or text.lower() in _PLACEHOLDER_NAMES:
+        return None
+    return text
+
+
+def _contact_full_name(contact):
+    if not contact:
+        return None
+    return _usable_name(' '.join(filter(None, [contact.first_name, contact.last_name])))
+
 
 class JobServiceItemSerializer(serializers.ModelSerializer):
     service_name = serializers.CharField(source='service.name', read_only=True)
@@ -53,6 +70,7 @@ class OccurrenceEventSerializer(serializers.ModelSerializer):
 class CalendarEventSerializer(serializers.ModelSerializer):
     """Serializer for calendar view - works with Job model directly (supports both one-time and recurring series instances)"""
     job_id = serializers.UUIDField(source='id')
+    customer_name = serializers.SerializerMethodField()
     company_name = serializers.SerializerMethodField()
     assigned_user_ids = serializers.SerializerMethodField()
     job_address = serializers.SerializerMethodField()
@@ -73,9 +91,17 @@ class CalendarEventSerializer(serializers.ModelSerializer):
         return obj.customer_address or None
 
     def get_company_name(self, obj):
-        if obj.contact:
-            return obj.contact.company_name or None
-        return None
+        contact = getattr(obj, 'contact', None)
+        return _usable_name(getattr(contact, 'company_name', None)) if contact else None
+
+    def get_customer_name(self, obj):
+        name = _usable_name(obj.customer_name)
+        if name:
+            return name
+        contact_name = _contact_full_name(getattr(obj, 'contact', None))
+        if contact_name:
+            return contact_name
+        return _usable_name(obj.title)
 
     def get_assigned_user_ids(self, obj):
         """Return list of assigned user primary keys (integer) for this job."""
@@ -138,7 +164,7 @@ class AppointmentCalendarSerializer(serializers.ModelSerializer):
     
     def get_contact_company_name(self, obj):
         if obj.contact:
-            return obj.contact.company_name or None
+            return _usable_name(obj.contact.company_name)
         return None
     
     def get_calendar(self, obj):

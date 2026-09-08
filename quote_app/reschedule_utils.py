@@ -47,6 +47,7 @@ def clone_submission_for_reschedule(source: CustomerSubmission, *, scheduled_at,
             quote_surcharge_applicable=source.quote_surcharge_applicable,
             custom_service_total=source.custom_service_total,
             final_total=source.final_total,
+            technician_notes=source.technician_notes,
             additional_data=extra,
             expires_at=timezone.now() + timedelta(days=30),
         )

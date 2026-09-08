@@ -18,6 +18,7 @@ class OneStepGPSIntegration(models.Model):
     is_enabled = models.BooleanField(default=True)
     webhook_username = models.CharField(max_length=255, blank=True, default='')
     webhook_password = models.CharField(max_length=255, blank=True, default='')
+    last_webhook_at = models.DateTimeField(null=True, blank=True)
     updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:
@@ -64,6 +65,8 @@ class OneStepGPSAlert(models.Model):
     longitude = models.FloatField(null=True, blank=True)
     location_raw = models.CharField(max_length=255, blank=True, default='')
     raw_payload = models.JSONField(default=dict, blank=True)
+    acknowledged = models.BooleanField(default=False)
+    acknowledged_at = models.DateTimeField(null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True, db_index=True)
 
     class Meta:
@@ -88,3 +91,134 @@ class OneStepGPSAlert(models.Model):
     @property
     def effective_time(self):
         return self.alert_time or self.created_at or timezone.now()
+
+    @property
+    def severity(self):
+        name = (self.alert_name or '').lower()
+        if any(k in name for k in ('dtc', 'fault', 'tamper', 'disconnect', 'engine fault')):
+            return 'critical'
+        if any(k in name for k in ('idle', 'engine on', 'engine off', 'info')):
+            return 'info'
+        return 'warning'
+
+
+class OneStepGPSTrip(models.Model):
+    KIND_DRIVE = 'drive'
+    KIND_STOP = 'stop'
+    KIND_CHOICES = [(KIND_DRIVE, 'Drive'), (KIND_STOP, 'Stop')]
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    account = models.ForeignKey(
+        'accounts.GHLAuthCredentials',
+        on_delete=models.CASCADE,
+        related_name='onestepgps_trips',
+    )
+    event_key = models.CharField(max_length=255, db_index=True)
+    kind = models.CharField(max_length=16, choices=KIND_CHOICES, default=KIND_DRIVE)
+    device_id = models.CharField(max_length=255, db_index=True)
+    device_name = models.CharField(max_length=255, blank=True, default='')
+    started_at = models.DateTimeField(db_index=True)
+    ended_at = models.DateTimeField(null=True, blank=True)
+    duration_seconds = models.FloatField(null=True, blank=True)
+    distance_miles = models.FloatField(null=True, blank=True)
+    idle_seconds = models.FloatField(null=True, blank=True)
+    max_speed_mph = models.FloatField(null=True, blank=True)
+    start_address = models.CharField(max_length=500, blank=True, default='')
+    end_address = models.CharField(max_length=500, blank=True, default='')
+    start_latitude = models.FloatField(null=True, blank=True)
+    start_longitude = models.FloatField(null=True, blank=True)
+    end_latitude = models.FloatField(null=True, blank=True)
+    end_longitude = models.FloatField(null=True, blank=True)
+    raw_payload = models.JSONField(default=dict, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = 'onestepgps_trip'
+        ordering = ['-started_at']
+        constraints = [
+            models.UniqueConstraint(
+                fields=['account', 'event_key'],
+                name='onestepgps_trip_account_event_uniq',
+            ),
+        ]
+
+
+class OneStepGPSMaintenance(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    account = models.ForeignKey(
+        'accounts.GHLAuthCredentials',
+        on_delete=models.CASCADE,
+        related_name='onestepgps_maintenance',
+    )
+    device_id = models.CharField(max_length=255)
+    device_name = models.CharField(max_length=255, blank=True, default='')
+    odometer_miles = models.FloatField(null=True, blank=True)
+    engine_hours = models.FloatField(null=True, blank=True)
+    fuel_level_percent = models.FloatField(null=True, blank=True)
+    check_engine = models.BooleanField(default=False)
+    dtc_codes = models.JSONField(default=list, blank=True)
+    next_service_miles = models.FloatField(null=True, blank=True)
+    next_service_at = models.DateTimeField(null=True, blank=True)
+    raw_payload = models.JSONField(default=dict, blank=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = 'onestepgps_maintenance'
+        constraints = [
+            models.UniqueConstraint(
+                fields=['account', 'device_id'],
+                name='onestepgps_maint_account_device_uniq',
+            ),
+        ]
+
+
+class OneStepGPSGeofence(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    account = models.ForeignKey(
+        'accounts.GHLAuthCredentials',
+        on_delete=models.CASCADE,
+        related_name='onestepgps_geofences',
+    )
+    name = models.CharField(max_length=255)
+    latitude = models.FloatField()
+    longitude = models.FloatField()
+    radius_miles = models.FloatField(default=1.0)
+    color = models.CharField(max_length=16, default='#0877f9')
+    trigger_entry = models.BooleanField(default=True)
+    trigger_exit = models.BooleanField(default=True)
+    after_hours = models.BooleanField(default=False)
+    is_active = models.BooleanField(default=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = 'onestepgps_geofence'
+        ordering = ['name']
+
+
+class OneStepGPSVehicleBinding(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    account = models.ForeignKey(
+        'accounts.GHLAuthCredentials',
+        on_delete=models.CASCADE,
+        related_name='onestepgps_vehicle_bindings',
+    )
+    device_id = models.CharField(max_length=255)
+    user = models.ForeignKey(
+        'service_app.User',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='gps_vehicle_bindings',
+    )
+    technician_name = models.CharField(max_length=255, blank=True, default='')
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = 'onestepgps_vehicle_binding'
+        constraints = [
+            models.UniqueConstraint(
+                fields=['account', 'device_id'],
+                name='onestepgps_binding_account_device_uniq',
+            ),
+        ]

@@ -176,3 +176,12 @@ class PublicQuoteGeneratorTests(TestCase):
         )
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.data.get('project_employees'), [])
+
+
+class TechnicianNotesTests(TestCase):
+    def test_combine_internal_notes_dedupes(self):
+        from quote_app.quote_schedule_job_sync import _combine_internal_notes
+
+        self.assertIsNone(_combine_internal_notes(None, '', '  '))
+        self.assertEqual(_combine_internal_notes('Gate code 12', 'Gate code 12'), 'Gate code 12')
+        self.assertEqual(_combine_internal_notes('A', 'B'), 'A\n\nB')

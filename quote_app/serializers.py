@@ -433,7 +433,7 @@ class CustomerSubmissionDetailSerializer(serializers.ModelSerializer):
             'expires_at', 'service_selections','additional_data','contact','address','custom_products','custom_service_total','quote_schedule',
             'quoted_by', 'quoted_by_details', 'images',
             'is_persisted_snapshot', 'source_submission_id', 'persisted_snapshot_id',
-            'quote_origin', 'referral_discount',
+            'quote_origin', 'referral_discount', 'technician_notes',
         ]
         read_only_fields = [
             'quote_origin',
@@ -441,6 +441,9 @@ class CustomerSubmissionDetailSerializer(serializers.ModelSerializer):
             'source_submission_id',
             'persisted_snapshot_id',
         ]
+        extra_kwargs = {
+            'technician_notes': {'required': False, 'allow_blank': True, 'allow_null': True},
+        }
     
     def get_service_selections(self, obj):
         selections = obj.customerserviceselection_set.all().prefetch_related(

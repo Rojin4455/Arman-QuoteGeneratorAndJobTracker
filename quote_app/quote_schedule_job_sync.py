@@ -21,6 +21,18 @@ def _quantize_currency(value: Decimal) -> Decimal:
     return value.quantize(Decimal("0.01"))
 
 
+def _combine_internal_notes(*parts) -> str | None:
+    seen = set()
+    out = []
+    for part in parts:
+        text = str(part).strip() if part else ""
+        if not text or text in seen:
+            continue
+        seen.add(text)
+        out.append(text)
+    return "\n\n".join(out) or None
+
+
 def resolve_user_from_reference(reference: str):
     if not reference:
         return None
@@ -174,7 +186,10 @@ def compute_job_defaults_and_items(submission, quote_schedule):
         "customer_email": customer_email,
         "customer_address": customer_address,
         "ghl_contact_id": ghl_contact_id,
-        "notes": quote_schedule.notes,
+        "notes": _combine_internal_notes(
+            quote_schedule.notes,
+            getattr(submission, "technician_notes", None),
+        ),
         "created_by_email": created_by_email,
     }
     if contact:

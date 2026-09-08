@@ -176,6 +176,7 @@ def clone_submission_as_persisted_snapshot(source: CustomerSubmission) -> tuple[
                 "quote_surcharge_applicable": source.quote_surcharge_applicable,
                 "custom_service_total": source.custom_service_total,
                 "final_total": source.final_total,
+                "technician_notes": source.technician_notes,
                 "additional_data": extra,
                 "expires_at": source.expires_at,
                 "is_persisted_snapshot": True,

@@ -96,7 +96,12 @@ class CustomerSubmission(models.Model):
     custom_service_total=models.DecimalField(max_digits=12, decimal_places=2, default=Decimal('0.00'), null=True, blank=True)
     final_total = models.DecimalField(max_digits=12, decimal_places=2, default=Decimal('0.00'))
     additional_data = models.JSONField(default=dict, null=True,blank=True)
-    
+    technician_notes = models.TextField(
+        blank=True,
+        null=True,
+        help_text='Private notes for technicians on the signed proposal. Never shown to the customer or on invoices.',
+    )
+
     # Timestamps
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
