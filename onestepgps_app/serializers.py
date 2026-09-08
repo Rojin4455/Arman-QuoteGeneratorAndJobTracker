@@ -237,10 +237,13 @@ class OneStepGPSMaintenanceSerializer(serializers.ModelSerializer):
         return self._due(obj)['needs_attention']
 
     def get_logs(self, obj):
-        logs = getattr(obj, '_prefetched_logs', None)
-        if logs is None:
-            logs = obj.logs.all()[:8]
-        return OneStepGPSServiceLogSerializer(logs, many=True).data
+        try:
+            logs = getattr(obj, '_prefetched_logs', None)
+            if logs is None:
+                logs = obj.logs.all()[:8]
+            return OneStepGPSServiceLogSerializer(logs, many=True).data
+        except Exception:
+            return []
 
 
 class OneStepGPSGeofenceSerializer(serializers.ModelSerializer):

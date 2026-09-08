@@ -1,6 +1,7 @@
 from collections import defaultdict
 from datetime import timedelta
 
+from django.db import connection
 from django.db.models import Count, Max, Q, Sum
 from django.db.models.functions import TruncDate
 from django.utils import timezone
@@ -47,8 +48,22 @@ def build_fleet_reports(account, days=30):
     alerts = OneStepGPSAlert.objects.filter(account=account).filter(
         Q(alert_time__gte=since) | Q(alert_time__isnull=True, created_at__gte=since)
     )
-    maint = list(OneStepGPSMaintenance.objects.filter(account=account).order_by('device_name'))
-    logs = OneStepGPSServiceLog.objects.filter(account=account, performed_at__gte=since).order_by('-performed_at')
+    try:
+        maint = list(OneStepGPSMaintenance.objects.filter(account=account).order_by('device_name'))
+    except Exception:
+        try:
+            connection.rollback()
+        except Exception:
+            pass
+        maint = []
+    try:
+        logs = OneStepGPSServiceLog.objects.filter(account=account, performed_at__gte=since).order_by('-performed_at')
+    except Exception:
+        try:
+            connection.rollback()
+        except Exception:
+            pass
+        logs = []
     fences = list(OneStepGPSGeofence.objects.filter(account=account).order_by('name'))
 
     miles = trips.aggregate(total=Sum('distance_miles')).get('total') or 0
