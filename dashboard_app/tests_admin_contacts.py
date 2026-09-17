@@ -92,3 +92,26 @@ class AdminContactListTests(APITestCase):
         empty = next(row for row in resp.data['results'] if row['contact_id'] == 'ghl-list-01')
         self.assertEqual(empty['jobs_count'], 0)
         self.assertEqual(empty['invoices_count'], 0)
+
+    def test_patch_tax_exempt(self):
+        featured = self.contacts[0]
+        self.assertFalse(featured.tax_exempt)
+        resp = self.client.patch(
+            f'/api/dashboard/contacts/{featured.contact_id}/?location_id={self.location_id}',
+            {'tax_exempt': True, 'first_name': 'ShouldNotChange'},
+            format='json',
+        )
+        self.assertEqual(resp.status_code, 200)
+        self.assertTrue(resp.data['tax_exempt'])
+        featured.refresh_from_db()
+        self.assertTrue(featured.tax_exempt)
+        self.assertEqual(featured.first_name, 'Cust0')
+
+    def test_put_tax_exempt_not_allowed(self):
+        featured = self.contacts[0]
+        resp = self.client.put(
+            f'/api/dashboard/contacts/{featured.contact_id}/?location_id={self.location_id}',
+            {'tax_exempt': True},
+            format='json',
+        )
+        self.assertEqual(resp.status_code, 405)

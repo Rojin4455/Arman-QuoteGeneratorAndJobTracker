@@ -157,10 +157,21 @@ class AdminContactListSerializer(serializers.ModelSerializer):
         model = Contact
         fields = [
             'id', 'contact_id', 'ghl_contact_id', 'first_name', 'last_name', 'email', 'phone',
-            'company_name', 'country', 'location_id', 'date_added', 'dnd', 'tags',
+            'company_name', 'country', 'location_id', 'date_added', 'dnd', 'tags', 'tax_exempt',
             'submissions_count', 'jobs_count', 'addresses_count', 'pending_jobs_count',
             'appointments_count', 'invoices_count',
         ]
+
+
+class AdminContactTaxExemptUpdateSerializer(serializers.ModelSerializer):
+    """PATCH-only: tax_exempt is the sole writable contact hub field."""
+
+    tax_exempt = serializers.BooleanField(required=True)
+
+    class Meta:
+        model = Contact
+        fields = ['id', 'contact_id', 'tax_exempt']
+        read_only_fields = ['id', 'contact_id']
 
 
 class AdminContactDetailSerializer(serializers.ModelSerializer):
@@ -180,7 +191,7 @@ class AdminContactDetailSerializer(serializers.ModelSerializer):
         fields = [
             'id', 'contact_id', 'account_id', 'first_name', 'last_name', 'email', 'phone',
             'company_name', 'country', 'location_id', 'date_added', 'dnd', 'tags',
-            'custom_fields', 'timestamp',
+            'tax_exempt', 'custom_fields', 'timestamp',
             'addresses', 'submissions', 'jobs', 'reschedule_pending_jobs', 'invoices',
             'appointments', 'summary', 'referral',
         ]

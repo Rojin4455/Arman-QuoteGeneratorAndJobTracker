@@ -596,11 +596,48 @@ class TruShineCompletionWebhookCreditTests(TestCase):
         result = send_job_completion_webhook(str(job.id))
         self.assertTrue(result.get("success"), result)
         payload = mock_post.call_args.kwargs["json"]
+        self.assertEqual(payload["tax_exempt"], False)
         self.assertEqual(payload["discount"]["type"], "fixed")
         self.assertEqual(payload["discount"]["value"], 25.0)
         job.refresh_from_db()
         self.assertEqual(job.referral_credit_amount, Decimal("25.00"))
         self.assertEqual(services.available_credit_cents(self.account, self.customer), 0)
+
+    @patch("jobtracker_app.tasks.requests.post")
+    def test_webhook_payload_includes_contact_tax_exempt(self, mock_post):
+        from jobtracker_app.models import Job, JobServiceItem
+        from jobtracker_app.tasks import send_job_completion_webhook
+        from quote_app.models import CustomerSubmission
+
+        self.customer.tax_exempt = True
+        self.customer.save(update_fields=["tax_exempt"])
+
+        mock_post.return_value.status_code = 201
+        mock_post.return_value.content = b'{"invoiceId": "inv_c2_tax"}'
+        mock_post.return_value.json.return_value = {"invoiceId": "inv_c2_tax"}
+        mock_post.return_value.text = '{"invoiceId": "inv_c2_tax"}'
+
+        submission = CustomerSubmission.objects.create(
+            account=self.account,
+            contact=self.customer,
+            house_sqft=1200,
+        )
+        job = Job.objects.create(
+            account=self.account,
+            contact=self.customer,
+            submission=submission,
+            title="Tax exempt customer",
+            customer_email="customer2@test.com",
+            customer_name="Customer 2",
+            total_price=Decimal("170.00"),
+            status="completed",
+        )
+        JobServiceItem.objects.create(job=job, custom_name="Exterior", price=Decimal("170.00"))
+
+        result = send_job_completion_webhook(str(job.id))
+        self.assertTrue(result.get("success"), result)
+        payload = mock_post.call_args.kwargs["json"]
+        self.assertTrue(payload["tax_exempt"])
 
 
 class JobContactLinkRegressionTests(TestCase):

@@ -176,6 +176,10 @@ class Contact(models.Model):
     date_added = models.DateTimeField(blank=True, null=True)
     tags = models.JSONField(default=list, blank=True)
     custom_fields = models.JSONField(default=list, blank=True)
+    tax_exempt = models.BooleanField(
+        default=False,
+        help_text="If true, invoices for this contact should skip sales tax.",
+    )
     location_id = models.CharField(max_length=100)
     timestamp = models.DateTimeField(blank=True, null=True)
 

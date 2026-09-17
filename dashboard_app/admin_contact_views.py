@@ -5,6 +5,7 @@ Admin contact hub: list contacts with aggregate counts and retrieve full related
 from django.core.paginator import InvalidPage
 from django.db.models import Count, Prefetch, Q
 from rest_framework import filters as drf_filters
+from rest_framework.mixins import UpdateModelMixin
 from rest_framework.pagination import PageNumberPagination
 from rest_framework.permissions import AllowAny
 from rest_framework.response import Response
@@ -16,6 +17,7 @@ from accounts.models import Address, Contact
 from dashboard_app.admin_contact_serializers import (
     AdminContactDetailSerializer,
     AdminContactListSerializer,
+    AdminContactTaxExemptUpdateSerializer,
 )
 from dashboard_app.models import Invoice
 from jobtracker_app.models import Job, JobAssignment
@@ -121,7 +123,7 @@ def attach_contact_list_counts(contacts):
     return contacts
 
 
-class AdminContactViewSet(AccountScopedQuerysetMixin, ReadOnlyModelViewSet):
+class AdminContactViewSet(AccountScopedQuerysetMixin, UpdateModelMixin, ReadOnlyModelViewSet):
     """
     List and retrieve GHL contacts scoped to an account (via auth user, location_id, or default).
 
@@ -132,6 +134,9 @@ class AdminContactViewSet(AccountScopedQuerysetMixin, ReadOnlyModelViewSet):
     ``ghl_contact_id`` is the GHL contact id (model field ``contact_id``).
     Returns nested addresses, customer submissions (quotes), jobs (with assignees),
     matching invoices, appointments, and a numeric summary block.
+
+    **Update tax exempt** ``PATCH /api/dashboard/contacts/{ghl_contact_id}/``
+    Body: ``{"tax_exempt": true}``. Other contact fields are ignored.
     """
 
     queryset = Contact.objects.all()
@@ -139,6 +144,7 @@ class AdminContactViewSet(AccountScopedQuerysetMixin, ReadOnlyModelViewSet):
     account_lookup = 'account'
     lookup_field = 'contact_id'
     lookup_url_kwarg = 'ghl_contact_id'
+    http_method_names = ['get', 'patch', 'head', 'options']
 
     def initial(self, request, *args, **kwargs):
         super().initial(request, *args, **kwargs)
@@ -193,6 +199,8 @@ class AdminContactViewSet(AccountScopedQuerysetMixin, ReadOnlyModelViewSet):
         return Response(serializer.data)
 
     def get_serializer_class(self):
+        if self.action in ('update', 'partial_update'):
+            return AdminContactTaxExemptUpdateSerializer
         if self.action == 'retrieve':
             return AdminContactDetailSerializer
         return AdminContactListSerializer

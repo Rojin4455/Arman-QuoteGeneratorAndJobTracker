@@ -391,6 +391,9 @@ def send_job_completion_webhook(job_id):
         # --------------------------------------------------
         # Resolve GHL contact id
         # --------------------------------------------------
+        from accounts.models import Contact as _Contact
+
+        contact = None
         ghl_contact_id = (job.ghl_contact_id or "").strip()
         if not ghl_contact_id and job.contact:
             ghl_contact_id = (job.contact.contact_id or "").strip()
@@ -400,9 +403,8 @@ def send_job_completion_webhook(job_id):
         # If we have a ghl_contact_id but no local Contact matches it, the contact was
         # deleted and likely recreated in GHL with a new ID. Search by email to refresh.
         if ghl_contact_id:
-            from accounts.models import Contact as _Contact
-            local_contact = _Contact.objects.filter(contact_id=ghl_contact_id).first()
-            if not local_contact and job.customer_email:
+            contact = _Contact.objects.filter(contact_id=ghl_contact_id).first()
+            if not contact and job.customer_email:
                 fresh_contact = (
                     _Contact.objects.filter(email=job.customer_email)
                     .exclude(contact_id__isnull=True)
@@ -414,6 +416,7 @@ def send_job_completion_webhook(job_id):
                         f"🔄 Stale ghl_contact_id {ghl_contact_id} — refreshing to "
                         f"{fresh_contact.contact_id} (found by customer_email)"
                     )
+                    contact = fresh_contact
                     ghl_contact_id = fresh_contact.contact_id
                     Job.objects.filter(id=job_id).update(
                         ghl_contact_id=ghl_contact_id,
@@ -424,6 +427,10 @@ def send_job_completion_webhook(job_id):
                         f"⚠️ Stale ghl_contact_id {ghl_contact_id} and no replacement "
                         f"contact found by email — will send stale ID"
                     )
+        if not contact and job.contact:
+            contact = job.contact
+        if not contact and job.submission and job.submission.contact:
+            contact = job.submission.contact
 
         if ghl_contact_id:
             print(f"👤 GHL contact ID resolved: {ghl_contact_id}")
@@ -436,12 +443,9 @@ def send_job_completion_webhook(job_id):
         customer_email = (job.customer_email or "").strip()
         customer_name = job.customer_name
 
-        if not customer_email and ghl_contact_id:
-            from accounts.models import Contact as _Contact
-            contact_by_ghl_id = _Contact.objects.filter(contact_id=ghl_contact_id).first()
-            if contact_by_ghl_id and contact_by_ghl_id.email:
-                customer_email = contact_by_ghl_id.email.strip()
-                print(f"📧 customer_email resolved from GHL contact: {customer_email}")
+        if not customer_email and contact and contact.email:
+            customer_email = contact.email.strip()
+            print(f"📧 customer_email resolved from GHL contact: {customer_email}")
 
         if not customer_email and job.contact and job.contact.email:
             customer_email = job.contact.email.strip()
@@ -471,6 +475,8 @@ def send_job_completion_webhook(job_id):
 
         if ghl_contact_id:
             payload["ghl_contact_id"] = ghl_contact_id
+
+        payload["tax_exempt"] = bool(getattr(contact, "tax_exempt", False)) if contact else False
 
         # Total dollar reduction (manual + referral discount + wallet credit).
         manual_discount = Decimal(getattr(job, "manual_discount_amount", 0) or 0)
