@@ -115,3 +115,66 @@ class AdminContactListTests(APITestCase):
             format='json',
         )
         self.assertEqual(resp.status_code, 405)
+
+    def test_list_includes_tax_exempt_flag(self):
+        featured = self.contacts[0]
+        featured.tax_exempt = True
+        featured.save(update_fields=['tax_exempt'])
+        resp = self._list(page=1, page_size=25, ordering='-date_added')
+        self.assertEqual(resp.status_code, 200)
+        exempt = next(row for row in resp.data['results'] if row['contact_id'] == featured.contact_id)
+        taxable = next(row for row in resp.data['results'] if row['contact_id'] == 'ghl-list-01')
+        self.assertTrue(exempt['tax_exempt'])
+        self.assertFalse(taxable['tax_exempt'])
+
+    def test_filter_tax_exempt_true(self):
+        featured = self.contacts[0]
+        featured.tax_exempt = True
+        featured.save(update_fields=['tax_exempt'])
+        resp = self._list(tax_exempt='true')
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.data['count'], 1)
+        self.assertEqual(len(resp.data['results']), 1)
+        self.assertEqual(resp.data['results'][0]['contact_id'], featured.contact_id)
+        self.assertTrue(resp.data['results'][0]['tax_exempt'])
+
+    def test_filter_tax_exempt_false(self):
+        featured = self.contacts[0]
+        featured.tax_exempt = True
+        featured.save(update_fields=['tax_exempt'])
+        resp = self._list(tax_exempt='false', page_size=100)
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.data['count'], 29)
+        self.assertFalse(any(row['tax_exempt'] for row in resp.data['results']))
+        self.assertFalse(any(row['contact_id'] == featured.contact_id for row in resp.data['results']))
+
+    def test_filter_dnd_true(self):
+        quiet = self.contacts[1]
+        quiet.dnd = True
+        quiet.save(update_fields=['dnd'])
+        resp = self._list(dnd='true')
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.data['count'], 1)
+        self.assertEqual(resp.data['results'][0]['contact_id'], quiet.contact_id)
+        self.assertTrue(resp.data['results'][0]['dnd'])
+
+    def test_filter_has_jobs_true(self):
+        resp = self._list(has_jobs='true')
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.data['count'], 1)
+        self.assertEqual(resp.data['results'][0]['contact_id'], self.contacts[0].contact_id)
+
+    def test_filter_has_pending_jobs_true(self):
+        resp = self._list(has_pending_jobs='true')
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.data['count'], 1)
+        self.assertEqual(resp.data['results'][0]['contact_id'], self.contacts[0].contact_id)
+
+    def test_filter_has_email_false(self):
+        missing = self.contacts[2]
+        missing.email = ''
+        missing.save(update_fields=['email'])
+        resp = self._list(has_email='false')
+        self.assertEqual(resp.status_code, 200)
+        self.assertGreaterEqual(resp.data['count'], 1)
+        self.assertTrue(any(row['contact_id'] == missing.contact_id for row in resp.data['results']))

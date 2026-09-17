@@ -3,7 +3,8 @@ Admin contact hub: list contacts with aggregate counts and retrieve full related
 (quotes/submissions, jobs, invoices, appointments, addresses).
 """
 from django.core.paginator import InvalidPage
-from django.db.models import Count, Prefetch, Q
+from django.db.models import Count, Exists, OuterRef, Prefetch, Q
+from django_filters import rest_framework as filters
 from rest_framework import filters as drf_filters
 from rest_framework.mixins import UpdateModelMixin
 from rest_framework.pagination import PageNumberPagination
@@ -123,12 +124,97 @@ def attach_contact_list_counts(contacts):
     return contacts
 
 
+def _bool_exists(queryset, exists_qs, value):
+    if value:
+        return queryset.filter(Exists(exists_qs))
+    return queryset.filter(~Exists(exists_qs))
+
+
+def _bool_present(queryset, field, value):
+    empty = Q(**{f'{field}__isnull': True}) | Q(**{field: ''})
+    return queryset.exclude(empty) if value else queryset.filter(empty)
+
+
+class AdminContactFilter(filters.FilterSet):
+    """Optional list filters. Omit a param to leave it unconstrained."""
+
+    tax_exempt = filters.BooleanFilter(field_name='tax_exempt')
+    dnd = filters.BooleanFilter(field_name='dnd')
+    has_email = filters.BooleanFilter(method='filter_has_email')
+    has_phone = filters.BooleanFilter(method='filter_has_phone')
+    has_company = filters.BooleanFilter(method='filter_has_company')
+    date_added_after = filters.DateFilter(field_name='date_added', lookup_expr='date__gte')
+    date_added_before = filters.DateFilter(field_name='date_added', lookup_expr='date__lte')
+    has_jobs = filters.BooleanFilter(method='filter_has_jobs')
+    has_pending_jobs = filters.BooleanFilter(method='filter_has_pending_jobs')
+    has_quotes = filters.BooleanFilter(method='filter_has_quotes')
+    has_invoices = filters.BooleanFilter(method='filter_has_invoices')
+    has_addresses = filters.BooleanFilter(method='filter_has_addresses')
+
+    class Meta:
+        model = Contact
+        fields = [
+            'tax_exempt',
+            'dnd',
+            'has_email',
+            'has_phone',
+            'has_company',
+            'date_added_after',
+            'date_added_before',
+            'has_jobs',
+            'has_pending_jobs',
+            'has_quotes',
+            'has_invoices',
+            'has_addresses',
+        ]
+
+    def filter_has_email(self, queryset, name, value):
+        return _bool_present(queryset, 'email', value)
+
+    def filter_has_phone(self, queryset, name, value):
+        return _bool_present(queryset, 'phone', value)
+
+    def filter_has_company(self, queryset, name, value):
+        return _bool_present(queryset, 'company_name', value)
+
+    def filter_has_jobs(self, queryset, name, value):
+        return _bool_exists(queryset, Job.objects.filter(contact_id=OuterRef('pk')), value)
+
+    def filter_has_pending_jobs(self, queryset, name, value):
+        return _bool_exists(
+            queryset,
+            Job.objects.filter(contact_id=OuterRef('pk'), status__in=_NON_TERMINAL_JOB_STATUSES),
+            value,
+        )
+
+    def filter_has_quotes(self, queryset, name, value):
+        return _bool_exists(
+            queryset,
+            CustomerSubmission.objects.filter(contact_id=OuterRef('pk')),
+            value,
+        )
+
+    def filter_has_invoices(self, queryset, name, value):
+        return _bool_exists(
+            queryset,
+            Invoice.objects.filter(contact_id=OuterRef('contact_id')),
+            value,
+        )
+
+    def filter_has_addresses(self, queryset, name, value):
+        return _bool_exists(queryset, Address.objects.filter(contact_id=OuterRef('pk')), value)
+
+
 class AdminContactViewSet(AccountScopedQuerysetMixin, UpdateModelMixin, ReadOnlyModelViewSet):
     """
     List and retrieve GHL contacts scoped to an account (via auth user, location_id, or default).
 
     **List** ``GET /api/dashboard/contacts/``
-    Optional query params: ``search``, ``location_id``, ``ordering``, ``page``, ``page_size``.
+    Optional query params: ``search``, ``location_id``, ``tax_exempt``, ``dnd``,
+    ``has_email``, ``has_phone``, ``has_company``, ``date_added_after``, ``date_added_before``,
+    ``has_jobs``, ``has_pending_jobs``, ``has_quotes``, ``has_invoices``, ``has_addresses``,
+    ``ordering``, ``page``, ``page_size``.
+    Boolean params accept ``true`` / ``false``. Activity filters use EXISTS, not count joins.
 
     **Detail** ``GET /api/dashboard/contacts/{ghl_contact_id}/``
     ``ghl_contact_id`` is the GHL contact id (model field ``contact_id``).
@@ -151,9 +237,10 @@ class AdminContactViewSet(AccountScopedQuerysetMixin, UpdateModelMixin, ReadOnly
         get_account_from_request(request, allow_superadmin_override=True)
 
     pagination_class = AdminContactPagination
-    filter_backends = [drf_filters.SearchFilter, drf_filters.OrderingFilter]
+    filter_backends = [filters.DjangoFilterBackend, drf_filters.SearchFilter, drf_filters.OrderingFilter]
+    filterset_class = AdminContactFilter
     search_fields = ['first_name', 'last_name', 'email', 'phone', 'company_name', 'contact_id']
-    ordering_fields = ['date_added', 'last_name', 'first_name', 'id', 'email']
+    ordering_fields = ['date_added', 'last_name', 'first_name', 'id', 'email', 'tax_exempt']
     ordering = ['-date_added', '-id']
 
     def get_queryset(self):
