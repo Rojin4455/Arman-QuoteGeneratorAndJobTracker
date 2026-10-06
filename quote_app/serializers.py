@@ -16,6 +16,7 @@ from accounts.models import Address, Contact, GHLAuthCredentials
 from accounts.models import Location as GHLLocation
 
 from service_app.serializers import ServiceSettingsSerializer
+from .package_pricing import compute_package_question_adjustments
 
 
 
@@ -346,6 +347,7 @@ class CustomerPackageQuoteSerializer(serializers.ModelSerializer):
     service_name = serializers.CharField(source='service_selection.service.name', read_only=True)
     included_features_details = serializers.SerializerMethodField()
     excluded_features_details = serializers.SerializerMethodField()
+    percent_breakdown = serializers.SerializerMethodField()
     
     class Meta:
         model = CustomerPackageQuote
@@ -354,8 +356,34 @@ class CustomerPackageQuoteSerializer(serializers.ModelSerializer):
             'base_price', 'sqft_price', 'question_adjustments',
             'surcharge_amount', 'total_price', 'is_selected',
             'included_features', 'excluded_features',
-            'included_features_details', 'excluded_features_details'
+            'included_features_details', 'excluded_features_details',
+            'percent_breakdown',
         ]
+
+    def get_percent_breakdown(self, obj):
+        result = compute_package_question_adjustments(
+            obj.service_selection, obj.package,
+            base_price=obj.base_price,
+            sqft_price=obj.sqft_price,
+            surcharge_amount=obj.surcharge_amount,
+        )
+        if not result['percent_lines']:
+            return None
+        # Pricing rules may have changed since this quote was priced; only explain totals we can reproduce.
+        if abs(result['total'] - obj.question_adjustments) > Decimal('0.01'):
+            return None
+        return {
+            'subtotal': str(result['subtotal']),
+            'lines': [
+                {
+                    'question_text': line['question_text'],
+                    'answer_text': line['answer_text'],
+                    'percent': str(line['percent']),
+                    'amount': str(line['amount']),
+                }
+                for line in result['percent_lines']
+            ],
+        }
     
     def get_included_features_details(self, obj):
         if not obj.included_features:

@@ -48,6 +48,7 @@ from jobtracker_app.models import Job
 from jobtracker_app.serializers import JobSerializer
 
 from quote_app.helpers import create_or_update_ghl_contact, get_global_minimum_base_price_for_submission
+from quote_app.package_pricing import compute_package_question_adjustments
 from accounts.utils import (
     get_ghl_media_storage_for_location,
     upload_file_to_ghl_media,
@@ -957,88 +958,9 @@ class SubmitServiceResponsesView(APIView):
 
     def _calculate_package_specific_adjustments(self, service_selection, package, base_price, sqft_price, surcharge_amount):
         """Calculate question adjustments per package. Two-pass: (1) fixed adjustments, (2) % of package subtotal."""
-        PERCENT_OF_TOTAL = ('upcharge_percent_of_total', 'discount_percent_of_total')
-        fixed_sum = Decimal('0.00')
-        percent_entries = []  # list of (sign, value): adjustment = subtotal * sign * value / 100
-
-        for question_response in service_selection.question_responses.all():
-            question = question_response.question
-            question_fixed = Decimal('0.00')
-
-            if question.question_type == 'yes_no':
-                if question_response.yes_no_answer is True:
-                    pricing = QuestionPricing.objects.filter(
-                        question=question, package=package
-                    ).first()
-                    if pricing and pricing.yes_pricing_type != 'ignore':
-                        if pricing.yes_pricing_type in PERCENT_OF_TOTAL:
-                            sign = 1 if pricing.yes_pricing_type == 'upcharge_percent_of_total' else -1
-                            percent_entries.append((sign, pricing.yes_value))
-                        elif pricing.yes_pricing_type == 'upcharge_percent':
-                            question_fixed += pricing.yes_value
-                        elif pricing.yes_pricing_type == 'discount_percent':
-                            question_fixed -= pricing.yes_value
-                        elif pricing.yes_pricing_type == 'fixed_price':
-                            question_fixed += pricing.yes_value
-
-            elif question.question_type in ['describe', 'quantity']:
-                for option_response in question_response.option_responses.all():
-                    pricing = OptionPricing.objects.filter(
-                        option=option_response.option, package=package
-                    ).first()
-                    if not pricing or pricing.pricing_type == 'ignore':
-                        continue
-                    if pricing.pricing_type in PERCENT_OF_TOTAL:
-                        sign = 1 if pricing.pricing_type == 'upcharge_percent_of_total' else -1
-                        percent_entries.append((sign, pricing.value))
-                        continue
-                    if question.question_type == 'quantity':
-                        if pricing.pricing_type == 'discount_percent':
-                            question_fixed -= pricing.value * option_response.quantity
-                        elif pricing.pricing_type == 'upcharge_percent':
-                            question_fixed += pricing.value * option_response.quantity
-                        elif pricing.pricing_type == 'per_quantity':
-                            question_fixed += pricing.value * option_response.quantity
-                        elif pricing.pricing_type == 'fixed_price':
-                            question_fixed += pricing.value * option_response.quantity
-                    elif question.question_type == 'describe':
-                        if pricing.pricing_type == 'per_quantity':
-                            question_fixed += pricing.value * option_response.quantity
-                        elif pricing.pricing_type == 'upcharge_percent':
-                            question_fixed += pricing.value
-                        elif pricing.pricing_type == 'discount_percent':
-                            question_fixed -= pricing.value
-                        elif pricing.pricing_type == 'fixed_price':
-                            question_fixed += pricing.value
-
-            elif question.question_type == 'multiple_yes_no':
-                for sub_response in question_response.sub_question_responses.all():
-                    if sub_response.answer is not True:
-                        continue
-                    pricing = SubQuestionPricing.objects.filter(
-                        sub_question=sub_response.sub_question, package=package
-                    ).first()
-                    if not pricing or pricing.yes_pricing_type == 'ignore':
-                        continue
-                    if pricing.yes_pricing_type in PERCENT_OF_TOTAL:
-                        sign = 1 if pricing.yes_pricing_type == 'upcharge_percent_of_total' else -1
-                        percent_entries.append((sign, pricing.yes_value))
-                    elif pricing.yes_pricing_type == 'upcharge_percent':
-                        question_fixed += pricing.yes_value
-                    elif pricing.yes_pricing_type == 'discount_percent':
-                        question_fixed -= pricing.yes_value
-                    elif pricing.yes_pricing_type == 'fixed_price':
-                        question_fixed += pricing.yes_value
-
-            fixed_sum += question_fixed
-
-        # Subtotal = base + sqft + surcharge + all fixed adjustments
-        subtotal = base_price + sqft_price + surcharge_amount + fixed_sum
-        percent_sum = Decimal('0.00')
-        for sign, value in percent_entries:
-            percent_sum += subtotal * (Decimal(sign) * value / Decimal('100'))
-
-        return fixed_sum + percent_sum
+        return compute_package_question_adjustments(
+            service_selection, package, base_price, sqft_price, surcharge_amount
+        )['total']
 
 
     def _is_conditional_question_condition_met(self, question_response, service_selection):

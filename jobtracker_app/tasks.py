@@ -17,6 +17,7 @@ from .helpers import (
     trip_surcharge_amount_for_job,
     update_contact,
 )
+from .ghl_contact_link import ensure_job_ghl_contact
 from .models import Job
 
 
@@ -355,6 +356,27 @@ def send_job_completion_webhook(job_id):
                 "error": f"Location ID {location_id} does not match required location"
             }
 
+        # --------------------------------------------------
+        # Resolve GHL contact id (verified in GHL; relinks by email/phone when missing)
+        # --------------------------------------------------
+        from accounts.models import Contact as _Contact
+
+        ghl_contact_id, contact_message = ensure_job_ghl_contact(job)
+        print(f"👤 GHL contact check: {contact_message}")
+        if not ghl_contact_id:
+            print("❌ No GHL contact for this job — webhook not sent")
+            return {
+                "error": (
+                    f"Customer not found in GHL ({contact_message}); "
+                    f"link the job to a GHL contact and complete it again"
+                )
+            }
+        contact = (
+            _Contact.objects.filter(contact_id=ghl_contact_id).first()
+            or job.contact
+            or (job.submission.contact if job.submission else None)
+        )
+
         # This location creates GHL invoices via workorder webhook, not handle_completed_job_invoice.
         # Apply wallet credit here so the payload includes a $25 (etc) fixed discount.
         job = _apply_referral_credit_for_invoice(job)
@@ -388,54 +410,8 @@ def send_job_completion_webhook(job_id):
             selected_services.append(trip_line)
             print(f"   ➕ Added trip surcharge line: {trip_line}")
 
-        # --------------------------------------------------
-        # Resolve GHL contact id
-        # --------------------------------------------------
-        from accounts.models import Contact as _Contact
-
-        contact = None
-        ghl_contact_id = (job.ghl_contact_id or "").strip()
-        if not ghl_contact_id and job.contact:
-            ghl_contact_id = (job.contact.contact_id or "").strip()
-        if not ghl_contact_id and job.submission and job.submission.contact:
-            ghl_contact_id = (job.submission.contact.contact_id or "").strip()
-
-        # If we have a ghl_contact_id but no local Contact matches it, the contact was
-        # deleted and likely recreated in GHL with a new ID. Search by email to refresh.
-        if ghl_contact_id:
-            contact = _Contact.objects.filter(contact_id=ghl_contact_id).first()
-            if not contact and job.customer_email:
-                fresh_contact = (
-                    _Contact.objects.filter(email=job.customer_email)
-                    .exclude(contact_id__isnull=True)
-                    .exclude(contact_id="")
-                    .first()
-                )
-                if fresh_contact:
-                    print(
-                        f"🔄 Stale ghl_contact_id {ghl_contact_id} — refreshing to "
-                        f"{fresh_contact.contact_id} (found by customer_email)"
-                    )
-                    contact = fresh_contact
-                    ghl_contact_id = fresh_contact.contact_id
-                    Job.objects.filter(id=job_id).update(
-                        ghl_contact_id=ghl_contact_id,
-                        contact=fresh_contact,
-                    )
-                else:
-                    print(
-                        f"⚠️ Stale ghl_contact_id {ghl_contact_id} and no replacement "
-                        f"contact found by email — will send stale ID"
-                    )
-        if not contact and job.contact:
-            contact = job.contact
-        if not contact and job.submission and job.submission.contact:
-            contact = job.submission.contact
-
         if ghl_contact_id:
             print(f"👤 GHL contact ID resolved: {ghl_contact_id}")
-        else:
-            print("⚠️ No GHL contact ID found on job, linked contact, or submission")
 
         # --------------------------------------------------
         # Resolve customer email (job field may be empty while Contact has email)
@@ -532,6 +508,8 @@ def send_job_completion_webhook(job_id):
             
             # Extract invoice URL/ID from response
             invoice_url = None
+            response_data = {}
+            invoice_recorded = False
             try:
                 response_data = response.json() if response.content else {}
                 print(f"📋 Webhook response data: {response_data}")
@@ -548,18 +526,28 @@ def send_job_completion_webhook(job_id):
                         invoice_url=invoice_url,
                     )
                     _finalize_referral_credit_for_invoice(job, ghl_invoice_id)
+                    invoice_recorded = True
                     print(
                         f"✅ Invoice saved to job {job_id}: "
                         f"ghl_invoice_id={ghl_invoice_id}, invoice_url={invoice_url}"
                     )
                 elif invoice_url:
                     Job.objects.filter(id=job_id).update(invoice_url=invoice_url)
+                    invoice_recorded = True
                     print(f"✅ Invoice URL saved to job {job_id}: {invoice_url}")
                 else:
                     print("⚠️ No invoice ID/URL found in webhook response")
             except Exception as e:
                 print(f"⚠️ Error extracting invoice URL from response: {str(e)}")
-            
+
+            if not invoice_recorded:
+                print("❌ Webhook returned no invoice — job left unprocessed so it can be retried")
+                return {
+                    "error": "Webhook returned no invoice",
+                    "status_code": response.status_code,
+                    "response": response_data,
+                }
+
             Job.objects.filter(id=job_id).update(completion_processed=True)
             print("✅ Job marked as completion_processed=True")
 
