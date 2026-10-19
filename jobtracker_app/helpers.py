@@ -254,7 +254,8 @@ def build_invoice_payload_from_job(job):
     manual_discount = Decimal(getattr(job, "manual_discount_amount", 0) or 0)
     referral_discount = Decimal(getattr(job, "effective_referral_discount", 0) or 0)
     referral_credit = Decimal(getattr(job, "referral_credit_amount", 0) or 0)
-    total_reduction = manual_discount + referral_discount + referral_credit
+    deposit = Decimal(getattr(job, "deposit_applied", 0) or 0)
+    total_reduction = manual_discount + referral_discount + referral_credit + deposit
 
     # Label the discount so the invoice breakdown is clear when GHL shows it.
     discount_label_parts = []
@@ -264,6 +265,8 @@ def build_invoice_payload_from_job(job):
         discount_label_parts.append(f"Referral Discount ${float(referral_discount):.2f}")
     if referral_credit > 0:
         discount_label_parts.append(f"Referral Credit ${float(referral_credit):.2f}")
+    if deposit > 0:
+        discount_label_parts.append(f"Deposit Received ${float(deposit):.2f}")
 
     contact_email = job.customer_email
     contact_name = job.customer_name

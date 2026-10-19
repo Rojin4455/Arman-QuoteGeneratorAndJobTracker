@@ -458,7 +458,8 @@ def send_job_completion_webhook(job_id):
         manual_discount = Decimal(getattr(job, "manual_discount_amount", 0) or 0)
         referral_discount = Decimal(getattr(job, "effective_referral_discount", 0) or 0)
         referral_credit = Decimal(getattr(job, "referral_credit_amount", 0) or 0)
-        total_reduction = manual_discount + referral_discount + referral_credit
+        deposit = Decimal(getattr(job, "deposit_applied", 0) or 0)
+        total_reduction = manual_discount + referral_discount + referral_credit + deposit
         if total_reduction > Decimal("0.00"):
             payload["discount"] = {
                 "value": float(total_reduction),

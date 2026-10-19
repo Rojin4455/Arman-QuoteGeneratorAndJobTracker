@@ -157,6 +157,21 @@ class Job(models.Model):
         help_text='Discount amount in dollars, or percentage (e.g. 10 for 10%%)',
     )
 
+    # Deposit collected before the job is completed (outside the app / GHL).
+    # Deducted from the invoice at completion; never reduces total_price, so payroll is unaffected.
+    deposit_amount = models.DecimalField(
+        max_digits=12,
+        decimal_places=2,
+        default=Decimal('0.00'),
+        help_text='Deposit already received for this job (dollars). Deducted from the invoice at completion.',
+    )
+    deposit_note = models.CharField(
+        max_length=255,
+        blank=True,
+        null=True,
+        help_text='Deposit date, method or reference (e.g. "Zelle 10/19 ref 123").',
+    )
+
     # Customer referral integration (separate from the generic admin discount above)
     referral_attribution = models.ForeignKey(
         'referral_app.ReferralAttribution',
@@ -269,6 +284,17 @@ class Job(models.Model):
             - (self.referral_credit_amount or Decimal('0.00'))
         )
         return max(Decimal('0.00'), reduced)
+
+    @property
+    def deposit_applied(self):
+        """Deposit deducted from the invoice; capped so the balance never goes negative."""
+        deposit = self.deposit_amount or Decimal('0.00')
+        return max(Decimal('0.00'), min(deposit, self.revised_total))
+
+    @property
+    def balance_due(self):
+        """Amount the customer still owes after reductions and deposit."""
+        return self.revised_total - self.deposit_applied
 
     def __str__(self):
         return self.title or f"Job {self.id}"

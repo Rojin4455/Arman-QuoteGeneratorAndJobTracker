@@ -437,6 +437,7 @@ class JobSerializer(serializers.ModelSerializer):
         fields = [
             'id', 'submission', 'title', 'description', 'priority', 'duration_hours', 'scheduled_at',
             'total_price', 'total_surcharge', 'discount_type', 'discount_value', 'revised_total',
+            'deposit_amount', 'deposit_note', 'balance_due',
             'contact', 'address', 'contact_id', 'address_id', 'contact_details', 'address_details',  # New fields
             'customer_name', 'customer_phone', 'customer_email', 'customer_address', 'ghl_contact_id',
             'quoted_by', 'quoted_by_name', 'created_by', 'created_by_email',
@@ -448,7 +449,7 @@ class JobSerializer(serializers.ModelSerializer):
             'apply_referral_discount', 'referral_discount_amount', 'referral_credit_amount', 'referral_info',
         ]
         read_only_fields = [
-            'id', 'contact', 'address', 'revised_total', 'account_timezone',
+            'id', 'contact', 'address', 'revised_total', 'balance_due', 'account_timezone',
             'invoice_id', 'invoice_status', 'invoice_url',
             'created_at', 'updated_at',
             'referral_discount_amount', 'referral_credit_amount', 'referral_info',
@@ -843,6 +844,9 @@ class JobSeriesCreateSerializer(serializers.Serializer):
     duration_hours = serializers.DecimalField(max_digits=5, decimal_places=2)
     scheduled_at = serializers.DateTimeField()
     total_price = serializers.DecimalField(max_digits=12, decimal_places=2)
+    # Deposit is a one-time payment: applied to the first job of the series only
+    deposit_amount = serializers.DecimalField(max_digits=12, decimal_places=2, required=False, min_value=0)
+    deposit_note = serializers.CharField(max_length=255, required=False, allow_blank=True, allow_null=True)
     # Contact and Address fields (optional - if provided, customer info will be auto-populated)
     contact_id = serializers.IntegerField(required=False, allow_null=True, help_text="ID of Contact model (optional - if provided, customer info will be auto-populated)")
     address_id = serializers.IntegerField(required=False, allow_null=True, help_text="ID of Address model (optional - if provided, customer_address will be auto-populated)")
@@ -879,6 +883,11 @@ class JobSeriesCreateSerializer(serializers.Serializer):
         contact_id = validated.pop('contact_id', None)
         address_id = validated.pop('address_id', None)
         
+        # Deposit goes on the first occurrence only, not on every job in the series
+        deposit_data = {
+            k: validated.pop(k) for k in ('deposit_amount', 'deposit_note') if k in validated
+        }
+
         # Prepare base job data with contact/address info
         job_data = validated.copy()
         
@@ -962,6 +971,7 @@ class JobSeriesCreateSerializer(serializers.Serializer):
                 series_id=series,
                 series_sequence=idx,
                 account=account,
+                **(deposit_data if idx == 1 else {}),
                 **({ 'quoted_by_id': qb_id } if qb_id else {})
             )
             for it in items:
@@ -1046,6 +1056,8 @@ class JobConvertToSeriesSerializer(serializers.Serializer):
         allow_null=True,
     )
     discount_value = serializers.DecimalField(max_digits=12, decimal_places=2, required=False, allow_null=True)
+    deposit_amount = serializers.DecimalField(max_digits=12, decimal_places=2, required=False, min_value=0)
+    deposit_note = serializers.CharField(max_length=255, required=False, allow_blank=True, allow_null=True)
     contact_id = serializers.IntegerField(required=False, allow_null=True)
     address_id = serializers.IntegerField(required=False, allow_null=True)
     customer_name = serializers.CharField(required=False, allow_blank=True, allow_null=True)
@@ -1259,7 +1271,7 @@ class JobConvertToSeriesSerializer(serializers.Serializer):
     def _apply_job_updates(self, source_job, contact=None, address=None):
         scalar_fields = [
             'title', 'description', 'priority', 'duration_hours', 'total_price',
-            'total_surcharge', 'discount_type', 'discount_value', 'customer_name',
+            'total_surcharge', 'discount_type', 'discount_value', 'deposit_amount', 'deposit_note', 'customer_name',
             'customer_phone', 'customer_email', 'customer_address', 'ghl_contact_id',
             'notes', 'payment_method',
         ]
