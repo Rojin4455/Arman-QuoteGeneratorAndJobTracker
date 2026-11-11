@@ -694,7 +694,10 @@ class JobSerializer(serializers.ModelSerializer):
         })
         will_sync_linked_appointment = (
             Appointment.objects.filter(job_id=instance.id).exists()
-            and bool(appointment_sync_fields & set(validated_data.keys()))
+            and (
+                bool(appointment_sync_fields & set(validated_data.keys()))
+                or assignments_data is not None
+            )
         )
 
         for attr, value in validated_data.items():

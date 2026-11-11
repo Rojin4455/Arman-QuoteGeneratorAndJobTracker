@@ -2,7 +2,7 @@
 Shared logic for checking if a Job has a matching Appointment (by slot/time, calendar, location, assignee).
 Uses the same manual check as slot_reserved_info: no reliance on Job.appointment relation.
 """
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone as dt_timezone
 
 import pytz
 from django.db.models import Q
@@ -344,8 +344,17 @@ def find_assignee_conflicts(*, job, scheduled_at, duration_hours, users, ghl_con
         appt_ghl = appt.ghl_contact_id or (appt.contact.contact_id if appt.contact_id else None)
         if ghl_contact_id and appt_ghl == ghl_contact_id:
             continue
+        # Recurring occurrence ids are "<id>_<startMs>_<durationSec>"; the DB row's
+        # times can be stale, so trust the id for the real occurrence time.
+        a_start, a_end = appt.start_time, appt.end_time
+        parts = (appt.ghl_appointment_id or '').split('_')
+        if len(parts) == 3 and parts[1].isdigit() and parts[2].isdigit():
+            a_start = datetime.fromtimestamp(int(parts[1]) / 1000, tz=dt_timezone.utc)
+            a_end = a_start + timedelta(seconds=int(parts[2]))
+            if not (a_start < end_utc and a_end > start_utc):
+                continue
         messages.append(
             f'{user_name(appt.assigned_user)} already has appointment "{appt.title or "Untitled"}" '
-            f'({fmt(appt.start_time, appt.end_time)}).'
+            f'({fmt(a_start, a_end)}).'
         )
     return messages

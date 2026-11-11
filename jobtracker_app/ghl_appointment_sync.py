@@ -706,9 +706,37 @@ def sync_linked_appointment_from_job(job) -> Tuple[bool, Optional[str]]:
     new_title = job.title or "Job Appointment"
     new_address = job.customer_address or "Zoom"
 
+    # Technician changes: re-point an appointment whose technician is no longer on the job
+    # to an assignee (with a GHL user id) that has no linked appointment yet. Users are
+    # compared by GHL user id because the same person can exist as several User rows.
+    def _appt_ghl_user(a):
+        return (a.assigned_user.ghl_user_id if a.assigned_user_id else None) or a.ghl_assigned_user_id
+
+    try:
+        current_users = [
+            a.user for a in job.assignments.select_related('user')
+            if a.user and a.user.ghl_user_id
+        ]
+        current_ghl_ids = {u.ghl_user_id for u in current_users}
+        covered = {_appt_ghl_user(a) for a in appointments}
+        free_users = [u for u in current_users if u.ghl_user_id not in covered]
+        orphans = [
+            a for a in appointments
+            if _appt_ghl_user(a) and _appt_ghl_user(a) not in current_ghl_ids
+        ]
+    except Exception as exc:  # never block a job save on the technician check
+        print(f"⚠️ [SYNC JOB APPOINTMENT] Skipping technician check for job {job.id}: {exc}")
+        free_users, orphans = [], []
+    reassign = {}
+    # Only reassign when it is unambiguous: one orphan and one free assignee.
+    if len(orphans) == 1 and len(free_users) == 1:
+        reassign[orphans[0].pk] = free_users[0]
+
     updates = []
     for appt in appointments:
         changed_fields = {}
+        if appt.pk in reassign:
+            changed_fields["assigned_user"] = reassign[appt.pk]
         if start_time_utc and appt.start_time != start_time_utc:
             changed_fields["start_time"] = start_time_utc
         if end_time_utc and appt.end_time != end_time_utc:
@@ -726,6 +754,12 @@ def sync_linked_appointment_from_job(job) -> Tuple[bool, Optional[str]]:
     for appt, changed_fields in updates:
         if appt.ghl_appointment_id and not str(appt.ghl_appointment_id).startswith("local_"):
             ok, err = update_appointment_in_ghl(appt, changed_fields=changed_fields)
+            if not ok and set(changed_fields) == {"assigned_user"}:
+                # Technician-only change GHL refused (e.g. user not on the calendar's team):
+                # don't block saving the job; leave the appointment as is.
+                print(f"⚠️ [SYNC JOB APPOINTMENT] Could not reassign appointment {appt.id} in GHL: {err}")
+                changed_fields.pop("assigned_user")
+                continue
             if not ok and _is_stale_ghl_event_error(err):
                 ok, err = _recreate_appointment_in_ghl(appt, changed_fields=changed_fields)
             if not ok:
@@ -738,6 +772,9 @@ def sync_linked_appointment_from_job(job) -> Tuple[bool, Optional[str]]:
             appt.end_time = end_time_utc
         appt.title = new_title
         appt.address = new_address
+        if _changed_fields.get("assigned_user"):
+            appt.assigned_user = _changed_fields["assigned_user"]
+            appt.ghl_assigned_user_id = _changed_fields["assigned_user"].ghl_user_id
         if location_id:
             appt.location_id = location_id
         if credentials:
