@@ -218,13 +218,19 @@ def jobs_in_recurring_series_queryset(job, account):
         return Job.objects.filter(account=account, series_id=job.series_id)
 
     # Legacy/imported recurring jobs may not have series_id — match sibling occurrences.
+    # Siblings are titled "<base> (2)", "<base> (3)"... and may lack repeat fields,
+    # so match on the base title (trailing " (N)" stripped), not exact title/repeat.
+    import re
+    base_title = re.sub(r'\s*\(\d+\)\s*$', '', job.title or '')
     qs = Job.objects.filter(
         account=account,
         job_type='recurring',
-        title=job.title,
-        repeat_every=job.repeat_every,
-        repeat_unit=job.repeat_unit,
+        title__regex=r'^' + re.escape(base_title) + r'( \(\d+\))?$',
     )
+    # Same customer + same base title could still be two series at different
+    # addresses; keep them apart.
+    if job.customer_address:
+        qs = qs.filter(customer_address=job.customer_address)
     if job.contact_id:
         return qs.filter(contact_id=job.contact_id)
     if job.ghl_contact_id:

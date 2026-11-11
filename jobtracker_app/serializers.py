@@ -776,9 +776,21 @@ class JobSerializer(serializers.ModelSerializer):
         if status != 'confirmed':
             return
         previous_status = instance.status if instance else None
-        affecting = {'status', 'scheduled_at', 'duration_hours', 'assignments'}
-        if instance is not None and previous_status == 'confirmed' and not (affecting & set(data.keys())):
-            return
+        is_confirming = previous_status != 'confirmed'
+        if instance is not None and not is_confirming:
+            # Already confirmed: only re-check when time, duration or technicians really changed.
+            changed = False
+            if 'scheduled_at' in data and data['scheduled_at'] != instance.scheduled_at:
+                changed = True
+            if 'duration_hours' in data and data['duration_hours'] != instance.duration_hours:
+                changed = True
+            if 'assignments' in data:
+                new_ids = {getattr(a.get('user'), 'pk', a.get('user')) for a in (data.get('assignments') or [])}
+                old_ids = set(instance.assignments.values_list('user_id', flat=True))
+                if new_ids != old_ids:
+                    changed = True
+            if not changed:
+                return
 
         if 'assignments' in data:
             users = [a.get('user') for a in (data.get('assignments') or [])]
@@ -806,7 +818,8 @@ class JobSerializer(serializers.ModelSerializer):
         )
         if conflicts:
             raise serializers.ValidationError({
-                'status': 'Cannot confirm this job: ' + ' '.join(conflicts)
+                'status': ('Cannot confirm this job: ' if is_confirming else 'Cannot save this job: ')
+                          + ' '.join(conflicts)
                           + ' Reassign or reschedule one of the jobs first.'
             })
 
