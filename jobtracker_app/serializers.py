@@ -759,8 +759,56 @@ class JobSerializer(serializers.ModelSerializer):
                     'status': 'Cannot change status of a completed job. '
                              'Once a job is completed, its status cannot be modified.'
                 })
-        
+
+        self._validate_no_assignee_conflict(data)
         return data
+
+    def _validate_no_assignee_conflict(self, data):
+        """
+        Block confirming (or moving/reassigning a confirmed) job when an assigned
+        technician is already booked at an overlapping time. Prevents a calendar
+        appointment from being attached to / mixed up with another customer's.
+        """
+        from .job_appointment_utils import find_assignee_conflicts, job_contact_ghl_id
+
+        instance = self.instance
+        status = data.get('status', instance.status if instance else None)
+        if status != 'confirmed':
+            return
+        previous_status = instance.status if instance else None
+        affecting = {'status', 'scheduled_at', 'duration_hours', 'assignments'}
+        if instance is not None and previous_status == 'confirmed' and not (affecting & set(data.keys())):
+            return
+
+        if 'assignments' in data:
+            users = [a.get('user') for a in (data.get('assignments') or [])]
+        elif instance is not None:
+            users = [a.user for a in instance.assignments.select_related('user')]
+        else:
+            users = []
+        scheduled_at = data.get('scheduled_at', instance.scheduled_at if instance else None)
+        duration_hours = data.get('duration_hours', instance.duration_hours if instance else None)
+
+        ghl_contact_id = data.get('ghl_contact_id')
+        contact_pk = (self.initial_data or {}).get('contact_id')
+        if contact_pk:
+            c = Contact.objects.filter(id=contact_pk).first()
+            ghl_contact_id = c.contact_id if c else ghl_contact_id
+        if not ghl_contact_id and instance is not None:
+            ghl_contact_id = job_contact_ghl_id(instance)
+
+        conflicts = find_assignee_conflicts(
+            job=instance,
+            scheduled_at=scheduled_at,
+            duration_hours=duration_hours,
+            users=users,
+            ghl_contact_id=ghl_contact_id,
+        )
+        if conflicts:
+            raise serializers.ValidationError({
+                'status': 'Cannot confirm this job: ' + ' '.join(conflicts)
+                          + ' Reassign or reschedule one of the jobs first.'
+            })
 
     # ===== recurrence helpers =====
     def _rebuild_occurrences(self, job: Job):

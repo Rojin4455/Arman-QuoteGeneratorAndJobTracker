@@ -492,12 +492,15 @@ def _link_existing_matching_appointments_to_job(job) -> None:
         return
     start_time_utc, end_time_utc, _credentials, location_id = window
 
+    from jobtracker_app.job_appointment_utils import appointment_contact_q
+
+    # Contact must match: same slot + technician alone does not mean same customer.
     base_qs = Appointment.objects.filter(
         start_time=start_time_utc,
         end_time=end_time_utc,
         calendar__name="Reccuring Service Calendar",
         location_id=location_id,
-    )
+    ).filter(appointment_contact_q(job))
     for assignment in job.assignments.select_related('user').all():
         if not assignment.user:
             continue
@@ -681,7 +684,12 @@ def sync_linked_appointment_from_job(job) -> Tuple[bool, Optional[str]]:
     When a job's schedule or details change, PUT to GHL first, then update every linked Appointment row.
     Returns (success, error_message). On failure, local appointment rows are left unchanged.
     """
-    appointments = list(Appointment.objects.filter(job_id=job.id))
+    from jobtracker_app.job_appointment_utils import appointment_belongs_to_job_contact
+
+    appointments = [
+        a for a in Appointment.objects.filter(job_id=job.id).select_related('contact')
+        if appointment_belongs_to_job_contact(a, job)
+    ]
     if not appointments:
         return True, None
 
