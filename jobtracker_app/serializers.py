@@ -774,6 +774,11 @@ class JobSerializer(serializers.ModelSerializer):
         """
         from .job_appointment_utils import find_assignee_conflicts, job_contact_ghl_id
 
+        # Staff can knowingly override the technician-conflict warning ("Confirm anyway").
+        force = (self.initial_data or {}).get('force_confirm')
+        if force is True or str(force).lower() == 'true':
+            return
+
         instance = self.instance
         status = data.get('status', instance.status if instance else None)
         if status != 'confirmed':

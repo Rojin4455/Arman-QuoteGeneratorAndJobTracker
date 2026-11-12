@@ -256,7 +256,9 @@ def get_slot_reserved_info_for_job(job):
 
 
 # Job statuses that occupy a technician's time.
-_BUSY_JOB_STATUSES = ('confirmed', 'service_due', 'on_the_way', 'in_progress')
+# Only jobs that actually hold the technician's time. 'service_due' is just "due for
+# service" (not a booked visit) and pending/completed/cancelled don't block either.
+_BUSY_JOB_STATUSES = ('confirmed', 'on_the_way', 'in_progress')
 _INACTIVE_APPOINTMENT_STATUSES = ('cancelled', 'invalid')
 
 
@@ -365,7 +367,9 @@ def find_assignee_conflicts(*, job, scheduled_at, duration_hours, users, ghl_con
         assigned_user__in=users,
         start_time__lt=end_utc,
         end_time__gt=start_utc,
-    ).exclude(appointment_status__in=_INACTIVE_APPOINTMENT_STATUSES).select_related('assigned_user')
+    ).exclude(appointment_status__in=_INACTIVE_APPOINTMENT_STATUSES).exclude(
+        job__status__in=('completed', 'cancelled')  # work already done / cancelled
+    ).select_related('assigned_user')
     if job is not None and getattr(job, 'pk', None):
         appt_qs = appt_qs.exclude(job_id=job.pk)
     for appt in appt_qs:
