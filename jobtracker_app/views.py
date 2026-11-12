@@ -225,6 +225,7 @@ def jobs_in_recurring_series_queryset(job, account):
     qs = Job.objects.filter(
         account=account,
         job_type='recurring',
+        series_id__isnull=True,  # jobs that already have a series_id belong to their own series
         title__regex=r'^' + re.escape(base_title) + r'( \(\d+\))?$',
     )
     # Same customer + same base title could still be two series at different

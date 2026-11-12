@@ -260,6 +260,36 @@ _BUSY_JOB_STATUSES = ('confirmed', 'service_due', 'on_the_way', 'in_progress')
 _INACTIVE_APPOINTMENT_STATUSES = ('cancelled', 'invalid')
 
 
+def _ghl_occurrence_is_inactive(appt):
+    """True if GHL says this appointment is cancelled/deleted; also fixes our stale row."""
+    try:
+        import requests
+        from jobtracker_app.ghl_appointment_sync import (
+            get_ghl_headers, get_ghl_credentials_for_appointment,
+        )
+        creds = get_ghl_credentials_for_appointment(appt)
+        if not creds:
+            return False
+        resp = requests.get(
+            f'https://services.leadconnectorhq.com/calendars/events/appointments/{appt.ghl_appointment_id}',
+            headers=get_ghl_headers(creds.access_token),
+            timeout=8,
+        )
+        if resp.status_code == 404:
+            status = 'cancelled'
+        elif resp.ok:
+            data = resp.json().get('appointment') or {}
+            status = (data.get('appointmentStatus') or data.get('state') or '').lower()
+        else:
+            return False
+        if status in ('cancelled', 'canceled', 'invalid', 'deleted'):
+            Appointment.objects.filter(pk=appt.pk).update(appointment_status='cancelled')
+            return True
+    except Exception as exc:
+        print(f"⚠️ [CONFLICT CHECK] Could not verify GHL status for appointment {appt.pk}: {exc}")
+    return False
+
+
 def find_assignee_conflicts(*, job, scheduled_at, duration_hours, users, ghl_contact_id=None):
     """
     Return human-readable messages for technicians in `users` who are already booked
@@ -352,6 +382,10 @@ def find_assignee_conflicts(*, job, scheduled_at, duration_hours, users, ghl_con
             a_start = datetime.fromtimestamp(int(parts[1]) / 1000, tz=dt_timezone.utc)
             a_end = a_start + timedelta(seconds=int(parts[2]))
             if not (a_start < end_utc and a_end > start_utc):
+                continue
+            # Recurring occurrences cancelled/deleted in GHL often never reach our DB,
+            # so confirm the live status. On any error, keep it as a conflict (safe side).
+            if _ghl_occurrence_is_inactive(appt):
                 continue
         messages.append(
             f'{user_name(appt.assigned_user)} already has appointment "{appt.title or "Untitled"}" '

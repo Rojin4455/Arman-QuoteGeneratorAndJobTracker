@@ -1339,6 +1339,52 @@ def update_all_users_password(password: str = "adminuser@246!") -> Dict[str, int
     }
 
 
+def _apply_series_webhook_to_occurrences(ghl_appointment_id, appointment_data, start_time):
+    """
+    GHL sends recurring-series changes under the series base id, while we store one row
+    per occurrence ("<id>_<startMs>_<durationSec>"). Apply the change to those rows with
+    bulk updates (no GHL calls). Cancelled/invalid: occurrences from the webhook start
+    onward. Other edits: future occurrences only. Never raises.
+    """
+    try:
+        if "_" in str(ghl_appointment_id):
+            return 0
+        from django.utils import timezone as _tz
+        from datetime import timedelta as _td
+
+        occ = Appointment.objects.filter(ghl_appointment_id__startswith=f"{ghl_appointment_id}_")
+        if not occ.exists():
+            return 0
+
+        status = (appointment_data.get("appointmentStatus") or "").lower()
+        if status in ("cancelled", "canceled", "invalid"):
+            since = (start_time - _td(minutes=1)) if start_time else _tz.now()
+            return occ.filter(start_time__gte=since).exclude(
+                appointment_status__in=["cancelled", "invalid"]
+            ).update(appointment_status="cancelled")
+
+        updates = {}
+        if status:
+            updates["appointment_status"] = status
+        for src, field in (("title", "title"), ("address", "address"), ("notes", "notes")):
+            if appointment_data.get(src) is not None:
+                updates[field] = appointment_data[src]
+        gid = appointment_data.get("assignedUserId")
+        if gid:
+            updates["ghl_assigned_user_id"] = gid
+            user = User.objects.filter(ghl_user_id=gid).first()
+            if user:
+                updates["assigned_user"] = user
+        if not updates:
+            return 0
+        return occ.filter(start_time__gte=_tz.now()).exclude(
+            appointment_status__in=["cancelled", "invalid"]
+        ).update(**updates)
+    except Exception as exc:
+        print(f"⚠️ [WEBHOOK] Series update failed for {ghl_appointment_id}: {exc}")
+        return 0
+
+
 def create_or_update_appointment_from_ghl(
     appointment_data: Dict[str, Any],
     location_id: str = None,
@@ -1380,6 +1426,9 @@ def create_or_update_appointment_from_ghl(
     # Parse datetime fields
     start_time = parse_datetime(appointment_data.get("startTime")) if appointment_data.get("startTime") else None
     end_time = parse_datetime(appointment_data.get("endTime")) if appointment_data.get("endTime") else None
+
+    # Series-level change from GHL: keep our per-occurrence rows in step.
+    _apply_series_webhook_to_occurrences(ghl_appointment_id, appointment_data, start_time)
     date_added = parse_datetime(appointment_data.get("dateAdded")) if appointment_data.get("dateAdded") else None
     date_updated = parse_datetime(appointment_data.get("dateUpdated")) if appointment_data.get("dateUpdated") else None
     
