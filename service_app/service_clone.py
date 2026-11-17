@@ -1,5 +1,5 @@
 """
-Clone services (structure only, no pricing rules) from one GHL location account to another.
+Clone services between GHL accounts (structure only by default) or duplicate within one account (with pricing).
 
 Reads only from the source account; creates new rows on the destination account.
 Does not copy: QuestionPricing, SubQuestionPricing, OptionPricing, ServicePackageSizeMapping.
@@ -14,28 +14,45 @@ from django.db import transaction
 from accounts.models import GHLAuthCredentials
 from service_app.models import (
     Feature,
+    OptionPricing,
     Package,
     PackageFeature,
     Question,
     QuestionOption,
+    QuestionPricing,
     Service,
+    ServicePackageSizeMapping,
     ServiceSettings,
     SubQuestion,
+    SubQuestionPricing,
 )
 
 
-def copy_service_tree(old_service: Service, dest_account: GHLAuthCredentials) -> Service:
-    """Clone one service and related non-pricing structure onto ``dest_account``."""
+def copy_service_tree(
+    old_service: Service,
+    dest_account: GHLAuthCredentials,
+    *,
+    new_name: str | None = None,
+    include_pricing: bool = False,
+) -> Service:
+    """
+    Clone one service and related structure onto ``dest_account``.
+
+    With ``include_pricing=True`` also copies Service.price, Package.base_price,
+    question/sub-question/option pricing rules and (same account only) size mappings,
+    so the copy calculates identically to the original.
+    """
     feat_map: dict = {}
     pkg_map: dict = {}
     q_map: dict = {}
     opt_map: dict = {}
+    sq_map: dict = {}
 
     new_svc = Service.objects.create(
         account=dest_account,
-        name=old_service.name,
+        name=new_name or old_service.name,
         description=old_service.description,
-        price=Decimal("0.00"),
+        price=old_service.price if include_pricing else Decimal("0.00"),
         hours=old_service.hours,
         is_active=old_service.is_active,
         order=old_service.order,
@@ -70,7 +87,7 @@ def copy_service_tree(old_service: Service, dest_account: GHLAuthCredentials) ->
         pkg_map[p.pk] = Package.objects.create(
             service=new_svc,
             name=p.name,
-            base_price=Decimal("0.00"),
+            base_price=p.base_price if include_pricing else Decimal("0.00"),
             order=p.order,
             is_active=p.is_active,
         )
@@ -139,14 +156,57 @@ def copy_service_tree(old_service: Service, dest_account: GHLAuthCredentials) ->
     for oq in old_questions:
         nq = q_map[oq.pk]
         for sq in oq.sub_questions.all().order_by("order", "sub_question_text"):
-            SubQuestion.objects.create(
+            sq_map[sq.pk] = SubQuestion.objects.create(
                 parent_question=nq,
                 sub_question_text=sq.sub_question_text,
                 order=sq.order,
                 is_active=sq.is_active,
             )
 
+    if include_pricing:
+        _copy_pricing(old_service, dest_account, pkg_map, q_map, opt_map, sq_map)
+
     return new_svc
+
+
+def _copy_pricing(old_service, dest_account, pkg_map, q_map, opt_map, sq_map) -> None:
+    for r in QuestionPricing.objects.filter(question__service=old_service):
+        QuestionPricing.objects.create(
+            question=q_map[r.question_id],
+            package=pkg_map[r.package_id],
+            yes_pricing_type=r.yes_pricing_type,
+            yes_value=r.yes_value,
+        )
+    for r in SubQuestionPricing.objects.filter(sub_question__parent_question__service=old_service):
+        SubQuestionPricing.objects.create(
+            sub_question=sq_map[r.sub_question_id],
+            package=pkg_map[r.package_id],
+            yes_pricing_type=r.yes_pricing_type,
+            yes_value=r.yes_value,
+        )
+    for r in OptionPricing.objects.filter(option__question__service=old_service):
+        OptionPricing.objects.create(
+            option=opt_map[r.option_id],
+            package=pkg_map[r.package_id],
+            pricing_type=r.pricing_type,
+            value=r.value,
+        )
+    # Size ranges (GlobalSizePackage) are per account, so only reusable within the same account.
+    if old_service.account_id == getattr(dest_account, "pk", None):
+        for m in ServicePackageSizeMapping.objects.filter(service_package__service=old_service):
+            ServicePackageSizeMapping.objects.create(
+                service_package=pkg_map[m.service_package_id],
+                global_size=m.global_size,
+                price=m.price,
+            )
+
+
+def duplicate_service(service: Service, new_name: str) -> Service:
+    """Duplicate a service inside its own account, including all pricing."""
+    with transaction.atomic():
+        return copy_service_tree(
+            service, service.account, new_name=new_name, include_pricing=True
+        )
 
 
 def copy_all_services_between_locations(

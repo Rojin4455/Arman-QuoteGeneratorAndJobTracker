@@ -450,12 +450,25 @@ class CustomerSubmissionDetailSerializer(serializers.ModelSerializer):
     source_submission_id = serializers.SerializerMethodField()
     persisted_snapshot_id = serializers.SerializerMethodField()
     referral_discount = serializers.SerializerMethodField()
+    location = serializers.PrimaryKeyRelatedField(
+        queryset=Location.objects.filter(is_active=True),
+        required=False,
+        allow_null=True,
+    )
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        request = self.context.get('request')
+        account = getattr(request, 'account', None) if request else None
+        if account:
+            self.fields['location'].queryset = Location.objects.filter(is_active=True, account=account)
 
     class Meta:
         model = CustomerSubmission
         fields = [
             'id',
             'house_sqft',
+            'location',
             'status', 'total_base_price', 'total_adjustments',
             'total_surcharges', 'final_total', 'created_at','quote_surcharge_applicable',
             'expires_at', 'service_selections','additional_data','contact','address','custom_products','custom_service_total','quote_schedule',

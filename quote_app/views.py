@@ -1081,6 +1081,9 @@ class SubmitCustomServiceResponsesView(APIView):
                 submission.status = 'responses_completed'
                 submission.save(update_fields=["status"])
 
+                # Custom-only quotes skip package selection: compute surcharge + final_total here.
+                SubmitFinalQuoteView()._calculate_final_totals(submission)
+
                 # Sync with GHL contact
                 create_or_update_ghl_contact(submission)
 
@@ -1131,7 +1134,14 @@ class SubmissionDetailView(generics.RetrieveUpdateAPIView):
 
     def perform_update(self, serializer):
         assert_not_persisted_snapshot(serializer.instance)
-        serializer.save()
+        location_changed = (
+            'location' in serializer.validated_data
+            and serializer.validated_data['location'] != serializer.instance.location
+        )
+        submission = serializer.save()
+        if location_changed:
+            # Trip surcharge is derived from the quote's location: recompute totals.
+            SubmitFinalQuoteView()._calculate_final_totals(submission)
 
 # Persist immutable snapshot of the original proposal
 class PersistQuoteSnapshotView(APIView):
