@@ -736,6 +736,15 @@ class JobSerializer(serializers.ModelSerializer):
             instance.save()
             _persist_related_and_occurrences()
 
+        # Technicians changed on a confirmed job: create GHL appointments for assignees that
+        # have none yet (existing ones were re-pointed by the sync above). Idempotent.
+        if assignments_data is not None and instance.status == 'confirmed':
+            try:
+                from .ghl_appointment_sync import create_ghl_appointment_from_job
+                create_ghl_appointment_from_job(instance)
+            except Exception as exc:  # never fail the job save on appointment creation
+                print(f"⚠️ [JOB UPDATE] Could not create appointments for new assignees: {exc}")
+
         return instance
 
     def validate(self, data):

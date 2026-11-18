@@ -748,9 +748,6 @@ def sync_linked_appointment_from_job(job) -> Tuple[bool, Optional[str]]:
         if changed_fields:
             updates.append((appt, changed_fields))
 
-    if not updates:
-        return True, None
-
     for appt, changed_fields in updates:
         if appt.ghl_appointment_id and not str(appt.ghl_appointment_id).startswith("local_"):
             ok, err = update_appointment_in_ghl(appt, changed_fields=changed_fields)
@@ -775,13 +772,42 @@ def sync_linked_appointment_from_job(job) -> Tuple[bool, Optional[str]]:
         if _changed_fields.get("assigned_user"):
             appt.assigned_user = _changed_fields["assigned_user"]
             appt.ghl_assigned_user_id = _changed_fields["assigned_user"].ghl_user_id
+            appt._reassigned = True
         if location_id:
             appt.location_id = location_id
         if credentials:
             appt.account = credentials
         appt._skip_ghl_sync = True
         appt.save()
+
+    _cancel_removed_technician_appointments(orphans)
     return True, None
+
+
+def _cancel_removed_technician_appointments(orphans) -> None:
+    """Cancel (GHL + local) appointments whose technician was removed from the job and
+    which were not re-pointed to a new technician. Never blocks the job save."""
+    for appt in orphans:
+        try:
+            if appt.appointment_status == "cancelled":
+                continue
+            still_orphan = (
+                (appt.assigned_user.ghl_user_id if appt.assigned_user_id else None)
+                or appt.ghl_assigned_user_id
+            )
+            if getattr(appt, "_reassigned", False) or not still_orphan:
+                continue
+            has_real_ghl_id = appt.ghl_appointment_id and not str(appt.ghl_appointment_id).startswith("local_")
+            if has_real_ghl_id:
+                ok, err = update_appointment_in_ghl(appt, changed_fields={"appointment_status": "cancelled"})
+                if not ok:
+                    print(f"⚠️ [SYNC JOB APPOINTMENT] Could not cancel removed-technician appointment {appt.id}: {err}")
+                    continue
+            appt.appointment_status = "cancelled"
+            appt._skip_ghl_sync = True
+            appt.save(update_fields=["appointment_status", "updated_at"])
+        except Exception as exc:
+            print(f"⚠️ [SYNC JOB APPOINTMENT] Cancel failed for appointment {appt.id}: {exc}")
 
 
 def cancel_linked_appointments_from_job(job) -> Tuple[bool, Optional[str]]:
