@@ -523,6 +523,61 @@ def _link_existing_matching_appointments_to_job(job) -> None:
             )
 
 
+def _reactivate_cancelled_appointments_for_job(job) -> None:
+    """
+    A job's appointments are cancelled when it leaves the schedule (pending / on hold /
+    cancelled, or a technician is removed). When it is confirmed again, or the technician
+    is put back, re-open the same GHL event at the job's current time instead of creating
+    a duplicate. Only for technicians currently on the job that have no live appointment.
+    Best effort: failures are logged and the normal create step covers the assignee.
+    """
+    from jobtracker_app.job_appointment_utils import appointment_belongs_to_job_contact
+
+    try:
+        window = compute_job_appointment_utc_window(job)
+        if not window:
+            return
+        start_time_utc, end_time_utc, _credentials, _location_id = window
+
+        def _ghl_user(a):
+            return (a.assigned_user.ghl_user_id if a.assigned_user_id else None) or a.ghl_assigned_user_id
+
+        current_ghl_ids = {
+            a.user.ghl_user_id for a in job.assignments.select_related('user')
+            if a.user and a.user.ghl_user_id
+        }
+        linked = list(Appointment.objects.filter(job_id=job.id).select_related('assigned_user', 'contact'))
+        live_users = {_ghl_user(a) for a in linked if a.appointment_status != 'cancelled'}
+
+        for appt in linked:
+            if appt.appointment_status != 'cancelled':
+                continue
+            ghl_user = _ghl_user(appt)
+            if not ghl_user or ghl_user not in current_ghl_ids or ghl_user in live_users:
+                continue
+            if not appointment_belongs_to_job_contact(appt, job):
+                continue
+            if not appt.ghl_appointment_id or str(appt.ghl_appointment_id).startswith('local_'):
+                continue
+            ok, err = update_appointment_in_ghl(appt, changed_fields={
+                'appointment_status': 'confirmed',
+                'start_time': start_time_utc,
+                'end_time': end_time_utc,
+            })
+            if not ok:
+                print(f"⚠️ [REACTIVATE APPOINTMENT] Could not re-open appointment {appt.id} in GHL: {err}")
+                continue
+            appt.appointment_status = 'confirmed'
+            appt.start_time = start_time_utc
+            appt.end_time = end_time_utc
+            appt._skip_ghl_sync = True
+            appt.save(update_fields=['appointment_status', 'start_time', 'end_time', 'updated_at'])
+            live_users.add(ghl_user)
+            print(f"♻️ [REACTIVATE APPOINTMENT] Re-opened appointment {appt.id} for job {job.id}")
+    except Exception as exc:
+        print(f"⚠️ [REACTIVATE APPOINTMENT] Skipped for job {job.id}: {exc}")
+
+
 def create_ghl_appointment_from_job(job) -> Optional[Appointment]:
     """
     Post appointment(s) to GHL for a confirmed job and persist each created event locally.
@@ -533,6 +588,7 @@ def create_ghl_appointment_from_job(job) -> Optional[Appointment]:
     print(f"📅 [CREATE APPOINTMENT FROM JOB] Starting for job {job.id}")
 
     _link_existing_matching_appointments_to_job(job)
+    _reactivate_cancelled_appointments_for_job(job)
 
     assigned_user_ghl_ids = get_assignee_ghl_ids_without_matching_appointment(job)
     if not assigned_user_ghl_ids:
@@ -694,8 +750,11 @@ def sync_linked_appointment_from_job(job) -> Tuple[bool, Optional[str]]:
     """
     from jobtracker_app.job_appointment_utils import appointment_belongs_to_job_contact
 
+    # Cancelled appointments are not on the calendar: nothing to move or reassign in GHL.
+    # They are brought back to the job's current time if the job is confirmed again.
     appointments = [
-        a for a in Appointment.objects.filter(job_id=job.id).select_related('contact')
+        a for a in Appointment.objects.filter(job_id=job.id)
+        .exclude(appointment_status='cancelled').select_related('contact')
         if appointment_belongs_to_job_contact(a, job)
     ]
     if not appointments:
@@ -818,18 +877,49 @@ def _cancel_removed_technician_appointments(orphans) -> None:
             print(f"⚠️ [SYNC JOB APPOINTMENT] Cancel failed for appointment {appt.id}: {exc}")
 
 
+def cancel_linked_appointments_before_job_delete(job) -> None:
+    """
+    Before a job is deleted, cancel each linked Appointment in GHL and locally so no live
+    calendar event is left behind without a job. Best effort per appointment: a GHL failure
+    is logged and never blocks the delete.
+    """
+    from jobtracker_app.job_appointment_utils import appointment_belongs_to_job_contact
+
+    for appt in Appointment.objects.filter(job_id=job.id).exclude(
+        appointment_status="cancelled"
+    ).select_related('contact'):
+        try:
+            # Linked to this job but another customer's appointment: leave it alone.
+            if not appointment_belongs_to_job_contact(appt, job):
+                continue
+            has_real_ghl_id = appt.ghl_appointment_id and not str(appt.ghl_appointment_id).startswith("local_")
+            if has_real_ghl_id:
+                ok, err = update_appointment_in_ghl(appt, changed_fields={"appointment_status": "cancelled"})
+                if not ok and not _is_stale_ghl_event_error(err):
+                    print(f"⚠️ [DELETE JOB] Could not cancel appointment {appt.id} in GHL: {err}")
+                    continue
+            appt.appointment_status = "cancelled"
+            appt._skip_ghl_sync = True
+            appt.save(update_fields=["appointment_status", "updated_at"])
+        except Exception as exc:
+            print(f"⚠️ [DELETE JOB] Cancel failed for appointment {appt.id}: {exc}")
+
+
 def cancel_linked_appointments_from_job(job) -> Tuple[bool, Optional[str]]:
     """
     When a job is cancelled, cancel every linked Appointment in GHL and locally.
     Local rows are updated only after the GHL updates succeed.
     """
-    appointments = list(Appointment.objects.filter(job_id=job.id))
+    from jobtracker_app.job_appointment_utils import appointment_belongs_to_job_contact
+
+    appointments = list(Appointment.objects.filter(job_id=job.id).select_related('contact'))
     if not appointments:
         return True, None
 
+    # Never cancel an appointment that is linked to this job but belongs to another customer.
     appointments_to_cancel = [
         appt for appt in appointments
-        if appt.appointment_status != "cancelled"
+        if appt.appointment_status != "cancelled" and appointment_belongs_to_job_contact(appt, job)
     ]
     if not appointments_to_cancel:
         return True, None

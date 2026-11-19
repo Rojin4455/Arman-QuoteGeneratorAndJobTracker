@@ -111,7 +111,7 @@ def get_assignee_ghl_ids_without_matching_appointment(job):
             calendar__name="Reccuring Service Calendar",
             location_id=location_id,
             assigned_user=assignment.user,
-        ).filter(appointment_contact_q(job)).exists()
+        ).exclude(appointment_status='cancelled').filter(appointment_contact_q(job)).exists()
         if not exists:
             without.append(assignment.user.ghl_user_id)
     return without

@@ -354,6 +354,12 @@ class JobViewSet(AccountScopedQuerysetMixin, viewsets.ModelViewSet):
         queryset = apply_job_filters(queryset, self.request, allow_to_convert=allow_to_convert)
         return queryset
 
+    def perform_destroy(self, instance):
+        """Cancel linked GHL appointments first so none is left live without a job."""
+        from .ghl_appointment_sync import cancel_linked_appointments_before_job_delete
+        cancel_linked_appointments_before_job_delete(instance)
+        instance.delete()
+
     def get_permissions(self):
         # AccountScopedPermission must run first so request.account is set (needed for create/update/delete and queryset filtering)
         # Only admins can create jobs; normal users can update/delete their own jobs

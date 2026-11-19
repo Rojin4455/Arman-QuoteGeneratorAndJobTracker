@@ -68,13 +68,16 @@ def _create_appointment_on_confirmed(sender, instance, created, **kwargs):
 
 @receiver(post_save, sender=Job)
 def _cancel_linked_appointments_on_job_cancelled(sender, instance, created, **kwargs):
-    """Cancel linked GHL appointments when a job transitions to cancelled."""
+    """
+    Cancel linked GHL appointments when a job leaves the schedule: cancelled, moved back
+    to pending, or put on hold. They are re-opened if the job is confirmed again.
+    """
     if created:
         return
 
     previous_status = getattr(instance, "_previous_status", None)
-    if instance.status == 'cancelled' and previous_status != 'cancelled':
-        print(f"🚫 [APPOINTMENT] Job transitioned to CANCELLED | job_id={instance.id} | previous={previous_status}")
+    if instance.status in ('cancelled', 'pending', 'onhold') and previous_status != instance.status:
+        print(f"🚫 [APPOINTMENT] Job transitioned to {instance.status.upper()} | job_id={instance.id} | previous={previous_status}")
         from .ghl_appointment_sync import cancel_linked_appointments_from_job
 
         ok, err = cancel_linked_appointments_from_job(instance)
