@@ -392,6 +392,14 @@ def update_appointment_in_ghl(
             else:
                 payload['calendarId'] = None
         
+        # Rescheduling: the full-payload path skips GHL slot validation, partial must too,
+        # otherwise GHL rejects job durations the calendar doesn't list
+        # ("Selected slot duration is not a valid duration option for this calendar").
+        if 'startTime' in payload or 'endTime' in payload:
+            payload['ignoreDateRange'] = True
+            payload['ignoreFreeSlotValidation'] = True
+            payload['toNotify'] = False
+
         # If address is being updated, add location config
         if 'address' in payload and payload['address']:
             payload['meetingLocationType'] = 'custom'
