@@ -221,12 +221,14 @@ def jobs_in_recurring_series_queryset(job, account):
     # Siblings are titled "<base> (2)", "<base> (3)"... and may lack repeat fields,
     # so match on the base title (trailing " (N)" stripped), not exact title/repeat.
     import re
-    base_title = re.sub(r'\s*\(\d+\)\s*$', '', job.title or '')
+    # Imported titles vary in spacing ("<base> (2)" vs "<base>  (2)"), so allow any
+    # whitespace before the "(N)" suffix.
+    base_title = re.sub(r'\s*\(\d+\)\s*$', '', job.title or '').strip()
     qs = Job.objects.filter(
         account=account,
         job_type='recurring',
         series_id__isnull=True,  # jobs that already have a series_id belong to their own series
-        title__regex=r'^' + re.escape(base_title) + r'( \(\d+\))?$',
+        title__regex=r'^\s*' + re.escape(base_title) + r'(\s*\(\d+\))?\s*$',
     )
     # Same customer + same base title could still be two series at different
     # addresses; keep them apart.
@@ -249,11 +251,13 @@ def user_can_delete_job_series(user, jobs_in_series):
     return jobs_in_series.filter(assignments__user=user).exists()
 
 
-def filter_jobs_by_delete_scope(jobs_qs, scope='all', cutoff_dt=None):
+def filter_jobs_by_delete_scope(jobs_qs, scope='all', cutoff_dt=None, anchor_job=None):
     """
     Filter series jobs by delete scope.
     - all: every job in the series
-    - future: jobs with scheduled_at >= cutoff (keeps past history)
+    - future: "this and future" — jobs scheduled at or after the anchor job
+      (the selected occurrence; falls back to cutoff_dt / now). Completed jobs
+      are always kept, including the anchor itself.
     """
     scope = (scope or 'all').strip().lower()
     if scope not in ('all', 'future'):
@@ -262,8 +266,16 @@ def filter_jobs_by_delete_scope(jobs_qs, scope='all', cutoff_dt=None):
     if scope == 'all':
         return jobs_qs, scope
 
-    cutoff = cutoff_dt or timezone.now()
-    return jobs_qs.filter(scheduled_at__gte=cutoff), scope
+    # Cut off at the selected occurrence, not at "now": the selected job may be in
+    # the past, and later pending occurrences should still go.
+    if anchor_job is not None and anchor_job.scheduled_at:
+        cutoff = anchor_job.scheduled_at
+    else:
+        cutoff = cutoff_dt or timezone.now()
+    future_qs = jobs_qs.filter(scheduled_at__gte=cutoff)
+    if anchor_job is not None and anchor_job.scheduled_at is None:
+        future_qs = jobs_qs.filter(Q(scheduled_at__gte=cutoff) | Q(pk=anchor_job.pk))
+    return future_qs.exclude(status='completed'), scope
 
 
 def delete_jobs_in_series(jobs_in_series, series_label, scope='all'):
@@ -471,7 +483,7 @@ class JobViewSet(AccountScopedQuerysetMixin, viewsets.ModelViewSet):
 
         Query params:
         - scope=all|future (default: all)
-          future = delete only jobs with scheduled_at >= now (keeps past history)
+          future = delete non-completed jobs scheduled at/after the selected job (keeps history and completed jobs)
         """
         job = self.get_object()
         account = getattr(request, 'account', None)
@@ -496,6 +508,7 @@ class JobViewSet(AccountScopedQuerysetMixin, viewsets.ModelViewSet):
                 jobs_in_series,
                 scope=scope,
                 cutoff_dt=timezone.now(),
+                anchor_job=job,
             )
         except ValidationError as exc:
             return Response(exc.detail, status=400)
@@ -1266,7 +1279,7 @@ class JobBySeriesView(APIView):
 
         Query params:
         - scope=all|future (default: all)
-          future = delete only jobs with scheduled_at >= now (keeps past history)
+          future = delete non-completed jobs scheduled at/after the selected job (keeps history and completed jobs)
         """
         user = request.user
         if not user.is_authenticated:
@@ -1292,11 +1305,22 @@ class JobBySeriesView(APIView):
             }, status=403)
 
         scope = request.query_params.get('scope', 'all')
+
+        # Optional: the occurrence the user picked for "this and future".
+        anchor_job = None
+        from_job_id = request.query_params.get('from_job_id')
+        if from_job_id:
+            try:
+                anchor_job = jobs_in_series.filter(pk=uuid.UUID(str(from_job_id))).first()
+            except (ValueError, AttributeError):
+                anchor_job = None
+
         try:
             jobs_to_delete, scope = filter_jobs_by_delete_scope(
                 jobs_in_series,
                 scope=scope,
                 cutoff_dt=timezone.now(),
+                anchor_job=anchor_job,
             )
         except ValidationError as exc:
             return Response(exc.detail, status=400)
