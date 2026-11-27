@@ -6,6 +6,36 @@ import calendar
 from service_app.models import User, Service, Appointment
 from accounts.models import Contact, Address
 
+
+# Largest sensible "repeat every" per unit. Staff were entering the number of
+# visits here (e.g. 19 x semi_annual = a visit every 9.5 years, last one in 2197).
+MAX_REPEAT_EVERY = {
+    'day': 30,
+    'week': 12,
+    'month': 12,
+    'quarter': 4,
+    'semi_annual': 2,
+    'year': 3,
+}
+REPEAT_UNIT_LABEL = {
+    'day': 'days', 'week': 'weeks', 'month': 'months',
+    'quarter': 'quarters', 'semi_annual': 'semi-annual periods', 'year': 'years',
+}
+
+
+def validate_repeat_every(repeat_every, repeat_unit):
+    """Reject a repeat interval that is too large for its unit."""
+    if repeat_every is None or not repeat_unit:
+        return
+    limit = MAX_REPEAT_EVERY.get(repeat_unit)
+    if limit is not None and repeat_every > limit:
+        raise serializers.ValidationError({
+            'repeat_every': (
+                f'"Repeat every" can be at most {limit} {REPEAT_UNIT_LABEL[repeat_unit]} '
+                f'(got {repeat_every}). Use "Occurrences" for the number of visits.'
+            )
+        })
+
 _PLACEHOLDER_NAMES = {'n/a', 'na', 'n.a.', 'n.a', 'none', 'unknown', 'customer'}
 
 
@@ -763,6 +793,15 @@ class JobSerializer(serializers.ModelSerializer):
                 'day_of_week': 'day_of_week should only be provided when repeat_unit is "week"'
             })
         
+        # Only when the recurrence actually changes: the edit form re-sends every field,
+        # and existing jobs saved before this limit must stay editable.
+        new_every = data.get('repeat_every', getattr(self.instance, 'repeat_every', None))
+        new_unit = data.get('repeat_unit', getattr(self.instance, 'repeat_unit', None))
+        if self.instance is None or (
+            new_every != self.instance.repeat_every or new_unit != self.instance.repeat_unit
+        ):
+            validate_repeat_every(new_every, new_unit)
+
         # Prevent status changes after completion
         if self.instance and self.instance.status == 'completed':
             new_status = data.get('status')
@@ -1100,7 +1139,9 @@ class JobSeriesCreateSerializer(serializers.Serializer):
             raise serializers.ValidationError({
                 'day_of_week': 'day_of_week should only be provided when repeat_unit is "week"'
             })
-        
+
+
+        validate_repeat_every(data.get('repeat_every'), repeat_unit)
         return data
 
     def _resolve_user_id(self, ref):
@@ -1172,6 +1213,7 @@ class JobConvertToSeriesSerializer(serializers.Serializer):
                 'day_of_week': 'day_of_week should only be provided when repeat_unit is "week"'
             })
 
+        validate_repeat_every(data.get('repeat_every'), repeat_unit)
         return data
 
     def save(self, **kwargs):
